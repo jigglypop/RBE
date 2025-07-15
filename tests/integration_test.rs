@@ -43,7 +43,7 @@ fn test_compression_and_decompression() {
     }
     
     // 압축
-    let compressed = PoincareMatrix::compress(&matrix, rows, cols);
+    let compressed = PoincareMatrix::deep_compress(&matrix, rows, cols);
     
     // 복원
     let reconstructed = compressed.decompress();
@@ -63,5 +63,5 @@ fn test_compression_and_decompression() {
     println!("  - 찾은 시드: {:?}", compressed.seed.decode());
     
     // 랜덤 탐색의 한계가 있으므로, RMSE가 적정 수준 이하인지 확인
-    assert!(rmse < 1.5, "RMSE should be reasonably low after compression.");
+    assert!(rmse < 1.0, "RMSE should be reasonably low after compression.");
 } 

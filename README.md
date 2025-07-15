@@ -127,13 +127,13 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running unittests src/main.rs (target\debug\deps\poincare_layer-5363a09480beebc3.exe)
+     Running unittests src/main.rs (target\debug\deps\poincare_layer-7c32169e623f5ec2.exe)
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests\decoding_test.rs (target\debug\deps\decoding_test-6fbb692aaff8a67b.exe)
+     Running tests\decoding_test.rs (target\debug\deps\decoding_test-704431a9b382bfca.exe)
 
 running 2 tests
 
@@ -143,8 +143,7 @@ running 2 tests
   [PASSED] All fields were decoded correctly.
 
 --- Test: Signed Integer (log2_c) Decoding ---
-test test_decoding_bit_unpacking ... ok
-  - Bits: 0b000 -> Decoded: 0
+test test_decoding_bit_unpacking ...   - Bits: 0b000 -> Decoded: 0
   - Bits: 0b001 -> Decoded: 1
   - Bits: 0b010 -> Decoded: 2
   - Bits: 0b011 -> Decoded: 3
@@ -153,11 +152,22 @@ test test_decoding_bit_unpacking ... ok
   - Bits: 0b110 -> Decoded: -2
   - Bits: 0b111 -> Decoded: -1
   [PASSED] 3-bit signed integer decoding is correct.
+ok
 test test_signed_int_decoding ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests\encoding_test.rs (target\debug\deps\encoding_test-a783d1a6b596b062.exe)
+     Running tests\deep_compress_test.rs (target\debug\deps\deep_compress_test-ff9b49af77ea746c.exe)
+
+running 1 test
+Deep compression starting... (this may take a while)
+New best: RMSE = 0.487322
+New best: RMSE = 0.486773
+test test_deep_compress ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests\encoding_test.rs (target\debug\deps\encoding_test-27bc7abb02f0e2ea.exe)
 
 running 2 tests
 
@@ -174,7 +184,7 @@ test test_encoding_bit_packing ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests\generation_test.rs (target\debug\deps\generation_test-e2ad4b7f74cbc3fc.exe)
+     Running tests\generation_test.rs (target\debug\deps\generation_test-b99bdaf5bfc95758.exe)
 
 running 2 tests
 
@@ -195,57 +205,88 @@ test test_weight_generation_logic ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests\integration_test.rs (target\debug\deps\integration_test-3f094b2fdf80d1fe.exe)
+     Running tests\integration_test.rs (target\debug\deps\integration_test-e73727d3ef620035.exe)
 
 running 2 tests
+Deep compression starting... (this may take a while)
 test test_encode_decode_exact ... ok
+New best: RMSE = 0.458545
+New best: RMSE = 0.458478
 
 --- 압축 및 복원 테스트 (32x32) ---
   - 원본 크기: 4096 bytes
   - 압축 크기: 8 bytes (1 x u64)
   - 압축률: 512:1
-  - 최종 RMSE: 0.884049
-  - 찾은 시드: DecodedParams { r: 0.7914379, theta: 3.869448, basis_id: 1, d_theta: 2, d_r: true, rot_code: 1, log2_c: -3, reserved: 0 }
+  - 최종 RMSE: 0.458478
+  - 찾은 시드: DecodedParams { r: 0.34771284, theta: 1.4046535, basis_id: 10, d_theta: 3, d_r: false, rot_code: 1, log2_c: 2, reserved: 0 }
 test test_compression_and_decompression ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
 
-     Running tests\math_test.rs (target\debug\deps\math_test-9619910a628d4c24.exe)
+     Running tests\math_test.rs (target\debug\deps\math_test-71a7686a8cdca689.exe) 
 
 running 4 tests
 
 --- Test: Angular Derivative Cycles ---
 
---- Test: Radial Derivative Cycles ---
+--- Test: Wave Functions ---
+  [PASSED] apply_angular_derivative cycles are correct.
 
 --- Test: Rotation Angle Calculation ---
   [PASSED] get_rotation_angle works correctly.
-
---- Test: Wave Functions ---
-  [PASSED] apply_radial_derivative works correctly.
-  [PASSED] apply_angular_derivative cycles are correct.
   [PASSED] sech and triangle_wave work correctly.
-test test_rotation_angle ... ok
-test test_radial_derivatives ... ok
+
+--- Test: Radial Derivative Cycles ---
+  [PASSED] apply_radial_derivative works correctly.
 test test_angular_derivatives ... ok
+test test_rotation_angle ... ok
 test test_wave_functions ... ok
+test test_radial_derivatives ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests\matrix_test.rs (target\debug\deps\matrix_test-e1c6d3784ad9e5c0.exe)
+     Running tests\matrix_test.rs (target\debug\deps\matrix_test-2605259a68e03923.exe)
 
 running 1 test
 
 --- Test: Matrix Compression and Decompression ---
+Deep compression starting... (this may take a while)
+New best: RMSE = 0.499972
+New best: RMSE = 0.499738
+New best: RMSE = 0.499218
   - Matrix size: 32x32
   - Original data size: 4096 bytes
+  - Original data size: 4096 bytes
   - Compressed data size: 8 bytes (1 x u64)
-  - Achieved RMSE: 0.534306
-  - Best seed found: DecodedParams { r: 0.45216697, theta: 0.20955694, basis_id: 0, d_theta: 3, d_r: false, rot_code: 2, log2_c: -1, reserved: 0 }
+  - Achieved RMSE: 0.499218
+  - Best seed found: DecodedParams { r: 0.728379, theta: 3.1115386, basis_id: 8, d_theta: 1, d_r: false, rot_code: 6, log2_c: -4, reserved: 0 }
+  [PASSED] Compression yields a reasonably low RMSE.
+test test_compression_and_decompression ... ok
+  - Compressed data size: 8 bytes (1 x u64)
+  - Achieved RMSE: 0.499218
+  - Best seed found: DecodedParams { r: 0.728379, theta: 3.1115386, basis_id: 8, d_theta: 1, d_r: false, rot_code: 6, log2_c: -4, reserved: 0 }
+  [PASSED] Compression yields a reasonably low RMSE.
+test test_compression_and_decompression ... ok
+  - Achieved RMSE: 0.499218
+  - Best seed found: DecodedParams { r: 0.728379, theta: 3.1115386, basis_id: 8, d_theta: 1, d_r: false, rot_code: 6, log2_c: -4, reserved: 0 }
   [PASSED] Compression yields a reasonably low RMSE.
 test test_compression_and_decompression ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+  [PASSED] Compression yields a reasonably low RMSE.
+test test_compression_and_decompression ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+   Doc-tests poincare_layer
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
    Doc-tests poincare_layer
 

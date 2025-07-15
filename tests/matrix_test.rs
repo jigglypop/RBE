@@ -22,7 +22,7 @@ fn test_compression_and_decompression() {
     
     // 2. 압축 실행
     // compress 함수는 내부에 랜덤 탐색을 포함하므로, 결과가 매번 다를 수 있음
-    let compressed = PoincareMatrix::compress(&source_matrix, rows, cols);
+    let compressed = PoincareMatrix::deep_compress(&source_matrix, rows, cols);
     
     // 3. 복원 실행
     let reconstructed = compressed.decompress();
@@ -44,9 +44,6 @@ fn test_compression_and_decompression() {
     // 6. 검증
     // 랜덤 탐색의 한계로 완벽한 복원은 불가능하지만,
     // 생성된 패턴에 대해 RMSE가 특정 임계값(1.5) 미만이어야 함을 확인
-    assert!(
-        rmse < 1.5,
-        "RMSE ({}) should be reasonably low after compression.", rmse
-    );
+    assert!(rmse < 1.0, "RMSE ({}) should be reasonably low after compression.", rmse);
     println!("  [PASSED] Compression yields a reasonably low RMSE.");
 } 

@@ -1,4 +1,5 @@
 use std::f32::consts::PI;
+use crate::types::Packed64;
 
 /// 회전 각도 계산
 pub fn get_rotation_angle(rot_code: u8) -> f32 {
@@ -125,4 +126,123 @@ pub fn morlet_wavelet(r: f32, theta: f32, freq: f32) -> f32 {
     let gaussian = (-0.5 * (r / sigma).powi(2)).exp();
     let oscillation = (freq * theta).cos();
     gaussian * oscillation
+} 
+
+use rustfft::{FftPlanner, num_complex::Complex};
+
+pub fn analyze_global_pattern(matrix: &[f32]) -> Vec<f32> {
+    let mean = matrix.iter().sum::<f32>() / matrix.len() as f32;
+    let variance = matrix.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / matrix.len() as f32;
+    vec![mean, variance]
+}
+
+pub fn suggest_basis_functions(features: &Vec<f32>) -> Vec<u8> {
+    let variance = features[1];
+    if variance > 0.5 { (0..4).collect() } else { (4..12).collect() }
+}
+
+pub fn optimize_for_periodic(matrix: &[f32], _basis_id: u8, rows: usize, cols: usize) -> (f32, f32) {
+    let mut complex_matrix: Vec<Vec<Complex<f32>>> = (0..rows).map(|i| {
+        (0..cols).map(|j| Complex { re: matrix[i * cols + j], im: 0.0 }).collect()
+    }).collect();
+    let fft = FftPlanner::new().plan_fft_forward(cols);
+    for row in complex_matrix.iter_mut() {
+        fft.process(row);
+    }
+    let fft_col = FftPlanner::new().plan_fft_forward(rows);
+    for j in 0..cols {
+        let mut col: Vec<Complex<f32>> = (0..rows).map(|i| complex_matrix[i][j]).collect();
+        fft_col.process(&mut col);
+        for i in 0..rows {
+            complex_matrix[i][j] = col[i];
+        }
+    }
+    let mut max_mag = 0.0;
+    let mut peak_kx = 0.0;
+    let mut peak_ky = 0.0;
+    for i in 0..rows {
+        for j in 0..cols {
+            let mag = complex_matrix[i][j].norm();
+            if mag > max_mag {
+                max_mag = mag;
+                peak_ky = i as f32;
+                peak_kx = j as f32;
+            }
+        }
+    }
+    let r = (peak_kx.powi(2) + peak_ky.powi(2)).sqrt() / (rows.max(cols) as f32);
+    let theta = peak_ky.atan2(peak_kx);
+    (r.min(0.99), theta)
+}
+
+pub fn optimize_for_bessel(matrix: &[f32], _basis_id: u8, rows: usize, cols: usize) -> (f32, f32) {
+    let mut radial_sum = vec![0.0; (rows/2) as usize];
+    let mut counts = vec![0; (rows/2) as usize];
+    for i in 0..rows {
+        for j in 0..cols {
+            let x = j as f32 - cols as f32 / 2.0;
+            let y = i as f32 - rows as f32 / 2.0;
+            let dist = (x*x + y*y).sqrt() as usize;
+            if dist < radial_sum.len() {
+                radial_sum[dist] += matrix[i*cols + j];
+                counts[dist] += 1;
+            }
+        }
+    }
+    let radial_profile: Vec<f32> = radial_sum.iter().zip(counts.iter()).map(|(&sum, &count)| if count > 0 { sum / count as f32 } else { 0.0 }).collect();
+    let mut first_zero = 1.0;
+    for (i, &val) in radial_profile.iter().enumerate().skip(1) {
+        if val * radial_profile[i-1] < 0.0 {
+            first_zero = i as f32 / radial_profile.len() as f32;
+            break;
+        }
+    }
+    (first_zero.min(0.99), 0.0)
+}
+
+pub fn optimize_for_special(matrix: &[f32], basis_id: u8, rows: usize, cols: usize) -> (f32, f32) {
+    optimize_for_periodic(matrix, basis_id, rows, cols)
+}
+
+pub fn compute_sampled_rmse(matrix: &[f32], seed: Packed64, rows: usize, cols: usize) -> f32 {
+    let mut error = 0.0;
+    let samples = 100;
+    for _ in 0..samples {
+        let i = rand::random::<usize>() % rows;
+        let j = rand::random::<usize>() % cols;
+        let original = matrix[i * cols + j];
+        let reconstructed = seed.compute_weight(i, j, rows, cols);
+        error += (original - reconstructed).powi(2);
+    }
+    (error / samples as f32).sqrt()
+}
+
+pub fn compute_full_rmse(matrix: &[f32], seed: Packed64, rows: usize, cols: usize) -> f32 {
+    let mut error = 0.0;
+    for i in 0..rows {
+        for j in 0..cols {
+            let original = matrix[i * cols + j];
+            let reconstructed = seed.compute_weight(i, j, rows, cols);
+            error += (original - reconstructed).powi(2);
+        }
+    }
+    (error / (rows * cols) as f32).sqrt()
+}
+
+pub fn local_search_exhaustive(mut seed: Packed64, matrix: &[f32], rows: usize, cols: usize) -> Packed64 {
+    let mut best_rmse = compute_full_rmse(matrix, seed, rows, cols);
+    let mut best_seed = seed;
+    let deltas = [-0.01, 0.01];
+    for _ in 0..100 {
+        let mut params = best_seed.decode();
+        params.r = (params.r + deltas[rand::random::<usize>() % 2] as f32).clamp(0.0, 0.999);
+        params.theta = (params.theta + deltas[rand::random::<usize>() % 2] as f32).rem_euclid(2.0 * std::f32::consts::PI);
+        let new_seed = Packed64::new(params.r, params.theta, params.basis_id, params.d_theta, params.d_r, params.rot_code, params.log2_c, params.reserved);
+        let new_rmse = compute_full_rmse(matrix, new_seed, rows, cols);
+        if new_rmse < best_rmse {
+            best_rmse = new_rmse;
+            best_seed = new_seed;
+        }
+    }
+    best_seed
 } 
