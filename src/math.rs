@@ -46,7 +46,7 @@ pub fn apply_radial_derivative(r: f32, d_r: bool, basis_id: u8) -> f32 {
     }
 }
 
-// 베셀 함수들 (이전과 동일)
+// 베셀 함수들
 pub fn bessel_j0(x: f32) -> f32 {
     let ax = x.abs();
     if ax < 8.0 {
