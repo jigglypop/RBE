@@ -1,5 +1,6 @@
 use std::f32::consts::PI;
 use crate::types::Packed64;
+use noise::{NoiseFn, Perlin};
 
 /// 회전 각도 계산
 pub fn get_rotation_angle(rot_code: u8) -> f32 {
@@ -130,78 +131,104 @@ pub fn morlet_wavelet(r: f32, theta: f32, freq: f32) -> f32 {
 
 use rustfft::{FftPlanner, num_complex::Complex};
 
+// Global pattern analysis with FFT and stats
 pub fn analyze_global_pattern(matrix: &[f32]) -> Vec<f32> {
+    let mut spectrum: Vec<Complex<f32>> = matrix.iter().map(|&x| Complex { re: x, im: 0.0 }).collect();
+    let fft = FftPlanner::new().plan_fft_forward(matrix.len());
+    fft.process(&mut spectrum);
+    
     let mean = matrix.iter().sum::<f32>() / matrix.len() as f32;
     let variance = matrix.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / matrix.len() as f32;
-    vec![mean, variance]
-}
-
-pub fn suggest_basis_functions(features: &Vec<f32>) -> Vec<u8> {
-    let variance = features[1];
-    if variance > 0.5 { (0..4).collect() } else { (4..12).collect() }
-}
-
-pub fn optimize_for_periodic(matrix: &[f32], _basis_id: u8, rows: usize, cols: usize) -> (f32, f32) {
-    let mut complex_matrix: Vec<Vec<Complex<f32>>> = (0..rows).map(|i| {
-        (0..cols).map(|j| Complex { re: matrix[i * cols + j], im: 0.0 }).collect()
-    }).collect();
-    let fft = FftPlanner::new().plan_fft_forward(cols);
-    for row in complex_matrix.iter_mut() {
-        fft.process(row);
-    }
-    let fft_col = FftPlanner::new().plan_fft_forward(rows);
-    for j in 0..cols {
-        let mut col: Vec<Complex<f32>> = (0..rows).map(|i| complex_matrix[i][j]).collect();
-        fft_col.process(&mut col);
-        for i in 0..rows {
-            complex_matrix[i][j] = col[i];
-        }
-    }
+    
     let mut max_mag = 0.0;
-    let mut peak_kx = 0.0;
-    let mut peak_ky = 0.0;
-    for i in 0..rows {
-        for j in 0..cols {
-            let mag = complex_matrix[i][j].norm();
-            if mag > max_mag {
-                max_mag = mag;
-                peak_ky = i as f32;
-                peak_kx = j as f32;
-            }
+    let mut peak_freq = 0.0;
+    for &val in &spectrum {
+        let mag = val.norm();
+        if mag > max_mag {
+            max_mag = mag;
+            peak_freq = mag / spectrum.len() as f32;
         }
     }
-    let r = (peak_kx.powi(2) + peak_ky.powi(2)).sqrt() / (rows.max(cols) as f32);
-    let theta = peak_ky.atan2(peak_kx);
+    vec![mean, variance, peak_freq, max_mag]
+}
+
+// Suggest bases based on features
+pub fn suggest_basis_functions(features: &Vec<f32>) -> Vec<u8> {
+    let mut suggestions = Vec::new();
+    if features[2] > 0.1 { // High frequency -> periodic
+        suggestions.extend(0..=3);
+    }
+    if features[1] > 0.5 { // High variance -> bessel
+        suggestions.extend(4..=7);
+    }
+    suggestions.extend(8..=11); // Always include special
+    suggestions
+}
+
+pub fn optimize_for_periodic(matrix: &[f32], _basis_id: u8, _rows: usize, cols: usize) -> (f32, f32) {
+    let mut spectrum: Vec<Complex<f32>> = matrix.iter().map(|&x| Complex { re: x, im: 0.0 }).collect();
+    let fft = FftPlanner::new().plan_fft_forward(matrix.len());
+    fft.process(&mut spectrum);
+    let mut max_mag = 0.0;
+    let mut peak_idx = 0;
+    for (i, &val) in spectrum.iter().enumerate() {
+        let mag = val.norm();
+        if mag > max_mag {
+            max_mag = mag;
+            peak_idx = i;
+        }
+    }
+    let kx = (peak_idx % cols) as f32;
+    let ky = (peak_idx / cols) as f32;
+    let r = (kx * kx + ky * ky).sqrt() / matrix.len() as f32;
+    let theta = ky.atan2(kx);
     (r.min(0.99), theta)
 }
 
-pub fn optimize_for_bessel(matrix: &[f32], _basis_id: u8, rows: usize, cols: usize) -> (f32, f32) {
-    let mut radial_sum = vec![0.0; (rows/2) as usize];
-    let mut counts = vec![0; (rows/2) as usize];
-    for i in 0..rows {
-        for j in 0..cols {
-            let x = j as f32 - cols as f32 / 2.0;
-            let y = i as f32 - rows as f32 / 2.0;
-            let dist = (x*x + y*y).sqrt() as usize;
-            if dist < radial_sum.len() {
-                radial_sum[dist] += matrix[i*cols + j];
-                counts[dist] += 1;
+// Optimize for Bessel: find r, theta that match radial decay
+pub fn optimize_for_bessel(matrix: &[f32], basis_id: u8, rows: usize, cols: usize) -> (f32, f32) {
+    let mut best_r = 0.5;
+    let mut best_theta = 0.0;
+    let mut min_rmse = f32::INFINITY;
+    
+    for r_trial in (1..99).step_by(5) {
+        let r = r_trial as f32 / 100.0;
+        for theta_trial in (0..360).step_by(10) {
+            let theta = theta_trial as f32 * PI / 180.0;
+            // 새로운 시그니처: 기본값으로 설정
+            let seed = Packed64::new(r, theta, basis_id, 1, 1, 1.0, 0.0, 0, 0.0, 0, false, 0);
+            let rmse = compute_sampled_rmse(matrix, seed, rows, cols);
+            if rmse < min_rmse {
+                min_rmse = rmse;
+                best_r = r;
+                best_theta = theta;
             }
         }
     }
-    let radial_profile: Vec<f32> = radial_sum.iter().zip(counts.iter()).map(|(&sum, &count)| if count > 0 { sum / count as f32 } else { 0.0 }).collect();
-    let mut first_zero = 1.0;
-    for (i, &val) in radial_profile.iter().enumerate().skip(1) {
-        if val * radial_profile[i-1] < 0.0 {
-            first_zero = i as f32 / radial_profile.len() as f32;
-            break;
-        }
-    }
-    (first_zero.min(0.99), 0.0)
+    (best_r, best_theta)
 }
 
+// Similar for special functions
 pub fn optimize_for_special(matrix: &[f32], basis_id: u8, rows: usize, cols: usize) -> (f32, f32) {
-    optimize_for_periodic(matrix, basis_id, rows, cols)
+    let mut best_r = 0.5;
+    let mut best_theta = 0.0;
+    let mut min_rmse = f32::INFINITY;
+    
+    for r_trial in (1..99).step_by(5) {
+        let r = r_trial as f32 / 100.0;
+        for theta_trial in (0..360).step_by(10) {
+            let theta = theta_trial as f32 * PI / 180.0;
+            // 새로운 시그니처: 기본값으로 설정
+            let seed = Packed64::new(r, theta, basis_id, 1, 1, 1.0, 0.0, 0, 0.0, 0, false, 0);
+            let rmse = compute_sampled_rmse(matrix, seed, rows, cols);
+            if rmse < min_rmse {
+                min_rmse = rmse;
+                best_r = r;
+                best_theta = theta;
+            }
+        }
+    }
+    (best_r, best_theta)
 }
 
 pub fn compute_sampled_rmse(matrix: &[f32], seed: Packed64, rows: usize, cols: usize) -> f32 {
@@ -229,20 +256,120 @@ pub fn compute_full_rmse(matrix: &[f32], seed: Packed64, rows: usize, cols: usiz
     (error / (rows * cols) as f32).sqrt()
 }
 
-pub fn local_search_exhaustive(mut seed: Packed64, matrix: &[f32], rows: usize, cols: usize) -> Packed64 {
-    let mut best_rmse = compute_full_rmse(matrix, seed, rows, cols);
+// Local exhaustive search around seed
+pub fn local_search_exhaustive(seed: Packed64, matrix: &[f32], rows: usize, cols: usize) -> Packed64 {
+    let params = seed.decode();
     let mut best_seed = seed;
-    let deltas = [-0.01, 0.01];
-    for _ in 0..100 {
-        let mut params = best_seed.decode();
-        params.r = (params.r + deltas[rand::random::<usize>() % 2] as f32).clamp(0.0, 0.999);
-        params.theta = (params.theta + deltas[rand::random::<usize>() % 2] as f32).rem_euclid(2.0 * std::f32::consts::PI);
-        let new_seed = Packed64::new(params.r, params.theta, params.basis_id, params.d_theta, params.d_r, params.rot_code, params.log2_c, params.reserved);
-        let new_rmse = compute_full_rmse(matrix, new_seed, rows, cols);
-        if new_rmse < best_rmse {
-            best_rmse = new_rmse;
-            best_seed = new_seed;
+    let mut best_rmse = compute_full_rmse(matrix, seed, rows, cols);
+    
+    // Fine-tune r and theta
+    for dr in -5..=5 {
+        let r_new = (params.r + dr as f32 * 0.01).clamp(0.01, 0.99);
+        for dtheta in -5..=5 {
+            let theta_new = (params.theta + dtheta as f32 * 0.1) % (2.0 * PI);
+            let new_seed = Packed64::new(
+                r_new, theta_new, params.basis_id, 
+                params.freq_x, params.freq_y,
+                params.amplitude, params.offset,
+                params.pattern_mix, params.decay_rate,
+                params.d_theta, params.d_r, params.log2_c
+            );
+            let rmse = compute_full_rmse(matrix, new_seed, rows, cols);
+            if rmse < best_rmse {
+                best_rmse = rmse;
+                best_seed = new_seed;
+            }
         }
     }
+    
+    // Try nearby discrete params
+    for d_basis in -1..=1 {
+        let basis_new = ((params.basis_id as i8 + d_basis).clamp(0, 11)) as u8;
+        for d_dtheta in -1..=1 {
+            let dtheta_new = ((params.d_theta as i8 + d_dtheta).clamp(0, 3)) as u8;
+            let new_seed = Packed64::new(
+                params.r, params.theta, basis_new,
+                params.freq_x, params.freq_y,
+                params.amplitude, params.offset,
+                params.pattern_mix, params.decay_rate,
+                dtheta_new, params.d_r, params.log2_c
+            );
+            let rmse = compute_full_rmse(matrix, new_seed, rows, cols);
+            if rmse < best_rmse {
+                best_rmse = rmse;
+                best_seed = new_seed;
+            }
+        }
+    }
+    
     best_seed
+} 
+
+/// Reserved 비트 활용: scale 파라미터 (0-3)
+pub fn get_scale_factor(scale_code: u8) -> f32 {
+    match scale_code & 0x3 {
+        0 => 1.0,
+        1 => 1.5,
+        2 => 2.0,
+        3 => 0.5,
+        _ => 1.0,
+    }
+}
+
+/// Reserved 비트 활용: frequency modulation 파라미터 (0-3)
+pub fn get_freq_modulation(freq_code: u8) -> f32 {
+    match freq_code & 0x3 {
+        0 => 1.0,
+        1 => 1.25,
+        2 => 1.5,
+        3 => 0.75,
+        _ => 1.0,
+    }
+}
+
+/// Reserved 비트 활용: phase shift 파라미터 (0-3)
+pub fn get_phase_shift(phase_code: u8) -> f32 {
+    match phase_code & 0x3 {
+        0 => 0.0,
+        1 => PI / 4.0,
+        2 => PI / 2.0,
+        3 => 3.0 * PI / 4.0,
+        _ => 0.0,
+    }
+} 
+
+/// 2D 가우시안 함수
+pub fn gaussian_2d(x: f32, y: f32, sigma: f32) -> f32 {
+    let r_squared = x * x + y * y;
+    (-r_squared / (2.0 * sigma * sigma)).exp()
+}
+
+/// 체커보드 패턴
+pub fn checkerboard(x: f32, y: f32) -> f32 {
+    let x_checker = (x * PI).sin().signum();
+    let y_checker = (y * PI).sin().signum();
+    x_checker * y_checker
+}
+
+/// 리플(물결) 패턴
+pub fn ripple(r: f32, theta: f32) -> f32 {
+    (r * 5.0).sin() * theta.cos()
+}
+
+/// 나선형 패턴
+pub fn spiral(r: f32, theta: f32) -> f32 {
+    ((r * 10.0 + theta).rem_euclid(2.0 * PI) / PI - 1.0).tanh()
+}
+
+/// Gabor 2D 필터
+pub fn gabor_2d(x: f32, y: f32, freq_x: f32, freq_y: f32) -> f32 {
+    let gaussian = gaussian_2d(x, y, 0.3);
+    let sinusoid = (2.0 * PI * (x * freq_x + y * freq_y)).cos();
+    gaussian * sinusoid
+} 
+
+/// 2D 펄린 노이즈
+pub fn perlin_2d(x: f32, y: f32, freq: f32) -> f32 {
+    let perlin = Perlin::new(1); // 시드 1로 고정하여 재현성 보장
+    perlin.get([x as f64 * freq as f64, y as f64 * freq as f64]) as f32
 } 

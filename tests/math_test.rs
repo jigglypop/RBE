@@ -1,8 +1,8 @@
 //! `math.rs`에 대한 단위 테스트
 
-use poincare_layer::math::*;
-use std::f32::consts::PI;
+use poincare_layer::math::{self, perlin_2d, sech, triangle_wave, apply_angular_derivative, apply_radial_derivative, get_rotation_angle};
 use approx::assert_relative_eq;
+use std::f32::consts::PI;
 
 #[test]
 fn test_rotation_angle() {
@@ -64,4 +64,16 @@ fn test_wave_functions() {
     assert_relative_eq!(triangle_wave(3.0 * PI / 2.0), 1.0);
 
     println!("  [PASSED] sech and triangle_wave work correctly.");
+}
+
+#[test]
+fn test_perlin_noise() {
+    println!("\n--- Test: Perlin Noise Generation ---");
+    let val1 = perlin_2d(0.5, 0.5, 1.0);
+    let val2 = perlin_2d(0.5, 0.5, 1.0);
+    assert_eq!(val1, val2, "Perlin noise should be deterministic");
+    
+    let val3 = perlin_2d(0.6, 0.6, 1.0);
+    assert_ne!(val1, val3, "Perlin noise should vary with coordinates");
+    println!("  [PASSED] Perlin noise function is deterministic and varies with input.");
 } 

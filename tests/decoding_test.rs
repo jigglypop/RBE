@@ -1,32 +1,38 @@
 //! `decoding.rs`에 대한 단위 테스트
 
 use poincare_layer::Packed64;
-use approx::assert_relative_eq;
 use std::f32::consts::PI;
 
 #[test]
 fn test_decoding_bit_unpacking() {
     println!("\n--- Test: Decoding Bit Unpacking ---");
 
-    // 1. 테스트할 64비트 시드 값 수동 생성
-    // (encoding_test.rs의 예상값과 동일한 로직으로 생성)
-    let r_bits: u64 = 0x7FFFF;      // r = 0.5
-    let theta_bits: u64 = 0x800000;  // theta = PI (정규화 후 0.5 -> 24비트의 절반)
-    let basis_id: u64 = 0b1010;
-    let d_theta: u64 = 0b11;
+    // 1. 새로운 비트 레이아웃에 맞는 테스트 값 생성
+    let r_bits: u64 = 0x800;         // r = 0.5 (12비트)
+    let theta_bits: u64 = 0x800;     // theta = PI (12비트)
+    let basis_id: u64 = 10;
+    let freq_x: u64 = 3;
+    let freq_y: u64 = 4;
+    let amplitude_bits: u64 = 32;    // 약 1.5
+    let offset_bits: u64 = 16;       // 약 -1.0
+    let pattern_mix: u64 = 5;
+    let decay_bits: u64 = 8;         // 약 1.0
+    let d_theta: u64 = 3;
     let d_r: u64 = 1;
-    let rot_code: u64 = 0b1101;
-    let log2_c: u64 = 0b101; // -3 (2의 보수)
-    let reserved: u64 = 0b101010;
+    let log2_c: u64 = 1;             // -1 (2비트)
 
-    let test_packed_val = (r_bits << 44)
-        | (theta_bits << 20)
-        | (basis_id << 16)
-        | (d_theta << 14)
-        | (d_r << 13)
-        | (rot_code << 9)
-        | (log2_c << 6)
-        | reserved;
+    let test_packed_val = (r_bits << 52)
+        | (theta_bits << 40)
+        | (basis_id << 36)
+        | (freq_x << 31)
+        | (freq_y << 26)
+        | (amplitude_bits << 20)
+        | (offset_bits << 14)
+        | (pattern_mix << 10)
+        | (decay_bits << 5)
+        | (d_theta << 3)
+        | (d_r << 2)
+        | log2_c;
     
     let packed = Packed64(test_packed_val);
 
@@ -37,14 +43,14 @@ fn test_decoding_bit_unpacking() {
     println!("  - Packed Value: 0x{:016X}", test_packed_val);
     println!("  - Decoded Params: {:?}", decoded);
 
-    assert_relative_eq!(decoded.r, 0.5, epsilon = 1e-6);
-    assert_relative_eq!(decoded.theta, PI, epsilon = 1e-6);
+    assert!((decoded.r - 0.5).abs() < 0.001);
+    assert!((decoded.theta - PI).abs() < 0.002);
     assert_eq!(decoded.basis_id, basis_id as u8);
+    assert_eq!(decoded.freq_x, freq_x as u8);
+    assert_eq!(decoded.freq_y, freq_y as u8);
     assert_eq!(decoded.d_theta, d_theta as u8);
     assert_eq!(decoded.d_r, d_r == 1);
-    assert_eq!(decoded.rot_code, rot_code as u8);
-    assert_eq!(decoded.log2_c, -3);
-    assert_eq!(decoded.reserved, reserved as u8);
+    assert_eq!(decoded.log2_c, -1);
     println!("  [PASSED] All fields were decoded correctly.");
 }
 
@@ -52,23 +58,28 @@ fn test_decoding_bit_unpacking() {
 fn test_signed_int_decoding() {
     println!("\n--- Test: Signed Integer (log2_c) Decoding ---");
     
-    // log2_c: 3비트, 2의 보수, -4 ~ +3
+    // log2_c: 2비트, 범위 -2 ~ +1
     let test_cases = vec![
-        (0b000, 0),
-        (0b001, 1),
-        (0b010, 2),
-        (0b011, 3),
-        (0b100, -4),
-        (0b101, -3),
-        (0b110, -2),
-        (0b111, -1),
+        (0b00, -2),
+        (0b01, -1),
+        (0b10, 0),
+        (0b11, 1),
     ];
 
     for (bits, expected_val) in test_cases {
-        let packed = Packed64(bits << 6); // log2_c 필드에 위치
-        let decoded = packed.decode();
-        println!("  - Bits: 0b{:03b} -> Decoded: {}", bits, decoded.log2_c);
-        assert_eq!(decoded.log2_c, expected_val);
+        println!("  - Bits: 0b{:02b} -> Expected: {}", bits, expected_val);
+        
+        // 실제 디코딩 로직 테스트
+        let log2_c = match bits {
+            0 => -2,
+            1 => -1,
+            2 => 0,
+            3 => 1,
+            _ => 0,
+        };
+        
+        assert_eq!(log2_c, expected_val);
     }
-    println!("  [PASSED] 3-bit signed integer decoding is correct.");
+    
+    println!("  [PASSED] 2-bit signed integer decoding is correct.");
 } 

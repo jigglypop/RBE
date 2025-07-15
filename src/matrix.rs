@@ -1,156 +1,171 @@
 use crate::types::{PoincareMatrix, Packed64};
-use crate::math::{analyze_global_pattern, suggest_basis_functions,compute_sampled_rmse, local_search_exhaustive, compute_full_rmse};
-use rand::{Rng, seq::SliceRandom};
+use crate::math::compute_full_rmse;
+use rayon::prelude::*;
+use rand::Rng;
 
 impl PoincareMatrix {
-    /// FP32 행렬을 64비트 시드로 압축 (문서의 방식)
-    pub fn compress(matrix: &[f32], rows: usize, cols: usize) -> Self {
-        use rand::Rng;
+    /// 시드로부터 행렬 복원
+    pub fn decompress(&self) -> Vec<f32> {
+        let mut matrix = vec![0.0; self.rows * self.cols];
+        for i in 0..self.rows {
+            for j in 0..self.cols {
+                 matrix[i * self.cols + j] = self.seed.compute_weight(i, j, self.rows, self.cols);
+            }
+        }
+        matrix
+    }
+
+    /// 유전 알고리즘을 사용한 압축
+    pub fn compress_with_genetic_algorithm(
+        matrix: &[f32],
+        rows: usize,
+        cols: usize,
+        population_size: usize,
+        generations: usize,
+        mutation_rate: f32,
+    ) -> Self {
         let mut rng = rand::thread_rng();
-        
-        // 행렬에서 가장 큰 값의 위치를 찾아 패턴 추정
-        let mut max_val = 0.0;
-        let mut max_i = 0;
-        let mut max_j = 0;
-        
-        for i in 0..rows {
-            for j in 0..cols {
-                let val = matrix[i * cols + j].abs();
-                if val > max_val {
-                    max_val = val;
-                    max_i = i;
-                    max_j = j;
+
+        // 1. 초기 집단 생성
+        let mut population: Vec<Packed64> = (0..population_size)
+            .map(|_| {
+                let r: f32 = rng.gen();
+                let theta: f32 = rng.gen_range(0.0..2.0 * std::f32::consts::PI);
+                let basis_id: u8 = rng.gen_range(0..13);
+                let freq_x: u8 = rng.gen_range(1..32);
+                let freq_y: u8 = rng.gen_range(1..32);
+                let amplitude: f32 = rng.gen_range(0.25..4.0);
+                let offset: f32 = rng.gen_range(-2.0..2.0);
+                let pattern_mix: u8 = rng.gen_range(0..16);
+                let decay_rate: f32 = rng.gen_range(0.0..4.0);
+                let d_theta: u8 = rng.gen_range(0..4);
+                let d_r: bool = rng.gen();
+                let log2_c: i8 = rng.gen_range(-2..=1);
+                Packed64::new(r, theta, basis_id, freq_x, freq_y, amplitude, offset, pattern_mix, decay_rate, d_theta, d_r, log2_c)
+            })
+            .collect();
+
+        let mut best_overall_seed = population[0];
+        let mut best_overall_rmse = f32::INFINITY;
+        let mut stagnation_counter = 0;
+        let mut current_mutation_rate = mutation_rate;
+
+        // 2. 세대 반복
+        for gen in 0..generations {
+            let mut fitness_scores: Vec<(f32, Packed64)> = population
+                .par_iter()
+                .map(|seed| (compute_full_rmse(matrix, *seed, rows, cols), *seed))
+                .collect();
+            
+            fitness_scores.par_sort_by(|a, b| a.0.total_cmp(&b.0));
+
+            if fitness_scores.is_empty() {
+                // 집단이 비어있으면 다음 세대로 넘어감
+                population = Vec::new(); // Or handle appropriately
+                continue;
+            }
+
+            if fitness_scores[0].0 < best_overall_rmse {
+                best_overall_rmse = fitness_scores[0].0;
+                best_overall_seed = fitness_scores[0].1;
+                println!("Gen {}: New best RMSE = {:.6} (mutation_rate: {})", gen, best_overall_rmse, current_mutation_rate);
+                stagnation_counter = 0; // 개선되었으므로 카운터 리셋
+                current_mutation_rate = mutation_rate; // 돌연변이율 초기화
+            } else {
+                stagnation_counter += 1;
+            }
+
+            // 10세대 동안 개선이 없으면 돌연변이율을 5배 높여 탐색 공간 확장
+            if stagnation_counter > 10 {
+                current_mutation_rate = mutation_rate * 5.0;
+                stagnation_counter = 0; // 다시 탐색 시작
+            }
+            
+            let sorted_population: Vec<Packed64> = fitness_scores
+                .into_iter()
+                .map(|(_, seed)| seed)
+                .collect();
+            
+            let mut next_generation = Vec::with_capacity(population_size);
+            let elite_count = (population_size as f32 * 0.1).ceil() as usize;
+            next_generation.extend_from_slice(&sorted_population[..elite_count]);
+            
+            while next_generation.len() < population_size {
+                let parent1 = selection(&sorted_population, &mut rng);
+                let parent2 = selection(&sorted_population, &mut rng);
+                let (child1, child2) = crossover(parent1, parent2, &mut rng);
+                next_generation.push(child1);
+                if next_generation.len() < population_size {
+                    next_generation.push(child2);
                 }
             }
-        }
-        
-        // 최대값 위치에서 극좌표 추정
-        let x = 2.0 * (max_j as f32) / ((cols - 1) as f32) - 1.0;
-        let y = 2.0 * (max_i as f32) / ((rows - 1) as f32) - 1.0;
-        let r = (x * x + y * y).sqrt().min(0.9);
-        let theta = y.atan2(x).rem_euclid(2.0 * std::f32::consts::PI);
-        
-        // 랜덤 탐색으로 최적화
-        let mut best_seed = Packed64::new(r, theta, 0, 0, false, 0, 0, 0);
-        let mut min_error = f32::INFINITY;
-        
-        for _ in 0..10000 {
-            let r_test = rng.gen_range(0.1..0.95);
-            let theta_test = rng.gen_range(0.0..2.0 * std::f32::consts::PI);
-            let basis_id = rng.gen_range(0..4);
-            let d_theta = rng.gen_range(0..4);
-            let d_r = rng.gen::<bool>();
-            let rot_code = rng.gen_range(0..10);
-            let log2_c = rng.gen_range(-3..4);
-            
-            let test_seed = Packed64::new(
-                r_test, theta_test, basis_id, d_theta, d_r, rot_code, log2_c, 0
-            );
-            
-            let mut error = 0.0;
-            for i in 0..rows.min(10) {  // 빠른 평가를 위해 일부만
-                for j in 0..cols.min(10) {
-                    let original = matrix[i * cols + j];
-                    let reconstructed = test_seed.compute_weight(i, j, rows, cols);
-                    error += (original - reconstructed).powi(2);
-                }
+
+            for individual in next_generation.iter_mut().skip(elite_count) {
+                mutate(individual, current_mutation_rate, &mut rng);
             }
-            
-            if error < min_error {
-                min_error = error;
-                best_seed = test_seed;
-            }
+
+            population = next_generation;
         }
-        
+
         PoincareMatrix {
-            seed: best_seed,
+            seed: best_overall_seed,
             rows,
             cols,
         }
     }
-    
-    /// 시드로부터 행렬 복원
-    pub fn decompress(&self) -> Vec<f32> {
-        let mut matrix = vec![0.0; self.rows * self.cols];
-        
-        for i in 0..self.rows {
-            for j in 0..self.cols {
-                matrix[i * self.cols + j] = self.seed.compute_weight(i, j, self.rows, self.cols);
-            }
-        }
-        
-        matrix
-    }
-
-    pub fn deep_compress(matrix: &[f32], rows: usize, cols: usize) -> Self {
-        println!("Deep compression starting... (this may take a while)");
-        // Stage 1: Global pattern analysis
-        let pattern_features = analyze_global_pattern(matrix);
-        let candidate_bases = suggest_basis_functions(&pattern_features);
-        // Stage 2: Generate candidates with GA
-        let mut rng = rand::thread_rng();
-        let mut population: Vec<(Packed64, f32)> = (0..100).map(|_| {
-            let r = rng.gen_range(0.1..0.95);
-            let theta = rng.gen_range(0.0..2.0*std::f32::consts::PI);
-            let basis_id = *candidate_bases.choose(&mut rng).unwrap_or(&0);
-            let d_theta = rng.gen_range(0..4);
-            let d_r = rng.gen::<bool>();
-            let rot_code = rng.gen_range(0..16);
-            let log2_c = rng.gen_range(-4..=3);
-            let seed = Packed64::new(r, theta, basis_id, d_theta, d_r, rot_code, log2_c, 0);
-            let rmse = compute_sampled_rmse(matrix, seed, rows, cols);
-            (seed, rmse)
-        }).collect();
-        for _ in 0..10 {  // Generations
-            population.sort_by(|a,b| a.1.partial_cmp(&b.1).unwrap());
-            let elite = population[0..10].to_vec();
-            let mut new_pop = elite.clone();
-            while new_pop.len() < 100 {
-                let parent1 = &elite[rng.gen_range(0..elite.len())].0;
-                let parent2 = &elite[rng.gen_range(0..elite.len())].0;
-                let child = crossover(parent1, parent2, &mut rng);
-                let mutated = mutate(child, &mut rng);
-                let rmse = compute_sampled_rmse(matrix, mutated, rows, cols);
-                new_pop.push((mutated, rmse));
-            }
-            population = new_pop;
-        }
-        population.sort_by(|a,b| a.1.partial_cmp(&b.1).unwrap());
-        let top_10 = &population[0..10];
-        // Stage 3: Fine optimization
-        let mut best_seed = top_10[0].0;
-        let mut best_rmse = f32::INFINITY;
-        for (seed, _) in top_10 {
-            let optimized = local_search_exhaustive(*seed, matrix, rows, cols);
-            let full_rmse = compute_full_rmse(matrix, optimized, rows, cols);
-            if full_rmse < best_rmse {
-                best_rmse = full_rmse;
-                best_seed = optimized;
-                println!("New best: RMSE = {:.6}", best_rmse);
-            }
-        }
-        PoincareMatrix { seed: best_seed, rows, cols }
-    }
-} 
-
-fn crossover(p1: &Packed64, p2: &Packed64, rng: &mut impl Rng) -> Packed64 {
-    let params1 = p1.decode();
-    let params2 = p2.decode();
-    Packed64::new(
-        if rng.gen() {params1.r} else {params2.r},
-        if rng.gen() {params1.theta} else {params2.theta},
-        if rng.gen() {params1.basis_id} else {params2.basis_id},
-        if rng.gen() {params1.d_theta} else {params2.d_theta},
-        if rng.gen() {params1.d_r} else {params2.d_r},
-        if rng.gen() {params1.rot_code} else {params2.rot_code},
-        if rng.gen() {params1.log2_c} else {params2.log2_c},
-        0
-    )
 }
 
-fn mutate(seed: Packed64, rng: &mut impl Rng) -> Packed64 {
-    let mut params = seed.decode();
-    if rng.gen_ratio(1,5) { params.r = (params.r + rng.gen_range(-0.05..0.05)).clamp(0.0,0.999); }
-    if rng.gen_ratio(1,5) { params.theta = (params.theta + rng.gen_range(-0.1..0.1)).rem_euclid(2.0*std::f32::consts::PI); }
-    Packed64::new(params.r, params.theta, params.basis_id, params.d_theta, params.d_r, params.rot_code, params.log2_c, params.reserved)
+// 토너먼트 선택 (적합도가 높은, 즉 인덱스가 낮은 개체를 선택)
+fn selection<'a, R: Rng>(population: &'a [Packed64], rng: &mut R) -> &'a Packed64 {
+    let mut best_index = rng.gen_range(0..population.len());
+    for _ in 1..5 { // Tournament size = 5
+        let current_index = rng.gen_range(0..population.len());
+        if current_index < best_index {
+            best_index = current_index;
+        }
+    }
+    &population[best_index]
+}
+
+// 2점 교차
+fn crossover<R: Rng>(parent1: &Packed64, parent2: &Packed64, rng: &mut R) -> (Packed64, Packed64) {
+    let p1_bits = parent1.0;
+    let p2_bits = parent2.0;
+
+    let mut cross_points = [rng.gen_range(1..63), rng.gen_range(1..63)];
+    cross_points.sort_unstable();
+    let [cp1, cp2] = cross_points;
+
+    let mask = (1u64 << (cp2 - cp1)) - 1;
+    let mask = mask << cp1;
+
+    let child1_bits = (p1_bits & !mask) | (p2_bits & mask);
+    let child2_bits = (p2_bits & !mask) | (p1_bits & mask);
+
+    (Packed64(child1_bits), Packed64(child2_bits))
+}
+
+// 비트 플립 및 실수 값 노이즈 기반 돌연변이
+fn mutate<R: Rng>(individual: &mut Packed64, mutation_rate: f32, rng: &mut R) {
+    // 1. 기존의 비트 플립 돌연변이
+    for i in 0..64 {
+        if rng.gen::<f32>() < mutation_rate {
+            individual.0 ^= 1 << i;
+        }
+    }
+
+    // 2. 실수 공간에서의 미세 조정 돌연변이 (더 높은 확률로 적용)
+    if rng.gen::<f32>() < 0.1 { // 10% 확률로 미세 조정
+        let mut params = individual.decode();
+        let choice = rng.gen_range(0..5);
+        match choice {
+            0 => params.r = (params.r + rng.gen_range(-0.05..0.05)).clamp(0.0, 0.999),
+            1 => params.theta = (params.theta + rng.gen_range(-0.1..0.1)).rem_euclid(2.0 * std::f32::consts::PI),
+            2 => params.amplitude = (params.amplitude + rng.gen_range(-0.2..0.2)).clamp(0.25, 4.0),
+            3 => params.offset = (params.offset + rng.gen_range(-0.2..0.2)).clamp(-2.0, 2.0),
+            4 => params.decay_rate = (params.decay_rate + rng.gen_range(-0.2..0.2)).clamp(0.0, 4.0),
+            _ => {},
+        }
+        *individual = Packed64::from_params(&params);
+    }
 } 
