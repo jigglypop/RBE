@@ -1,79 +1,77 @@
 //! `math.rs`에 대한 단위 테스트
 
-use poincare_layer::math::{self, perlin_2d, sech, triangle_wave, apply_angular_derivative, apply_radial_derivative, get_rotation_angle};
-use approx::assert_relative_eq;
-use std::f32::consts::PI;
+use poincare_layer::math::{calculate_rmse, mutate_seed};
+use poincare_layer::types::{Packed64, PoincareMatrix};
 
 #[test]
-fn test_rotation_angle() {
-    println!("\n--- Test: Rotation Angle Calculation ---");
-    assert_relative_eq!(get_rotation_angle(0), 0.0);
-    assert_relative_eq!(get_rotation_angle(3), PI / 4.0);
-    assert_relative_eq!(get_rotation_angle(5), PI / 2.0);
-    assert_relative_eq!(get_rotation_angle(15), 0.0); // Out of defined range
-    println!("  [PASSED] get_rotation_angle works correctly.");
+/// `calculate_rmse` 함수의 정확성을 테스트합니다.
+fn test_calculate_rmse() {
+    let rows = 4;
+    let cols = 4;
+
+    // 1. 완벽하게 재구성 가능한 경우 (RMSE ≈ 0)
+    let original_seed = Packed64::new(0x1122334455667788);
+    let matrix_generator = PoincareMatrix {
+        seed: original_seed,
+        rows,
+        cols,
+    };
+    let original_matrix = matrix_generator.decompress();
+
+    let rmse_perfect = calculate_rmse(&original_matrix, &original_seed, rows, cols);
+    assert!(
+        rmse_perfect < 1e-6,
+        "RMSE for a perfectly reconstructed matrix should be close to 0, but was {}",
+        rmse_perfect
+    );
+    println!("PASSED: RMSE is near zero for perfect reconstruction.");
+
+    // 2. 다른 시드로 재구성하는 경우 (RMSE > 0)
+    let different_seed = Packed64::new(0x8877665544332211);
+    let rmse_different = calculate_rmse(&original_matrix, &different_seed, rows, cols);
+    assert!(
+        rmse_different > 1e-6,
+        "RMSE for a differently reconstructed matrix should be greater than 0, but was {}",
+        rmse_different
+    );
+    println!("PASSED: RMSE is non-zero for imperfect reconstruction.");
 }
 
 #[test]
-fn test_angular_derivatives() {
-    println!("\n--- Test: Angular Derivative Cycles ---");
-    let theta = PI / 6.0; // 30 degrees
+/// `mutate_seed` 함수의 동작을 다양한 변이 확률에 대해 테스트합니다.
+fn test_mutate_seed() {
+    let original_seed_val = 0xAAAAAAAAAAAAAAAA; // 10101010...
+    let original_seed = Packed64::new(original_seed_val);
 
-    // sin-based (basis_id is even)
-    assert_relative_eq!(apply_angular_derivative(theta, 0, 0), theta.sin());
-    assert_relative_eq!(apply_angular_derivative(theta, 1, 0), theta.cos());
-    assert_relative_eq!(apply_angular_derivative(theta, 2, 0), -theta.sin());
-    assert_relative_eq!(apply_angular_derivative(theta, 3, 0), -theta.cos());
-    assert_relative_eq!(apply_angular_derivative(theta, 4, 0), theta.sin()); // 4-cycle
+    // 1. 변이 확률 0.0: 시드가 변경되지 않아야 함
+    let mutated_seed_zero_rate = mutate_seed(original_seed, 0.0);
+    assert_eq!(
+        mutated_seed_zero_rate.rotations,
+        original_seed_val,
+        "Seed should not change with a mutation rate of 0.0"
+    );
+    println!("PASSED: Mutation rate of 0.0 causes no change.");
 
-    // cos-based (basis_id is odd)
-    assert_relative_eq!(apply_angular_derivative(theta, 0, 1), theta.cos());
-    assert_relative_eq!(apply_angular_derivative(theta, 1, 1), -theta.sin());
-    assert_relative_eq!(apply_angular_derivative(theta, 2, 1), -theta.cos());
-    assert_relative_eq!(apply_angular_derivative(theta, 3, 1), theta.sin());
-    println!("  [PASSED] apply_angular_derivative cycles are correct.");
-}
+    // 2. 변이 확률 1.0: 모든 비트가 반전되어야 함
+    let mutated_seed_full_rate = mutate_seed(original_seed, 1.0);
+    assert_eq!(
+        mutated_seed_full_rate.rotations,
+        !original_seed_val,
+        "Seed should be bitwise NOT with a mutation rate of 1.0"
+    );
+    println!("PASSED: Mutation rate of 1.0 inverts all bits.");
 
-#[test]
-fn test_radial_derivatives() {
-    println!("\n--- Test: Radial Derivative Cycles ---");
-    let r = 0.5;
+    // 3. 변이 확률 0.5: 시드가 변경되어야 함
+    let mutated_seed_mid_rate = mutate_seed(original_seed, 0.5);
+    assert_ne!(
+        mutated_seed_mid_rate.rotations,
+        original_seed_val,
+        "Seed should change with a mutation rate of 0.5"
+    );
+    println!("PASSED: Mutation rate of 0.5 causes some change.");
 
-    // sinh-based (basis_id is 0, 1, 4, 5, ...)
-    assert_relative_eq!(apply_radial_derivative(r, false, 0), r.sinh());
-    assert_relative_eq!(apply_radial_derivative(r, true, 0), r.cosh());
-
-    // cosh-based (basis_id is 2, 3, 6, 7, ...)
-    assert_relative_eq!(apply_radial_derivative(r, false, 2), r.cosh());
-    assert_relative_eq!(apply_radial_derivative(r, true, 2), r.sinh());
-    println!("  [PASSED] apply_radial_derivative works correctly.");
-}
-
-#[test]
-fn test_wave_functions() {
-    println!("\n--- Test: Wave Functions ---");
-    let x = 1.5;
-
-    // sech
-    assert_relative_eq!(sech(x), 1.0 / x.cosh());
-
-    // triangle_wave (test a few points)
-    assert_relative_eq!(triangle_wave(0.0), -1.0);
-    assert_relative_eq!(triangle_wave(PI / 2.0), 1.0); // t=0.5
-    assert_relative_eq!(triangle_wave(PI), -1.0);     // t=1.0 -> 0.0
-    assert_relative_eq!(triangle_wave(3.0 * PI / 2.0), 1.0);
-
-    println!("  [PASSED] sech and triangle_wave work correctly.");
-}
-
-#[test]
-fn test_perlin_noise() {
-    println!("\n--- Test: Perlin Noise Generation ---");
-    let val1 = perlin_2d(0.5, 0.5, 1.0);
-    let val2 = perlin_2d(0.5, 0.5, 1.0);
-    assert_eq!(val1, val2, "Perlin noise should be deterministic");
-    
-    let val3 = perlin_2d(0.6, 0.6, 1.0);
-    assert_ne!(val1, val3, "Perlin noise should vary with coordinates");
-    println!("  [PASSED] Perlin noise function is deterministic and varies with input.");
+    // 변경된 비트 수 확인 (통계적 검증)
+    let flipped_bits = (original_seed_val ^ mutated_seed_mid_rate.rotations).count_ones();
+    println!("  - Flipped bits at 50% rate: {} (expected ~32)", flipped_bits);
+    assert!(flipped_bits > 10 && flipped_bits < 54, "Number of flipped bits is statistically unlikely for a 0.5 rate.");
 } 

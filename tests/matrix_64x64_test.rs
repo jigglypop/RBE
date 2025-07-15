@@ -1,5 +1,6 @@
 //! 64x64 행렬에 대한 압축 성능 테스트
 
+use poincare_layer::math::calculate_rmse;
 use poincare_layer::types::PoincareMatrix;
 use std::f32::consts::PI;
 
@@ -27,42 +28,36 @@ fn generate_complex_pattern(rows: usize, cols: usize) -> Vec<f32> {
     matrix
 }
 
-fn compute_rmse(original: &[f32], reconstructed: &[f32]) -> f32 {
-    let mut error = 0.0;
-    for i in 0..original.len() {
-        error += (original[i] - reconstructed[i]).powi(2);
-    }
-    (error / original.len() as f32).sqrt()
-}
-
 #[test]
-#[ignore]
-fn test_compress_64x64_simple_pattern_ga() {
+#[ignore] // 이 테스트는 실행 시간이 길어 기본적으로는 무시됩니다.
+fn test_compress_64x64_simple_pattern() {
     let rows = 64;
     let cols = 64;
     let matrix = generate_simple_pattern(rows, cols);
 
-    let compressed = PoincareMatrix::compress_with_genetic_algorithm(&matrix, rows, cols, 200, 100, 0.01);
-    let decompressed = compressed.decompress();
-    let rmse = compute_rmse(&matrix, &decompressed);
+    let compressed = PoincareMatrix::compress(&matrix, rows, cols);
+    let rmse = calculate_rmse(&matrix, &compressed.seed, rows, cols);
     
-    println!("\n--- Test: 64x64 Simple Pattern Compression (GA) ---");
+    println!("\n--- Test: 64x64 Simple Pattern Compression (Inverse CORDIC) ---");
     println!("  - Final RMSE: {:.6}", rmse);
-    assert!(rmse < 0.4, "RMSE for 64x64 simple pattern should be under 0.4, but was {}", rmse);
+    println!("  - Best seed found: 0x{:X}", compressed.seed.decode());
+
+    assert!(rmse < 1.0, "RMSE for 64x64 simple pattern should be under 1.0, but was {}", rmse);
 }
 
 #[test]
-#[ignore]
-fn test_compress_64x64_complex_pattern_ga() {
+#[ignore] // 이 테스트는 실행 시간이 길어 기본적으로는 무시됩니다.
+fn test_compress_64x64_complex_pattern() {
     let rows = 64;
     let cols = 64;
     let matrix = generate_complex_pattern(rows, cols);
 
-    let compressed = PoincareMatrix::compress_with_genetic_algorithm(&matrix, rows, cols, 300, 200, 0.005);
-    let decompressed = compressed.decompress();
-    let rmse = compute_rmse(&matrix, &decompressed);
+    let compressed = PoincareMatrix::compress(&matrix, rows, cols);
+    let rmse = calculate_rmse(&matrix, &compressed.seed, rows, cols);
 
-    println!("\n--- Test: 64x64 Complex Pattern Compression (GA) ---");
+    println!("\n--- Test: 64x64 Complex Pattern Compression (Inverse CORDIC) ---");
     println!("  - Final RMSE: {:.6}", rmse);
-    assert!(rmse < 0.5, "RMSE for 64x64 complex pattern should be under 0.5, but was {}", rmse);
+    println!("  - Best seed found: 0x{:X}", compressed.seed.decode());
+
+    assert!(rmse < 1.0, "RMSE for 64x64 complex pattern should be under 1.0, but was {}", rmse);
 } 

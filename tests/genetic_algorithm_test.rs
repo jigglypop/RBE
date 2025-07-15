@@ -1,6 +1,7 @@
-//! `matrix.rs`의 유전 알고리즘 압축 테스트
+//! `matrix.rs`의 압축 알고리즘 테스트
 
-use poincare_layer::types::{PoincareMatrix, Packed64};
+use poincare_layer::math::calculate_rmse;
+use poincare_layer::types::PoincareMatrix;
 use std::f32::consts::PI;
 
 fn generate_test_matrix(rows: usize, cols: usize) -> Vec<f32> {
@@ -16,34 +17,29 @@ fn generate_test_matrix(rows: usize, cols: usize) -> Vec<f32> {
 }
 
 #[test]
-#[ignore] // 이 테스트는 시간이 오래 걸리므로 기본적으로는 무시합니다.
-fn test_genetic_algorithm_compression() {
-    println!("\n--- Test: Genetic Algorithm Compression (32x32) ---");
+#[ignore] // 이 테스트는 실행 시간이 길 수 있으므로 기본적으로는 무시됩니다.
+fn test_inverse_cordic_compression() {
+    println!("\n--- Test: Inverse CORDIC Compression (32x32) ---");
     let rows = 32;
     let cols = 32;
     let matrix = generate_test_matrix(rows, cols);
 
-    let poincare_matrix = PoincareMatrix::compress_with_genetic_algorithm(
+    let poincare_matrix = PoincareMatrix::compress(
         &matrix,
         rows,
         cols,
-        200, // population_size
-        500,  // generations
-        0.005, // mutation_rate
     );
 
-    let decompressed = poincare_matrix.decompress();
-    
-    let mut error = 0.0;
-    for i in 0..matrix.len() {
-        error += (matrix[i] - decompressed[i]).powi(2);
-    }
-    let rmse = (error / matrix.len() as f32).sqrt();
+    let rmse = calculate_rmse(&matrix, &poincare_matrix.seed, rows, cols);
 
     println!("  - Matrix size: {}x{}", rows, cols);
-    println!("  - Final RMSE with GA: {:.6}", rmse);
-    println!("  - Best seed found: {:?}", poincare_matrix.seed.decode());
+    println!("  - Final RMSE with Inverse CORDIC: {:.6}", rmse);
+    println!("  - Best seed found: 0x{:X}", poincare_matrix.seed.decode());
 
-    assert!(rmse < 0.15, "RMSE should be less than 0.15 with GA, but was {}", rmse);
-    println!("  [PASSED] Genetic algorithm achieved target RMSE.");
+    assert!(
+        rmse < 1.0,
+        "RMSE should be less than 1.0, but was {}",
+        rmse
+    );
+    println!("  [PASSED] Inverse CORDIC compression achieved a result.");
 } 

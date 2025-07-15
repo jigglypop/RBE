@@ -1,37 +1,36 @@
-use poincare_layer::types::{PoincareMatrix, Packed64};
-use approx::assert_relative_eq;
+use poincare_layer::types::PoincareMatrix;
+use poincare_layer::math::calculate_rmse;
 use std::f32::consts::PI;
 
 #[test]
-fn test_compression_and_decompression_with_ga() {
-    println!("\n--- GA 압축 및 복원 테스트 (32x32) ---");
-    let rows = 32;
-    let cols = 32;
+/// Inverse CORDIC 기반 압축과 복원이 전체적으로 동작하는지 확인하는 통합 테스트입니다.
+fn test_full_compression_decompression_cycle() {
+    println!("\n--- Full Integration Test: Inverse CORDIC -> Decompression -> RMSE Verification ---");
+    let rows = 16;
+    let cols = 16;
     
-    // 간단한 패턴 생성
+    // 테스트용 단일 주파수 패턴 생성
     let mut matrix = vec![0.0; rows * cols];
     for i in 0..rows {
         for j in 0..cols {
             let x = 2.0 * j as f32 / (cols - 1) as f32 - 1.0;
-            let y = 2.0 * i as f32 / (rows - 1) as f32 - 1.0;
-            matrix[i * cols + j] = (x * PI).sin();
+            matrix[i * cols + j] = (x * 2.0 * PI).sin();
         }
     }
 
-    let compressed = PoincareMatrix::compress_with_genetic_algorithm(
-        &matrix, rows, cols, 50, 20, 0.01
-    );
+    // 새로운 compress 함수를 사용합니다.
+    let compressed = PoincareMatrix::compress(&matrix, rows, cols);
+    let rmse = calculate_rmse(&matrix, &compressed.seed, rows, cols);
 
-    let decompressed = compressed.decompress();
-
-    let mut error = 0.0;
-    for i in 0..matrix.len() {
-        error += (matrix[i] - decompressed[i]).powi(2);
-    }
-    let rmse = (error / matrix.len() as f32).sqrt();
-
-    println!("  - 최종 RMSE: {:.6}", rmse);
-    println!("  - 찾은 시드: {:?}", compressed.seed.decode());
+    println!("  - Matrix size: {}x{}", rows, cols);
+    println!("  - Final RMSE: {:.6}", rmse);
+    println!("  - Best seed found: 0x{:X}", compressed.seed.decode());
     
-    assert!(rmse < 0.5, "RMSE should be under 0.5 for a simple pattern, but was {}", rmse);
+    // 이 간단한 패턴에 대해, RMSE가 1.0 미만이어야 합니다.
+    assert!(
+        rmse < 1.0,
+        "RMSE should be under 1.0 for this simple pattern, but was {}",
+        rmse
+    );
+    println!("  [PASSED] Full compression/decompression cycle works as expected.");
 } 

@@ -1,8 +1,53 @@
-/// 64-bit Packed Poincaré 시드 표현
+/// 64-bit Packed Poincaré 시드 표현 (CORDIC 통합)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Packed64(pub u64);
+pub struct Packed64 {
+    pub rotations: u64,  // CORDIC 회전 시퀀스
+}
 
-/// 기저 함수 타입
+impl Packed64 {
+    pub fn new(rotations: u64) -> Self {
+        Packed64 { rotations }
+    }
+
+    pub fn compute_weight(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        let rotations = self.rotations;
+
+        // 좌표(i, j)를 [-1.0, 1.0] 범위의 정규화된 좌표로 변환하여 초기 벡터로 사용합니다.
+        // 이렇게 함으로써 각 좌표마다 다른 초기값으로 CORDIC 연산을 시작하게 됩니다.
+        let mut x = (j as f32 / (cols - 1) as f32) * 2.0 - 1.0;
+        let mut y = (i as f32 / (rows - 1) as f32) * 2.0 - 1.0;
+
+        for k in 0..64 {
+            let sigma = if (rotations >> k) & 1 == 1 { 1.0 } else { -1.0 };
+            
+            let power_of_2 = (2.0f32).powi(-(k as i32));
+            // let angle_k = power_of_2.atan(); // 사용되지 않으므로 제거
+
+            let x_new = x - sigma * y * power_of_2;
+            let y_new = y + sigma * x * power_of_2;
+            
+            x = x_new;
+            y = y_new;
+
+            // 쌍곡 변환 추가
+            if k % 4 == 0 {
+                let r = (x*x + y*y).sqrt();
+                if r > 1e-9 { // 0에 가까운 값 방지
+                    let tanh_r = r.tanh();
+                    x *= tanh_r;
+                    y *= tanh_r;
+                }
+            }
+        }
+        
+        // CORDIC 게인 보정. 초기 벡터가 (1,0)이 아니므로 이득 보정이 다를 수 있으나,
+        // 유전 알고리즘이 최적의 시드를 찾을 것이므로 일단 기존 값을 사용합니다.
+        let gain = 1.64676; 
+        x / gain
+    }
+}
+
+/// 기저 함수 타입 (기존 유지)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BasisFunction {
@@ -20,24 +65,7 @@ pub enum BasisFunction {
     Morlet = 11,
 }
 
-/// 디코딩된 파라미터
-#[derive(Debug, Clone, PartialEq)]
-pub struct DecodedParams {
-    pub r: f32,           // 12 bits (reduced from 20)
-    pub theta: f32,       // 12 bits (reduced from 24)
-    pub basis_id: u8,     // 4 bits
-    pub freq_x: u8,       // 5 bits - X축 주파수 (1-32)
-    pub freq_y: u8,       // 5 bits - Y축 주파수 (1-32)
-    pub amplitude: f32,   // 6 bits - 진폭 스케일 (0.25-4.0)
-    pub offset: f32,      // 6 bits - DC 오프셋 (-2.0 to +2.0)
-    pub pattern_mix: u8,  // 4 bits - 패턴 믹싱 ID
-    pub decay_rate: f32,  // 5 bits - 감쇠율 (0.0-4.0)
-    pub d_theta: u8,      // 2 bits - θ 미분 차수 (0-3)
-    pub d_r: bool,        // 1 bit - r 미분 차수 (0 or 1)
-    pub log2_c: i8,       // 2 bits - 곡률 (부호 있음, -2 to +1)
-}
-
-/// 행렬 압축 및 복원
+/// 행렬 압축 및 복원 (기존 유지)
 pub struct PoincareMatrix {
     pub seed: Packed64,
     pub rows: usize,

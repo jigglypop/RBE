@@ -1,68 +1,55 @@
 //! `generation.rs`에 대한 단위 테스트
 
-use poincare_layer::Packed64;
-use approx::assert_relative_eq;
-use std::f32::consts::PI;
+use poincare_layer::types::{Packed64, PoincareMatrix};
 
 #[test]
-fn test_weight_generation_logic() {
-    println!("\n--- Test: Weight Generation Logic ---");
+/// CORDIC 시드로부터 행렬이 성공적으로 생성되는지,
+/// 그리고 생성된 행렬이 유효한 속성을 갖는지 검증합니다.
+fn test_matrix_generation_from_cordic_seed() {
+    // 1. 테스트용 시드 및 행렬 크기 설정
+    // 0이 아닌 임의의 시드를 사용하여 모든 값이 0이 되는 것을 방지합니다.
+    let seed = Packed64::new(0xDEADBEEF_CAFEF00D_u64);
+    let rows = 8;
+    let cols = 8;
 
-    // 1. 특정 파라미터를 가진 시드 생성
-    let packed = Packed64::new(0.5, PI / 2.0, 1, 1, 1, 1.0, 0.0, 0, 0.0, 0, false, 0);
+    let matrix_generator = PoincareMatrix { seed, rows, cols };
 
-    // 2. 특정 좌표에서의 가중치 계산
-    // 32x32 행렬의 정중앙 (i=16, j=16) -> 정규화 좌표 (x=0, y=0)
-    let rows = 32;
-    let cols = 32;
-    let center_i = 16;
-    let center_j = 16;
-    let weight = packed.compute_weight(center_i, center_j, rows, cols);
+    // 2. 행렬 생성
+    let generated_matrix = matrix_generator.decompress();
 
-    // 3. 간단한 케이스로 테스트 변경
-    // 대신 계산이 일관되게 동작하는지 확인
-    
-    // 동일한 파라미터로 다시 계산해서 일관성 확인
-    let weight2 = packed.compute_weight(center_i, center_j, rows, cols);
-    assert_eq!(weight, weight2, "Weight calculation should be deterministic");
-    
-    // 대칭성 확인 (같은 거리의 점들은 비슷한 값을 가져야 함)
-    let weight_right = packed.compute_weight(center_i, center_j + 1, rows, cols);
-    let weight_left = packed.compute_weight(center_i, center_j - 1, rows, cols);
-    let weight_up = packed.compute_weight(center_i - 1, center_j, rows, cols);
-    let weight_down = packed.compute_weight(center_i + 1, center_j, rows, cols);
-    
-    // 4. 검증
-    println!("  - Center weight: {}", weight);
-    println!("  - Right weight: {}", weight_right);
-    println!("  - Left weight: {}", weight_left);
-    println!("  - Up weight: {}", weight_up);
-    println!("  - Down weight: {}", weight_down);
-    
-    // 중심에서의 가중치가 합리적인 범위인지 확인 (amplitude=1.0, offset=0.0이므로)
-    assert!(weight.abs() < 5.0, "Weight should be in reasonable range");
-    println!("  [PASSED] Weight generation produces consistent results.");
-}
+    // 3. 생성된 행렬의 유효성 검증
+    assert_eq!(
+        generated_matrix.len(),
+        rows * cols,
+        "Generated matrix should have the correct number of elements."
+    );
 
-#[test]
-fn test_jacobian_calculation() {
-    println!("\n--- Test: Jacobian Calculation ---");
-    // 야코비안 계산 로직만 별도 검증
+    let first_element = generated_matrix[0];
+    let mut all_zero = true;
+    let mut all_same = true;
 
-    let params = Packed64::new(0.8, 0.0, 0, 1, 1, 1.0, 0.0, 0, 0.0, 0, false, 1).decode(); // c=2.0
-    let c = 2.0f32.powi(params.log2_c as i32);
-    let r = params.r;
+    for &value in generated_matrix.iter() {
+        // 모든 값이 0인지 확인
+        if value.abs() > 1e-9 {
+            all_zero = false;
+        }
+        // 모든 값이 첫 번째 원소와 동일한지 확인
+        if (value - first_element).abs() > 1e-9 {
+            all_same = false;
+        }
+        // 값이 합리적인 범위 내에 있는지 확인
+        assert!(
+            value > -2.0 && value < 2.0,
+            "Generated value {} is outside the expected range [-2.0, 2.0].",
+            value
+        );
+    }
 
-    // compute_weight 내부의 야코비안 계산
-    let jacobian_in_code = (1.0 - c * r * r).powi(-2).sqrt();
+    assert!(!all_zero, "The generated matrix should not contain all zeros.");
+    assert!(!all_same, "All elements in the generated matrix should not be the same.");
 
-    // 직접 계산 (코드와 동일하게)
-    let expected_jacobian = (1.0 / (1.0 - c * r * r).powi(2)).sqrt();
-    
-    println!("  - c={}, r={}", c, r);
-    println!("  - Jacobian in code: {}", jacobian_in_code);
-    println!("  - Expected Jacobian: {}", expected_jacobian);
-    
-    assert_relative_eq!(jacobian_in_code, expected_jacobian, epsilon = 1e-6);
-    println!("  [PASSED] Jacobian calculation matches current implementation.");
+    println!("PASSED: test_matrix_generation_from_cordic_seed");
+    println!("  - Matrix size: {}x{}", rows, cols);
+    println!("  - First element: {}", first_element);
+    println!("  - A few elements: {:?}", &generated_matrix[0..4]);
 } 
