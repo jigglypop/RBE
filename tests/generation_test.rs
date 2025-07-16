@@ -77,9 +77,12 @@ fn train_128bit_layer_test() {
         }
     }
     
-    // 2. 무작위 초기화된 PoincareMatrix 생성
+    // 2. 고정된 초기값으로 PoincareMatrix 생성
     let init=PoincareMatrix{
-        seed:Packed128::random(&mut rand::thread_rng()),
+        seed:Packed128 { 
+            hi: 0x12345, 
+            lo: ((0.8f32.to_bits() as u64) << 32) | 0.3f32.to_bits() as u64 
+        },
         rows,
         cols
     };

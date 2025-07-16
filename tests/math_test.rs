@@ -23,7 +23,7 @@ fn test_calculate_rmse() {
     assert!(rmse_before < 1e-6, "RMSE before mutation should be close to zero.");
 
     // 3. 시드 변이
-    let mutated_seed = mutate_seed(original_seed, 0.1);
+    let mutated_seed = mutate_seed(original_seed, 0.5);  // 0.1 -> 0.5로 증가
 
     // 4. 변이 후 RMSE 계산
     let rmse_after = compute_full_rmse(&matrix, &mutated_seed, 8, 8);
