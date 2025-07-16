@@ -1,7 +1,7 @@
 //! `math.rs`에 대한 단위 테스트
 
-use poincare_layer::math::{calculate_rmse, mutate_seed};
-use poincare_layer::types::{Packed64, PoincareMatrix};
+use poincare_layer::math::{compute_full_rmse, mutate_seed};
+use poincare_layer::types::{Packed64, Packed128, PoincareMatrix};
 
 #[test]
 /// `calculate_rmse` 함수의 정확성을 테스트합니다.
@@ -9,32 +9,30 @@ fn test_calculate_rmse() {
     let rows = 4;
     let cols = 4;
 
-    // 1. 완벽하게 재구성 가능한 경우 (RMSE ≈ 0)
-    let original_seed = Packed64::new(0x1122334455667788);
-    let matrix_generator = PoincareMatrix {
-        seed: original_seed,
-        rows,
-        cols,
+    // 1. 초기 시드와 행렬 준비
+    let original_seed = Packed64::new(0x123456789ABCDEF0);
+    let poincare_matrix = PoincareMatrix { 
+        seed: Packed128 { hi: original_seed.rotations, lo: 0 }, 
+        rows: 8, 
+        cols: 8 
     };
-    let original_matrix = matrix_generator.decompress();
+    let matrix = poincare_matrix.decompress();
 
-    let rmse_perfect = calculate_rmse(&original_matrix, &original_seed, rows, cols);
-    assert!(
-        rmse_perfect < 1e-6,
-        "RMSE for a perfectly reconstructed matrix should be close to 0, but was {}",
-        rmse_perfect
-    );
-    println!("PASSED: RMSE is near zero for perfect reconstruction.");
+    // 2. 변이 전 RMSE 계산
+    let rmse_before = compute_full_rmse(&matrix, &original_seed, 8, 8);
+    assert!(rmse_before < 1e-6, "RMSE before mutation should be close to zero.");
 
-    // 2. 다른 시드로 재구성하는 경우 (RMSE > 0)
-    let different_seed = Packed64::new(0x8877665544332211);
-    let rmse_different = calculate_rmse(&original_matrix, &different_seed, rows, cols);
-    assert!(
-        rmse_different > 1e-6,
-        "RMSE for a differently reconstructed matrix should be greater than 0, but was {}",
-        rmse_different
-    );
-    println!("PASSED: RMSE is non-zero for imperfect reconstruction.");
+    // 3. 시드 변이
+    let mutated_seed = mutate_seed(original_seed, 0.1);
+
+    // 4. 변이 후 RMSE 계산
+    let rmse_after = compute_full_rmse(&matrix, &mutated_seed, 8, 8);
+    println!("\n--- Test: Seed Mutation ---");
+    println!("  - RMSE before mutation: {}", rmse_before);
+    println!("  - RMSE after mutation: {}", rmse_after);
+
+    // 변이가 일어났다면 시드가 바뀌고, 결과적으로 RMSE가 0이 아니어야 합니다.
+    assert!(rmse_after > 1e-6, "RMSE after mutation should be greater than 0.");
 }
 
 #[test]

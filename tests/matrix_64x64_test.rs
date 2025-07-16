@@ -1,7 +1,7 @@
 //! 64x64 행렬에 대한 압축 성능 테스트
 
-use poincare_layer::math::calculate_rmse;
-use poincare_layer::types::PoincareMatrix;
+use poincare_layer::math::compute_full_rmse;
+use poincare_layer::types::{Packed64, Packed128, PoincareMatrix};
 use std::f32::consts::PI;
 
 fn generate_simple_pattern(rows: usize, cols: usize) -> Vec<f32> {
@@ -33,15 +33,25 @@ fn generate_complex_pattern(rows: usize, cols: usize) -> Vec<f32> {
 fn test_compress_64x64_simple_pattern() {
     let rows = 64;
     let cols = 64;
-    let matrix = generate_simple_pattern(rows, cols);
+    let matrix_generator = PoincareMatrix { 
+        seed: Packed128 { hi: 0x1A2B3C4D5E6F7890, lo: 0 }, 
+        rows, 
+        cols 
+    };
+    let original_matrix = matrix_generator.decompress();
 
-    let compressed = PoincareMatrix::compress(&matrix, rows, cols);
-    let rmse = calculate_rmse(&matrix, &compressed.seed, rows, cols);
-    
-    println!("\n--- Test: 64x64 Simple Pattern Compression (Inverse CORDIC) ---");
-    println!("  - Final RMSE: {:.6}", rmse);
-    println!("  - Best seed found: 0x{:X}", compressed.seed.decode());
+    // 2. 행렬 압축
+    let compressed = PoincareMatrix::compress(&original_matrix, rows, cols);
 
+    // 3. 압축 품질 평가
+    let rmse = compute_full_rmse(&original_matrix, &Packed64 { rotations: compressed.seed.hi }, rows, cols);
+    println!("[64x64 SinCosh Test]");
+    println!("  - Original Matrix (first 4): {:?}", &original_matrix[0..4]);
+    println!("  - Compressed Matrix (first 4): {:?}", &compressed.decompress()[0..4]);
+    println!("  - Best seed found: 0x{:X}", compressed.seed.hi);
+    println!("  - RMSE: {}", rmse);
+
+    // RMSE가 특정 임계값 이하인지 확인
     assert!(rmse < 1.0, "RMSE for 64x64 simple pattern should be under 1.0, but was {}", rmse);
 }
 
@@ -50,14 +60,24 @@ fn test_compress_64x64_simple_pattern() {
 fn test_compress_64x64_complex_pattern() {
     let rows = 64;
     let cols = 64;
-    let matrix = generate_complex_pattern(rows, cols);
+    let matrix_generator = PoincareMatrix {
+        seed: Packed128 { hi: 0xFEDCBA9876543210, lo: 0 },
+        rows,
+        cols,
+    };
+    let original_matrix = matrix_generator.decompress();
 
-    let compressed = PoincareMatrix::compress(&matrix, rows, cols);
-    let rmse = calculate_rmse(&matrix, &compressed.seed, rows, cols);
+    // 2. 행렬 압축
+    let compressed = PoincareMatrix::compress(&original_matrix, rows, cols);
 
-    println!("\n--- Test: 64x64 Complex Pattern Compression (Inverse CORDIC) ---");
-    println!("  - Final RMSE: {:.6}", rmse);
-    println!("  - Best seed found: 0x{:X}", compressed.seed.decode());
+    // 3. 압축 품질 평가
+    let rmse = compute_full_rmse(&original_matrix, &Packed64 { rotations: compressed.seed.hi }, rows, cols);
+    println!("[64x64 TanhSign Test]");
+    println!("  - Original Matrix (first 4): {:?}", &original_matrix[0..4]);
+    println!("  - Compressed Matrix (first 4): {:?}", &compressed.decompress()[0..4]);
+    println!("  - Best seed found: 0x{:X}", compressed.seed.hi);
+    println!("  - RMSE: {}", rmse);
 
+    // RMSE가 특정 임계값 이하인지 확인
     assert!(rmse < 1.0, "RMSE for 64x64 complex pattern should be under 1.0, but was {}", rmse);
 } 

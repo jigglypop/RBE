@@ -1,5 +1,5 @@
-use poincare_layer::types::PoincareMatrix;
-use poincare_layer::math::calculate_rmse;
+use poincare_layer::math::compute_full_rmse;
+use poincare_layer::types::{BasisFunction, Packed64, Packed128, PoincareMatrix};
 use std::f32::consts::PI;
 
 #[test]
@@ -18,19 +18,17 @@ fn test_full_compression_decompression_cycle() {
         }
     }
 
-    // 새로운 compress 함수를 사용합니다.
+    // 2. 행렬 압축
     let compressed = PoincareMatrix::compress(&matrix, rows, cols);
-    let rmse = calculate_rmse(&matrix, &compressed.seed, rows, cols);
 
-    println!("  - Matrix size: {}x{}", rows, cols);
-    println!("  - Final RMSE: {:.6}", rmse);
-    println!("  - Best seed found: 0x{:X}", compressed.seed.decode());
-    
-    // 이 간단한 패턴에 대해, RMSE가 1.0 미만이어야 합니다.
-    assert!(
-        rmse < 1.0,
-        "RMSE should be under 1.0 for this simple pattern, but was {}",
-        rmse
-    );
-    println!("  [PASSED] Full compression/decompression cycle works as expected.");
+    // 3. 압축 품질 평가
+    let rmse = compute_full_rmse(&matrix, &Packed64 { rotations: compressed.seed.hi }, rows, cols);
+    println!("[Integration Test]");
+    println!("  - Original Matrix (first 4): {:?}", &matrix[0..4]);
+    println!("  - Compressed Matrix (first 4): {:?}", &compressed.decompress()[0..4]);
+    println!("  - Best seed found: 0x{:X}", compressed.seed.hi);
+    println!("  - RMSE: {}", rmse);
+
+    // RMSE가 특정 임계값 이하인지 확인
+    assert!(rmse < 1.0, "RMSE should be under 1.0, but was {}", rmse);
 } 

@@ -1,5 +1,5 @@
-use poincare_layer::math::calculate_rmse;
-use poincare_layer::types::PoincareMatrix;
+use poincare_layer::math::compute_full_rmse;
+use poincare_layer::types::{Packed64, Packed128, PoincareMatrix};
 use std::f32::consts::PI;
 
 fn generate_complex_pattern(rows: usize, cols: usize) -> Vec<f32> {
@@ -23,13 +23,14 @@ fn test_deep_compress_inverse_cordic() {
     let matrix = generate_complex_pattern(rows, cols);
 
     let compressed = PoincareMatrix::compress(&matrix, rows, cols);
-    let rmse = calculate_rmse(&matrix, &compressed.seed, rows, cols);
-    
-    println!("  - Matrix size: {}x{}", rows, cols);
-    println!("  - Final RMSE: {:.6}", rmse);
-    println!("  - Best seed found: 0x{:X}", compressed.seed.decode());
 
-    // 테스트에서는 1.0 미만을 목표로 합니다.
+    // 3. 최종 RMSE 계산 및 검증
+    let rmse = compute_full_rmse(&matrix, &Packed64 { rotations: compressed.seed.hi }, rows, cols);
+    println!("\n--- Test: Deep Compression (Inverse CORDIC) ---");
+    println!("  - Final RMSE: {:.6}", rmse);
+    println!("  - Best seed found: 0x{:X}", compressed.seed.hi);
+
+    // RMSE가 특정 임계값 미만인지 확인
     assert!(
         rmse < 1.0,
         "RMSE should be under 1.0 with Inverse CORDIC, but was {}",
