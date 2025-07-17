@@ -5,7 +5,7 @@ use poincare_layer::types::Packed64;
 #[test]
 /// CORDIC 모델에서 `decode` 메소드가 Packed64에 저장된
 /// 64비트 회전 시퀀스를 정확하게 반환하는지 테스트합니다.
-fn test_cordic_seed_decoding() {
+fn 코딕_시드_디코딩_테스트() {
     // 테스트용 원본 회전 시퀀스
     let original_rotations = 0xFEDCBA9876543210_u64;
 
@@ -21,5 +21,8 @@ fn test_cordic_seed_decoding() {
         "The decoded rotation sequence should match the original value."
     );
 
-    println!("PASSED: test_cordic_seed_decoding");
+    println!("PASSED: 코딕_시드_디코딩_테스트");
+    
+    // 압축률 정보: 64비트로 32x32 행렬(4096 바이트) 표현 = 512:1 압축
+    println!("압축률: 32x32 행렬(4096 bytes) -> 64 bits = 512:1");
 } 

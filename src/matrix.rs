@@ -1,4 +1,4 @@
-use crate::math::{analytic_grad, adam_update, compute_full_rmse};
+use crate::math::{adam_update, compute_full_rmse};
 use crate::types::{Packed64, Packed128, PoincareMatrix};
 use std::f32::consts::PI;
 

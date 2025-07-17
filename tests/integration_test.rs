@@ -4,8 +4,8 @@ use std::f32::consts::PI;
 
 #[test]
 /// Inverse CORDIC 기반 압축과 복원이 전체적으로 동작하는지 확인하는 통합 테스트입니다.
-fn test_full_compression_decompression_cycle() {
-    println!("\n--- Full Integration Test: Inverse CORDIC -> Decompression -> RMSE Verification ---");
+fn 전체_압축_복원_사이클_테스트() {
+    println!("\n--- 전체 통합 테스트: Inverse CORDIC -> 압축 해제 -> RMSE 검증 ---");
     let rows = 16;
     let cols = 16;
     
@@ -23,11 +23,20 @@ fn test_full_compression_decompression_cycle() {
 
     // 3. 압축 품질 평가
     let rmse = compute_full_rmse(&matrix, &Packed64 { rotations: compressed.seed.hi }, rows, cols);
-    println!("[Integration Test]");
-    println!("  - Original Matrix (first 4): {:?}", &matrix[0..4]);
-    println!("  - Compressed Matrix (first 4): {:?}", &compressed.decompress()[0..4]);
-    println!("  - Best seed found: 0x{:X}", compressed.seed.hi);
+    
+    // 압축률 계산
+    let matrix_size_bytes = rows * cols * 4; // f32 = 4 bytes
+    let compressed_size_bytes = 16; // 128 bits = 16 bytes
+    let compression_ratio = matrix_size_bytes / compressed_size_bytes;
+    
+    println!("[통합 테스트 결과]");
+    println!("  - 원본 행렬 (처음 4개): {:?}", &matrix[0..4]);
+    println!("  - 압축 해제 행렬 (처음 4개): {:?}", &compressed.decompress()[0..4]);
+    println!("  - 찾은 최적 시드: 0x{:X}", compressed.seed.hi);
     println!("  - RMSE: {}", rmse);
+    println!("  - 압축률: {}x{} 행렬({} bytes) -> 128 bits = {}:1", 
+             rows, cols, matrix_size_bytes, compression_ratio);
+    println!("  - 압축 효율: {:.2}% 크기로 압축", 100.0 / compression_ratio as f32);
 
     // RMSE가 특정 임계값 이하인지 확인
     assert!(rmse < 1.0, "RMSE should be under 1.0, but was {}", rmse);
