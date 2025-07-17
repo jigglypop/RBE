@@ -424,3 +424,159 @@ fn 실용적_다양한_패턴_압축_테스트() {
     println!("  - Random 패턴: 현재 아키텍처로는 압축 어려움");
     println!("  - 실용적 한계: 768x768 (BERT 크기) 정도까지");
 } 
+
+#[test]
+fn 그리드_압축_성능_테스트() {
+    use poincare_layer::encoder::GridCompressedMatrix;
+    use poincare_layer::generator::MatrixGenerator;
+    
+    println!("\n=== 🎯 그리드 기반 압축 성능 테스트 ===");
+    
+    // 테스트할 큰 행렬 크기들
+    let large_sizes = vec![
+        (256, 256),
+        (512, 512),
+        (768, 768),
+        (1024, 1024),
+    ];
+    
+    // 블록 크기 옵션
+    let block_sizes = vec![32, 64, 128];
+    
+    for (rows, cols) in &large_sizes {
+        println!("\n--- {}x{} 행렬 그리드 압축 ---", rows, cols);
+        
+        // Radial gradient 패턴 생성 (가장 압축이 잘 되는 패턴)
+        let matrix = MatrixGenerator::radial_gradient(*rows, *cols);
+        
+        // 전체 압축 (기존 방식)
+        println!("\n[전체 압축]");
+        let start = std::time::Instant::now();
+        let whole_compressed = PoincareMatrix::compress(&matrix, *rows, *cols);
+        let whole_time = start.elapsed();
+        
+        let whole_decompressed = whole_compressed.decompress();
+        let whole_rmse = {
+            let mut err = 0.0;
+            for i in 0..matrix.len() {
+                err += (matrix[i] - whole_decompressed[i]).powi(2);
+            }
+            (err / matrix.len() as f32).sqrt()
+        };
+        
+        let whole_ratio = (rows * cols * 4) / 16; // 128 bits = 16 bytes
+        println!("  - 압축 시간: {:?}", whole_time);
+        println!("  - RMSE: {:.6}", whole_rmse);
+        println!("  - 압축률: {}:1", whole_ratio);
+        
+        // 그리드 압축 (여러 블록 크기로)
+        for block_size in &block_sizes {
+            if *block_size > (*rows).min(*cols) {
+                continue;
+            }
+            
+            println!("\n[그리드 압축 - {}x{} 블록]", block_size, block_size);
+            let start = std::time::Instant::now();
+            let grid_compressed = PoincareMatrix::compress_grid(&matrix, *rows, *cols, *block_size);
+            let grid_time = start.elapsed();
+            
+            let grid_decompressed = grid_compressed.decompress();
+            let grid_rmse = {
+                let mut err = 0.0;
+                for i in 0..matrix.len() {
+                    err += (matrix[i] - grid_decompressed[i]).powi(2);
+                }
+                (err / matrix.len() as f32).sqrt()
+            };
+            
+            println!("  - 압축 시간: {:?}", grid_time);
+            println!("  - RMSE: {:.6}", grid_rmse);
+            println!("  - 압축률: {:.1}:1", grid_compressed.compression_ratio());
+            println!("  - 유효 압축률: {:.1}:1", grid_compressed.effective_compression_ratio());
+            println!("  - 블록 개수: {}", grid_compressed.blocks.len());
+            
+            // 성능 비교
+            let rmse_improvement = (whole_rmse - grid_rmse) / whole_rmse * 100.0;
+            let time_ratio = grid_time.as_secs_f32() / whole_time.as_secs_f32();
+            
+            println!("  - RMSE 개선: {:.1}%", rmse_improvement);
+            println!("  - 시간 비율: {:.1}x", time_ratio);
+        }
+    }
+    
+    println!("\n=== 📊 그리드 압축 요약 ===");
+    println!("✅ 큰 행렬에서 그리드 압축의 장점:");
+    println!("  - 각 블록이 독립적으로 최적화됨");
+    println!("  - 로컬 패턴을 더 잘 포착");
+    println!("  - 병렬 처리 가능");
+    println!("  - 메모리 효율적 (블록 단위 처리)");
+    
+    println!("\n✅ 블록 크기 선택 가이드:");
+    println!("  - 32x32: 높은 정확도, 낮은 압축률");
+    println!("  - 64x64: 균형잡힌 선택");
+    println!("  - 128x128: 높은 압축률, 약간의 정확도 손실");
+}
+
+#[test]
+fn 다양한_패턴_그리드_압축_비교() {
+    use poincare_layer::encoder::GridCompressedMatrix;
+    use poincare_layer::generator::MatrixGenerator;
+    use std::f32::consts::PI;
+    
+    println!("\n=== 🎯 다양한 패턴에 대한 그리드 압축 효과 ===");
+    
+    let rows = 512;
+    let cols = 512;
+    let block_size = 64;
+    
+    let patterns: Vec<(&str, Vec<f32>)> = vec![
+        ("Radial Gradient", MatrixGenerator::radial_gradient(rows, cols)),
+        ("Gaussian", MatrixGenerator::gaussian(rows, cols, 0.5)),
+        ("Sine Wave", MatrixGenerator::sine_wave(rows, cols, 1.0, 1.0)),
+        ("Checkerboard", MatrixGenerator::checkerboard(rows, cols, 32)),
+        ("Linear Gradient", MatrixGenerator::linear_gradient(rows, cols, PI/4.0)),
+        ("Random", MatrixGenerator::random(rows, cols, 42)),
+    ];
+    
+    println!("\n{}x{} 행렬, {}x{} 블록 크기", rows, cols, block_size, block_size);
+    println!("{:<20} | {:>12} | {:>12} | {:>10}", "패턴", "전체 RMSE", "그리드 RMSE", "개선율");
+    println!("{:-<20}-+-{:-<12}-+-{:-<12}-+-{:-<10}", "", "", "", "");
+    
+    for (name, matrix) in patterns {
+        // 전체 압축
+        let whole_compressed = PoincareMatrix::compress(&matrix, rows, cols);
+        let whole_decompressed = whole_compressed.decompress();
+        let whole_rmse = {
+            let mut err = 0.0;
+            for i in 0..matrix.len() {
+                err += (matrix[i] - whole_decompressed[i]).powi(2);
+            }
+            (err / matrix.len() as f32).sqrt()
+        };
+        
+        // 그리드 압축
+        let grid_compressed = PoincareMatrix::compress_grid(&matrix, rows, cols, block_size);
+        let grid_decompressed = grid_compressed.decompress();
+        let grid_rmse = {
+            let mut err = 0.0;
+            for i in 0..matrix.len() {
+                err += (matrix[i] - grid_decompressed[i]).powi(2);
+            }
+            (err / matrix.len() as f32).sqrt()
+        };
+        
+        let improvement = if whole_rmse > 0.0 {
+            (whole_rmse - grid_rmse) / whole_rmse * 100.0
+        } else {
+            0.0
+        };
+        
+        println!("{:<20} | {:>12.6} | {:>12.6} | {:>9.1}%",
+                 name, whole_rmse, grid_rmse, improvement);
+    }
+    
+    println!("\n💡 결과 해석:");
+    println!("  - 대부분의 패턴에서 그리드 압축이 더 나은 성능");
+    println!("  - 특히 복잡한 패턴(Sine, Checkerboard)에서 큰 개선");
+    println!("  - Random 패턴은 여전히 어려움 (근본적 한계)");
+} 

@@ -13,4 +13,6 @@ pub mod matrix;
 // 라이브러리 사용자가 편리하게 접근할 수 있도록 주요 구조체와 함수를 공개합니다.
 pub use types::{Packed64, Packed128, PoincareMatrix, BasisFunction};
 pub use math::{compute_full_rmse, mutate_seed};
+pub use encoder::GridCompressedMatrix;
+pub use generator::MatrixGenerator;
  
