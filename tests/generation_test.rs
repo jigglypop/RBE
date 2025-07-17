@@ -259,3 +259,168 @@ fn 다양한_크기_행렬_학습_테스트() {
     println!("   - Adam optimizer로 압축 파라미터 학습");
     println!("   - Radial gradient 패턴에 최적화");
 } 
+
+#[test]
+fn 실용적_다양한_패턴_압축_테스트() {
+    use std::f32::consts::PI;
+    
+    println!("\n=== 🎯 실용적 신경망 크기에서 다양한 패턴 압축 테스트 ===");
+    
+    // 실제 딥러닝에서 자주 사용되는 크기들
+    let practical_sizes = vec![
+        (32, 32),   // 소형 CNN 필터
+        (64, 64),   // 중형 CNN 필터
+        (128, 128), // FC 레이어
+        (256, 256), // ResNet 블록
+        (512, 512), // Transformer 중간 크기
+        (768, 768), // BERT-Base attention
+    ];
+    
+    // 다양한 패턴 생성 함수들
+    let patterns: Vec<(&str, Box<dyn Fn(usize, usize, usize, usize) -> f32>)> = vec![
+        ("Radial Gradient (원형)", Box::new(|i, j, rows, cols| {
+            let x = (j as f32 / (cols - 1) as f32) * 2.0 - 1.0;
+            let y = (i as f32 / (rows - 1) as f32) * 2.0 - 1.0;
+            let dist = (x*x + y*y).sqrt();
+            (1.0 - dist / 1.414).max(0.0)
+        })),
+        
+        ("Gaussian (가우시안)", Box::new(|i, j, rows, cols| {
+            let x = (j as f32 / (cols - 1) as f32) * 2.0 - 1.0;
+            let y = (i as f32 / (rows - 1) as f32) * 2.0 - 1.0;
+            let sigma = 0.5;
+            (-(x*x + y*y) / (2.0 * sigma * sigma)).exp()
+        })),
+        
+        ("Sine Wave (사인파)", Box::new(|i, j, rows, cols| {
+            let x = 2.0 * PI * j as f32 / cols as f32;
+            let y = 2.0 * PI * i as f32 / rows as f32;
+            (x.sin() + y.sin()) / 2.0 * 0.5 + 0.5
+        })),
+        
+        ("Checkerboard (체커보드)", Box::new(|i, j, rows, cols| {
+            let block_size = rows.max(cols) / 8;
+            if ((i / block_size) + (j / block_size)) % 2 == 0 {
+                1.0
+            } else {
+                0.0
+            }
+        })),
+        
+        ("Linear Gradient (선형)", Box::new(|i, j, rows, cols| {
+            (i as f32 / (rows - 1) as f32 + j as f32 / (cols - 1) as f32) / 2.0
+        })),
+        
+        ("Random-like (의사난수)", Box::new(|i, j, rows, cols| {
+            // 결정론적 의사난수 패턴
+            let seed = (i * cols + j) as f32;
+            ((seed * 0.1234567).sin() * 43758.5453).fract()
+        })),
+    ];
+    
+    let mut results = Vec::new();
+    
+    for (rows, cols) in &practical_sizes {
+        println!("\n--- {}x{} 행렬 ({}KB) ---", rows, cols, rows * cols * 4 / 1024);
+        
+        for (pattern_name, pattern_fn) in &patterns {
+            // 패턴 생성
+            let mut target = vec![0.0; rows * cols];
+            for i in 0..*rows {
+                for j in 0..*cols {
+                    target[i * cols + j] = pattern_fn(i, j, *rows, *cols);
+                }
+            }
+            
+            // PoincareMatrix 생성 및 학습
+            let init = PoincareMatrix {
+                seed: Packed128 { 
+                    hi: 0x12345, 
+                    lo: ((0.5f32.to_bits() as u64) << 32) | 0.5f32.to_bits() as u64 
+                },
+                rows: *rows,
+                cols: *cols
+            };
+            
+            // 크기에 따라 학습 파라미터 조정
+            let (epochs, lr) = match rows * cols {
+                n if n <= 4096 => (1000, 0.01),
+                n if n <= 65536 => (500, 0.005),
+                n if n <= 262144 => (300, 0.002),
+                _ => (200, 0.001),
+            };
+            
+            // 학습 (출력 억제)
+            let trained = init.train_with_adam128(&target, *rows, *cols, epochs, lr);
+            
+            // RMSE 계산
+            let rmse = {
+                let mut err = 0.0;
+                for i in 0..*rows {
+                    for j in 0..*cols {
+                        let idx = i * cols + j;
+                        let w = trained.seed.compute_weight_continuous(i, j, *rows, *cols);
+                        err += (target[idx] - w).powi(2);
+                    }
+                }
+                (err / target.len() as f32).sqrt()
+            };
+            
+            // 압축률 계산
+            let matrix_size_bytes = rows * cols * 4;
+            let compressed_size_bytes = 16;
+            let compression_ratio = matrix_size_bytes / compressed_size_bytes;
+            
+            println!("  [{}] RMSE: {:.6}, 압축률: {}:1", pattern_name, rmse, compression_ratio);
+            
+            results.push((rows * cols, pattern_name.to_string(), rmse, compression_ratio));
+        }
+    }
+    
+    // 결과 분석
+    println!("\n=== 📊 압축 성능 분석 ===");
+    
+    // 패턴별 평균 RMSE
+    println!("\n패턴별 평균 성능:");
+    for pattern_name in patterns.iter().map(|(name, _)| name) {
+        let pattern_results: Vec<_> = results.iter()
+            .filter(|(_, name, _, _)| name == pattern_name)
+            .collect();
+        
+        let avg_rmse = pattern_results.iter()
+            .map(|(_, _, rmse, _)| rmse)
+            .sum::<f32>() / pattern_results.len() as f32;
+            
+        let performance = if avg_rmse < 0.001 {
+            "★★★★★ (완벽)"
+        } else if avg_rmse < 0.01 {
+            "★★★★☆ (우수)"
+        } else if avg_rmse < 0.1 {
+            "★★★☆☆ (양호)"
+        } else if avg_rmse < 0.5 {
+            "★★☆☆☆ (보통)"
+        } else {
+            "★☆☆☆☆ (개선필요)"
+        };
+        
+        println!("  - {}: 평균 RMSE {:.6} {}", pattern_name, avg_rmse, performance);
+    }
+    
+    // 실용적 기준 평가
+    println!("\n실용적 압축 기준 (RMSE < 0.01, 압축률 > 100:1):");
+    let practical_count = results.iter()
+        .filter(|(_, _, rmse, ratio)| *rmse < 0.01 && *ratio > 100)
+        .count();
+    
+    println!("  - 기준 충족: {}/{} ({:.1}%)", 
+             practical_count, 
+             results.len(), 
+             practical_count as f32 / results.len() as f32 * 100.0);
+    
+    // 최적 크기 추천
+    println!("\n💡 추천 사항:");
+    println!("  - 32x32 ~ 256x256: Radial/Gaussian 패턴에 최적");
+    println!("  - 512x512 이상: 단순 패턴만 효과적");
+    println!("  - Random 패턴: 현재 아키텍처로는 압축 어려움");
+    println!("  - 실용적 한계: 768x768 (BERT 크기) 정도까지");
+} 
