@@ -112,9 +112,10 @@ impl PoincareMatrix {
 
 use crate::types::Packed128;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::sync::mpsc;
+use indicatif::{ProgressBar, ProgressStyle};
+use rand::Rng;
 
 /// 6.2 계층적 블록 분할 시스템
 /// 
@@ -524,7 +525,7 @@ impl HierarchicalBlockMatrix {
                     }
                 }
                 
-                // 실제 RBE 학습으로 최적 파라미터 찾기 (5000 에포크)
+                // 실제 RBE 학습으로 최적 파라미터 찾기 (효율적 100 에포크)
                 let mut best_seed = Packed128::random(&mut rand::thread_rng());
                 
                 // 초기 파라미터 설정
@@ -532,11 +533,21 @@ impl HierarchicalBlockMatrix {
                 let initial_theta = 0.0f32;
                 best_seed.lo = ((initial_r.to_bits() as u64) << 32) | initial_theta.to_bits() as u64;
                 
-                // 5000 에포크 RBE 학습으로 RMSE 최소화 (효율적 학습)
-                let mut learning_rate = 0.05; // 더 큰 초기 학습률
-                let epochs = 5000;
+                // 100 에포크 RBE 학습으로 RMSE 최소화 (빠른 수렴)
+                let mut learning_rate = 0.1; // 더 큰 학습률로 빠른 수렴
+                let epochs = 100; // 5000 → 100으로 대폭 감소
                 let mut best_rmse = f32::INFINITY;
                 let mut no_improvement_count = 0;
+                
+                // 🎯 tqdm 스타일 진행률 바 생성
+                let progress = ProgressBar::new(epochs as u64);
+                progress.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>3}/{len:3} {msg}")
+                        .unwrap()
+                        .progress_chars("#>-")
+                );
+                progress.set_message("RBE 학습 시작...");
                 
                 for epoch in 1..=epochs {
                     // 현재 예측 생성
@@ -562,29 +573,36 @@ impl HierarchicalBlockMatrix {
                     if rmse < best_rmse {
                         best_rmse = rmse;
                         no_improvement_count = 0;
-                        learning_rate *= 1.01; // 성능 향상시 학습률 약간 증가
+                        learning_rate *= 1.02; // 성능 향상시 학습률 약간 증가
                     } else {
                         no_improvement_count += 1;
-                        if no_improvement_count > 50 {
-                            learning_rate *= 0.95; // 개선 없으면 학습률 감소
+                        if no_improvement_count > 10 { // 더 빠른 적응
+                            learning_rate *= 0.9; // 개선 없으면 학습률 감소
                             no_improvement_count = 0;
                         }
                     }
                     
-                    // 진행 상황 로그 (매 1000 에포크마다)
-                    if epoch % 1000 == 0 {
-                        println!("    블록 학습 진행: Epoch {}/{}, RMSE={:.6}", epoch, epochs, rmse);
-                    }
+                    // 🔥 실시간 메트릭 업데이트
+                    progress.set_message(format!(
+                        "MSE: {:.6} | RMSE: {:.6} | LR: {:.4} | Best: {:.6}",
+                        mse, rmse, learning_rate, best_rmse
+                    ));
+                    progress.inc(1);
                     
-                    // 조기 종료 조건들
-                    if rmse < 0.005 {  // 매우 좋은 품질
-                        println!("    조기 종료: 목표 RMSE 달성 ({})", rmse);
+                    // 조기 종료 조건들 (더 관대하고 빠른 종료)
+                    if rmse < 0.01 {  // 좋은 품질 달성
+                        progress.finish_with_message(format!("🎉 조기 종료: 목표 RMSE 달성! (RMSE: {:.6})", rmse));
                         break;
                     }
-                    if no_improvement_count > 200 {  // 200 에포크 동안 개선 없음
-                        println!("    조기 종료: 수렴 완료 ({})", rmse);
+                    if no_improvement_count > 20 {  // 20 에포크 동안 개선 없음
+                        progress.finish_with_message(format!("⏹️ 조기 종료: 수렴 완료 (RMSE: {:.6})", rmse));
                         break;
                     }
+                }
+                
+                // 학습 완료 시 최종 상태
+                if !progress.is_finished() {
+                    progress.finish_with_message(format!("✅ 학습 완료: Best RMSE: {:.6}", best_rmse));
                 }
                 
                 *l4_block = best_seed;
