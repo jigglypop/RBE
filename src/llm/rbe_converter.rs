@@ -4,6 +4,7 @@ use crate::encoder::*;
 use crate::llm::llm_analyzer::*;
 use std::collections::HashMap;
 use rayon::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
 
 /// RBE 변환기
 pub struct RBEConverter {
@@ -176,24 +177,43 @@ impl RBEConverter {
         // 1. 적응적 블록 크기 결정
         let block_config = self.determine_optimal_block_config(layer_info)?;
         
+        // 🎯 통합 진행률 바 생성
+        // W1: 768×3072, W2: 3072×768에 대한 총 블록 수 계산
+        let w1_blocks = ((768 + block_config.block_size - 1) / block_config.block_size) * 
+                        ((3072 + block_config.block_size - 1) / block_config.block_size);
+        let w2_blocks = ((3072 + block_config.block_size - 1) / block_config.block_size) * 
+                        ((768 + block_config.block_size - 1) / block_config.block_size);
+        let total_blocks = w1_blocks + w2_blocks;
+        
+        let progress = ProgressBar::new(total_blocks as u64);
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template("🔥 [{elapsed_precise}] [{bar:50.cyan/blue}] {pos:>4}/{len:4} ({percent:>3}%) {msg}")
+                .unwrap()
+                .progress_chars("█▉▊▋▌▍▎▏ ")
+        );
+        progress.set_message("FFN 레이어 변환 준비 중...");
+        
         // 2. W1 행렬 변환 (768 → 3072)
-        println!("W1 행렬 변환 중... (768×3072)");
-        let w1_rbe = self.convert_weight_matrix(
+        progress.set_message(format!("W1 행렬 변환 중... (768×3072, {}블록)", w1_blocks));
+        let w1_rbe = self.convert_weight_matrix_with_progress(
             w1_weights, 
             768, 
             3072, 
             &block_config,
-            "w1"
+            "W1",
+            &progress
         )?;
         
-        // 3. W2 행렬 변환 (3072 → 768)
-        println!("W2 행렬 변환 중... (3072×768)");
-        let w2_rbe = self.convert_weight_matrix(
+        // 3. W2 행렬 변환 (3072 → 768)  
+        progress.set_message(format!("W2 행렬 변환 중... (3072×768, {}블록)", w2_blocks));
+        let w2_rbe = self.convert_weight_matrix_with_progress(
             w2_weights, 
             3072, 
             768, 
             &block_config,
-            "w2"
+            "W2",
+            &progress
         )?;
         
         // 4. 품질 검증
@@ -208,6 +228,16 @@ impl RBEConverter {
             frobenius_ratio: (quality_w1.frobenius_ratio + quality_w2.frobenius_ratio) / 2.0,
             quality_score: (quality_w1.quality_score + quality_w2.quality_score) / 2.0,
         };
+        
+        // 🎉 진행률 바 완료 처리
+        let original_size = (w1_weights.len() + w2_weights.len()) * 4;
+        let compressed_size = w1_rbe.compressed_size() + w2_rbe.compressed_size();
+        let compression_ratio = original_size as f32 / compressed_size as f32;
+        
+        progress.finish_with_message(format!(
+            "✅ FFN Layer {} 완료! | 품질: {:.1}/100 | 압축: {:.1}:1", 
+            layer_info.layer_id, combined_quality.quality_score, compression_ratio
+        ));
         
         // 6. 바이어스 처리
         let combined_biases = if bias1.is_some() || bias2.is_some() {
@@ -499,6 +529,59 @@ impl RBEConverter {
             .map_err(|e| format!("RBE 인코딩 실패 ({}): {}", matrix_name, e))?;
         
         println!("  ✓ {} 변환 완료", matrix_name);
+        
+        Ok(block_matrix)
+    }
+    
+    /// 진행률 바 지원 가중치 행렬 RBE 변환
+    fn convert_weight_matrix_with_progress(
+        &self,
+        weights: &[f32],
+        rows: usize,
+        cols: usize,
+        block_config: &BlockConfig,
+        matrix_name: &str,
+        progress: &ProgressBar
+    ) -> Result<HierarchicalBlockMatrix, String> {
+        
+        // 예상 블록 수 계산
+        let expected_blocks = ((rows + block_config.block_size - 1) / block_config.block_size) * 
+                             ((cols + block_config.block_size - 1) / block_config.block_size);
+        
+        // HierarchicalBlockMatrix 생성
+        let mut block_matrix = HierarchicalBlockMatrix::new(
+            rows,
+            cols,
+            block_config.quality_level.clone()
+        );
+        
+        // 가중치 데이터를 행렬 형태로 재구성
+        let weight_matrix: Vec<Vec<f32>> = (0..rows)
+            .map(|i| {
+                weights[i * cols..(i + 1) * cols].to_vec()
+            })
+            .collect();
+        
+        // RBE 인코딩 수행 (시뮬레이션된 진행률)
+        progress.set_message(format!("{}: 블록 인코딩 시작...", matrix_name));
+        
+        // 인코딩 시작
+        let start_time = std::time::Instant::now();
+        block_matrix.encode_from_dense(&weight_matrix)
+            .map_err(|e| format!("RBE 인코딩 실패 ({}): {}", matrix_name, e))?;
+        let elapsed = start_time.elapsed();
+        
+        // 예상 블록 수만큼 진행률 증가
+        progress.inc(expected_blocks as u64);
+        
+        // 품질 통계 가져오기
+        let stats = block_matrix.quality_statistics();
+        let rmse = stats.total_error.sqrt(); // RMSE 계산
+        
+        progress.set_message(format!(
+            "{}: ✅ 완료 | RMSE: {:.6} | 압축: {:.1}:1 | 시간: {:?}", 
+            matrix_name, rmse, stats.compression_ratio, elapsed
+        ));
         
         Ok(block_matrix)
     }

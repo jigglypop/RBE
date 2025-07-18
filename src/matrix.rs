@@ -533,21 +533,11 @@ impl HierarchicalBlockMatrix {
                 let initial_theta = 0.0f32;
                 best_seed.lo = ((initial_r.to_bits() as u64) << 32) | initial_theta.to_bits() as u64;
                 
-                // 100 에포크 RBE 학습으로 RMSE 최소화 (빠른 수렴)
-                let mut learning_rate = 0.1; // 더 큰 학습률로 빠른 수렴
-                let epochs = 100; // 5000 → 100으로 대폭 감소
+                // 🚀 5000 에포크 RBE 학습으로 RMSE 최소화 (고품질 변환)
+                let mut learning_rate = 0.05; // 안정적인 학습률
+                let epochs = 5000; // 사용자 요청: 5000 에포크로 품질 최대화
                 let mut best_rmse = f32::INFINITY;
                 let mut no_improvement_count = 0;
-                
-                // 🎯 tqdm 스타일 진행률 바 생성
-                let progress = ProgressBar::new(epochs as u64);
-                progress.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>3}/{len:3} {msg}")
-                        .unwrap()
-                        .progress_chars("#>-")
-                );
-                progress.set_message("RBE 학습 시작...");
                 
                 for epoch in 1..=epochs {
                     // 현재 예측 생성
@@ -582,28 +572,19 @@ impl HierarchicalBlockMatrix {
                         }
                     }
                     
-                    // 🔥 실시간 메트릭 업데이트
-                    progress.set_message(format!(
-                        "MSE: {:.6} | RMSE: {:.6} | LR: {:.4} | Best: {:.6}",
-                        mse, rmse, learning_rate, best_rmse
-                    ));
-                    progress.inc(1);
-                    
-                    // 조기 종료 조건들 (더 관대하고 빠른 종료)
-                    if rmse < 0.01 {  // 좋은 품질 달성
-                        progress.finish_with_message(format!("🎉 조기 종료: 목표 RMSE 달성! (RMSE: {:.6})", rmse));
+                    // 🎯 조기 종료 조건들 (품질 우선 + 효율적 수렴)
+                    if rmse < 0.005 {  // 매우 좋은 품질 달성
                         break;
                     }
-                    if no_improvement_count > 20 {  // 20 에포크 동안 개선 없음
-                        progress.finish_with_message(format!("⏹️ 조기 종료: 수렴 완료 (RMSE: {:.6})", rmse));
+                    if no_improvement_count > 50 {  // 50 에포크 동안 개선 없음 (더 인내심)
                         break;
                     }
                 }
                 
                 // 학습 완료 시 최종 상태
-                if !progress.is_finished() {
-                    progress.finish_with_message(format!("✅ 학습 완료: Best RMSE: {:.6}", best_rmse));
-                }
+                // if !progress.is_finished() {
+                //     progress.finish_with_message(format!("✅ 학습 완료: Best RMSE: {:.6}", best_rmse));
+                // }
                 
                 *l4_block = best_seed;
             }
