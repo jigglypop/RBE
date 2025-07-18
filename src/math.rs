@@ -131,3 +131,470 @@ pub fn apply_theta_cordic(result: (f32, f32), special: u16) -> f32 {
     let theta = result.1.atan2(result.0);
     theta * (special as f32 / 63.0)
 } 
+
+/// 정밀한 역전파: hi/lo 분리 그래디언트 계산 (수정됨)
+/// target: 목표 행렬, predicted: 현재 예측, seed: 현재 파라미터
+pub fn fused_backward(
+    target: &[f32], 
+    predicted: &[f32], 
+    seed: &mut Packed128, 
+    rows: usize, 
+    cols: usize,
+    learning_rate: f32
+) -> (f32, f32) {
+    let mut total_loss = 0.0;
+    let mut grad_r_continuous = 0.0;
+    let mut grad_theta_continuous = 0.0;
+    
+    // 연속 파라미터 추출
+    let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+    let theta_fp32 = f32::from_bits(seed.lo as u32);
+    
+    let eps = 1e-4; // 수치 미분용 epsilon
+    
+    for i in 0..rows {
+        for j in 0..cols {
+            let idx = i * cols + j;
+            let error = predicted[idx] - target[idx];
+            total_loss += error * error;
+            
+            // 1. 상태 전이 미분 적용 (hi 비트 업데이트)
+            seed.apply_state_transition(error, i, j);
+            
+            // 2. 연속 파라미터 그래디언트 계산 (lo 업데이트용)
+            // r에 대한 수치 미분 - 더 정확한 계산
+            let r_plus = r_fp32 + eps;
+            let r_minus = r_fp32 - eps;
+            
+            let mut seed_r_plus = *seed;
+            seed_r_plus.lo = ((r_plus.to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+            let weight_r_plus = seed_r_plus.fused_forward(i, j, rows, cols);
+            
+            let mut seed_r_minus = *seed;
+            seed_r_minus.lo = ((r_minus.to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+            let weight_r_minus = seed_r_minus.fused_forward(i, j, rows, cols);
+            
+            let dr = (weight_r_plus - weight_r_minus) / (2.0 * eps);
+            grad_r_continuous += error * dr;
+            
+            // theta에 대한 수치 미분
+            let theta_plus = theta_fp32 + eps;
+            let theta_minus = theta_fp32 - eps;
+            
+            let mut seed_th_plus = *seed;
+            seed_th_plus.lo = ((r_fp32.to_bits() as u64) << 32) | theta_plus.to_bits() as u64;
+            let weight_th_plus = seed_th_plus.fused_forward(i, j, rows, cols);
+            
+            let mut seed_th_minus = *seed;
+            seed_th_minus.lo = ((r_fp32.to_bits() as u64) << 32) | theta_minus.to_bits() as u64;
+            let weight_th_minus = seed_th_minus.fused_forward(i, j, rows, cols);
+            
+            let dth = (weight_th_plus - weight_th_minus) / (2.0 * eps);
+            grad_theta_continuous += error * dth;
+        }
+    }
+    
+    // 그래디언트 정규화 (배치 크기로 나누기)
+    let batch_size = (rows * cols) as f32;
+    grad_r_continuous /= batch_size;
+    grad_theta_continuous /= batch_size;
+    
+    // 3. 연속 파라미터 업데이트 (lo) - 클램핑 완화
+    let new_r = r_fp32 - learning_rate * grad_r_continuous;
+    let new_theta = theta_fp32 - learning_rate * grad_theta_continuous;
+    
+    // r 범위를 더 넓게 허용 (0.1 ~ 2.0)
+    let clamped_r = new_r.clamp(0.1, 2.0);
+    
+    // lo 필드 업데이트
+    seed.lo = ((clamped_r.to_bits() as u64) << 32) | new_theta.to_bits() as u64;
+    
+    let mse = total_loss / batch_size;
+    (mse, mse.sqrt())
+}
+
+/// 벡터-행렬 곱셈의 융합 역전파
+/// x: 입력 벡터, dy: 출력 그래디언트, weights: 가중치 시드들
+pub fn fused_backward_gemv(
+    x: &[f32],
+    dy: &[f32], 
+    weights: &mut [Packed128],
+    rows: usize,
+    cols: usize,
+    learning_rate: f32
+) -> Vec<f32> {
+    let mut dx = vec![0.0; cols]; // 입력에 대한 그래디언트
+    
+    for i in 0..rows {
+        let output_grad = dy[i];
+        
+        for j in 0..cols {
+            let weight_idx = i * cols + j;
+            let mut weight_seed = weights[weight_idx];
+            
+            // 가중치에 대한 그래디언트 = output_grad * x[j]
+            let weight_grad = output_grad * x[j];
+            
+            // 상태 전이 미분 적용
+            weight_seed.apply_state_transition(weight_grad, i, j);
+            
+            // 연속 파라미터 업데이트
+            let r_fp32 = f32::from_bits((weight_seed.lo >> 32) as u32);
+            let theta_fp32 = f32::from_bits(weight_seed.lo as u32);
+            
+            let eps = 1e-5;
+            
+            // r 그래디언트 계산
+            let mut seed_r_plus = weight_seed;
+            seed_r_plus.lo = (((r_fp32 + eps).to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+            let w_r_plus = seed_r_plus.fused_forward(i, j, rows, cols);
+            
+            let mut seed_r_minus = weight_seed;
+            seed_r_minus.lo = (((r_fp32 - eps).to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+            let w_r_minus = seed_r_minus.fused_forward(i, j, rows, cols);
+            
+            let dr = (w_r_plus - w_r_minus) / (2.0 * eps);
+            let grad_r = weight_grad * dr;
+            
+            // theta 그래디언트 계산
+            let mut seed_th_plus = weight_seed;
+            seed_th_plus.lo = ((r_fp32.to_bits() as u64) << 32) | (theta_fp32 + eps).to_bits() as u64;
+            let w_th_plus = seed_th_plus.fused_forward(i, j, rows, cols);
+            
+            let mut seed_th_minus = weight_seed;
+            seed_th_minus.lo = ((r_fp32.to_bits() as u64) << 32) | (theta_fp32 - eps).to_bits() as u64;
+            let w_th_minus = seed_th_minus.fused_forward(i, j, rows, cols);
+            
+            let dth = (w_th_plus - w_th_minus) / (2.0 * eps);
+            let grad_theta = weight_grad * dth;
+            
+            // 파라미터 업데이트
+            let new_r = (r_fp32 - learning_rate * grad_r).clamp(0.0, 1.0);
+            let new_theta = theta_fp32 - learning_rate * grad_theta;
+            weight_seed.lo = ((new_r.to_bits() as u64) << 32) | new_theta.to_bits() as u64;
+            
+            weights[weight_idx] = weight_seed;
+            
+            // 입력에 대한 그래디언트 누적: dx[j] += dy[i] * w[i][j]
+            let current_weight = weight_seed.fused_forward(i, j, rows, cols);
+            dx[j] += output_grad * current_weight;
+        }
+    }
+    
+    dx
+}
+
+/// Adam 옵티마이저를 사용한 고급 역전파
+pub fn fused_backward_adam(
+    target: &[f32],
+    predicted: &[f32], 
+    seed: &mut Packed128,
+    m_r: &mut f32, v_r: &mut f32,
+    m_theta: &mut f32, v_theta: &mut f32,
+    rows: usize, 
+    cols: usize,
+    epoch: i32,
+    learning_rate: f32
+) -> f32 {
+    let mut total_loss = 0.0;
+    let mut grad_r_sum = 0.0;
+    let mut grad_theta_sum = 0.0;
+    
+    let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+    let theta_fp32 = f32::from_bits(seed.lo as u32);
+    let eps = 1e-4;
+    
+    for i in 0..rows {
+        for j in 0..cols {
+            let idx = i * cols + j;
+            let error = predicted[idx] - target[idx];
+            total_loss += error * error;
+            
+            // 상태 전이 미분
+            seed.apply_state_transition(error, i, j);
+            
+            // 연속 파라미터 그래디언트
+            // r 그래디언트
+            let mut seed_r_plus = *seed;
+            seed_r_plus.lo = (((r_fp32 + eps).to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+            let w_r_plus = seed_r_plus.fused_forward(i, j, rows, cols);
+            
+            let mut seed_r_minus = *seed;
+            seed_r_minus.lo = (((r_fp32 - eps).to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+            let w_r_minus = seed_r_minus.fused_forward(i, j, rows, cols);
+            
+            let dr = (w_r_plus - w_r_minus) / (2.0 * eps);
+            grad_r_sum += error * dr;
+            
+            // theta 그래디언트
+            let mut seed_th_plus = *seed;
+            seed_th_plus.lo = ((r_fp32.to_bits() as u64) << 32) | (theta_fp32 + eps).to_bits() as u64;
+            let w_th_plus = seed_th_plus.fused_forward(i, j, rows, cols);
+            
+            let mut seed_th_minus = *seed;
+            seed_th_minus.lo = ((r_fp32.to_bits() as u64) << 32) | (theta_fp32 - eps).to_bits() as u64;
+            let w_th_minus = seed_th_minus.fused_forward(i, j, rows, cols);
+            
+            let dth = (w_th_plus - w_th_minus) / (2.0 * eps);
+            grad_theta_sum += error * dth;
+        }
+    }
+    
+    // Adam 업데이트
+    let mut new_r = r_fp32;
+    let mut new_theta = theta_fp32;
+    
+    adam_update(&mut new_r, m_r, v_r, grad_r_sum, learning_rate, epoch);
+    adam_update(&mut new_theta, m_theta, v_theta, grad_theta_sum, learning_rate, epoch);
+    
+    new_r = new_r.clamp(0.0, 1.0);
+    
+    // 업데이트된 파라미터 적용
+    seed.lo = ((new_r.to_bits() as u64) << 32) | new_theta.to_bits() as u64;
+    
+    (total_loss / (rows * cols) as f32).sqrt()
+} 
+
+/// 고급 그래디언트 누적 구조체
+#[derive(Debug, Clone, Default)]
+pub struct GradientAccumulator {
+    pub r_grad_sum: f32,
+    pub theta_grad_sum: f32,
+    pub state_transition_count: u32,
+    pub total_samples: u32,
+}
+
+impl GradientAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    pub fn accumulate(&mut self, r_grad: f32, theta_grad: f32) {
+        self.r_grad_sum += r_grad;
+        self.theta_grad_sum += theta_grad;
+        self.total_samples += 1;
+    }
+    
+    pub fn get_average_gradients(&self) -> (f32, f32) {
+        if self.total_samples > 0 {
+            (
+                self.r_grad_sum / self.total_samples as f32,
+                self.theta_grad_sum / self.total_samples as f32,
+            )
+        } else {
+            (0.0, 0.0)
+        }
+    }
+    
+    pub fn reset(&mut self) {
+        self.r_grad_sum = 0.0;
+        self.theta_grad_sum = 0.0;
+        self.state_transition_count = 0;
+        self.total_samples = 0;
+    }
+}
+
+/// 배치별 정밀한 그래디언트 누적 및 업데이트
+pub fn batch_fused_backward(
+    targets: &[&[f32]], 
+    seeds: &mut [Packed128],
+    accumulators: &mut [GradientAccumulator],
+    adam_states_r: &mut [(f32, f32)], // (momentum, velocity)
+    adam_states_theta: &mut [(f32, f32)],
+    rows: usize, 
+    cols: usize,
+    learning_rate: f32,
+    epoch: i32,
+    use_advanced_transitions: bool
+) -> f32 {
+    assert_eq!(targets.len(), seeds.len());
+    assert_eq!(seeds.len(), accumulators.len());
+    
+    let batch_size = targets.len();
+    let mut total_loss = 0.0;
+    
+    // 그래디언트 누적 초기화
+    for acc in accumulators.iter_mut() {
+        acc.reset();
+    }
+    
+    // 배치 내 각 샘플에 대해 그래디언트 계산
+    for (batch_idx, target) in targets.iter().enumerate() {
+        let seed = &mut seeds[batch_idx];
+        let accumulator = &mut accumulators[batch_idx];
+        
+        // 현재 예측 생성
+        let mut predicted = vec![0.0; target.len()];
+        for i in 0..rows {
+            for j in 0..cols {
+                let idx = i * cols + j;
+                predicted[idx] = if use_advanced_transitions {
+                    seed.fused_forward_advanced(i, j, rows, cols)
+                } else {
+                    seed.fused_forward(i, j, rows, cols)
+                };
+            }
+        }
+        
+        // 손실 계산
+        let mut sample_loss = 0.0;
+        for i in 0..rows {
+            for j in 0..cols {
+                let idx = i * cols + j;
+                let error = predicted[idx] - target[idx];
+                sample_loss += error * error;
+                
+                // 상태 전이 미분 적용
+                if use_advanced_transitions {
+                    seed.advanced_state_transition(error, i, j);
+                } else {
+                    seed.apply_state_transition(error, i, j);
+                }
+                
+                if error.abs() > 0.001 { // 유의미한 오차에 대해서만 전이 카운트
+                    accumulator.state_transition_count += 1;
+                }
+                
+                // 연속 파라미터 그래디언트 계산
+                let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+                let theta_fp32 = f32::from_bits(seed.lo as u32);
+                let eps = 1e-5;
+                
+                // r 그래디언트
+                let mut seed_r_plus = *seed;
+                seed_r_plus.lo = (((r_fp32 + eps).to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+                let w_r_plus = if use_advanced_transitions {
+                    seed_r_plus.fused_forward_advanced(i, j, rows, cols)
+                } else {
+                    seed_r_plus.fused_forward(i, j, rows, cols)
+                };
+                
+                let mut seed_r_minus = *seed;
+                seed_r_minus.lo = (((r_fp32 - eps).to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+                let w_r_minus = if use_advanced_transitions {
+                    seed_r_minus.fused_forward_advanced(i, j, rows, cols)
+                } else {
+                    seed_r_minus.fused_forward(i, j, rows, cols)
+                };
+                
+                let dr = (w_r_plus - w_r_minus) / (2.0 * eps);
+                let grad_r = error * dr;
+                
+                // theta 그래디언트
+                let mut seed_th_plus = *seed;
+                seed_th_plus.lo = ((r_fp32.to_bits() as u64) << 32) | (theta_fp32 + eps).to_bits() as u64;
+                let w_th_plus = if use_advanced_transitions {
+                    seed_th_plus.fused_forward_advanced(i, j, rows, cols)
+                } else {
+                    seed_th_plus.fused_forward(i, j, rows, cols)
+                };
+                
+                let mut seed_th_minus = *seed;
+                seed_th_minus.lo = ((r_fp32.to_bits() as u64) << 32) | (theta_fp32 - eps).to_bits() as u64;
+                let w_th_minus = if use_advanced_transitions {
+                    seed_th_minus.fused_forward_advanced(i, j, rows, cols)
+                } else {
+                    seed_th_minus.fused_forward(i, j, rows, cols)
+                };
+                
+                let dth = (w_th_plus - w_th_minus) / (2.0 * eps);
+                let grad_theta = error * dth;
+                
+                // 그래디언트 누적
+                accumulator.accumulate(grad_r, grad_theta);
+            }
+        }
+        
+        total_loss += sample_loss / target.len() as f32;
+    }
+    
+    // 배치별 파라미터 업데이트
+    for (batch_idx, seed) in seeds.iter_mut().enumerate() {
+        let accumulator = &accumulators[batch_idx];
+        let (avg_grad_r, avg_grad_theta) = accumulator.get_average_gradients();
+        
+        if avg_grad_r.abs() > 1e-8 || avg_grad_theta.abs() > 1e-8 {
+            let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+            let theta_fp32 = f32::from_bits(seed.lo as u32);
+            
+            let mut new_r = r_fp32;
+            let mut new_theta = theta_fp32;
+            
+            // Adam 업데이트
+            adam_update(
+                &mut new_r, 
+                &mut adam_states_r[batch_idx].0, 
+                &mut adam_states_r[batch_idx].1, 
+                avg_grad_r, 
+                learning_rate, 
+                epoch
+            );
+            adam_update(
+                &mut new_theta, 
+                &mut adam_states_theta[batch_idx].0, 
+                &mut adam_states_theta[batch_idx].1, 
+                avg_grad_theta, 
+                learning_rate, 
+                epoch
+            );
+            
+            new_r = new_r.clamp(0.0, 1.0);
+            seed.lo = ((new_r.to_bits() as u64) << 32) | new_theta.to_bits() as u64;
+        }
+    }
+    
+    total_loss / batch_size as f32
+}
+
+/// 적응적 학습률을 사용한 고급 Adam 업데이트
+pub fn adaptive_adam_update(
+    param: &mut f32,
+    momentum: &mut f32,
+    velocity: &mut f32,
+    gradient: f32,
+    base_lr: f32,
+    epoch: i32,
+    gradient_norm: f32, // 전체 그래디언트 노름
+    transition_count: u32, // 상태 전이 횟수
+) {
+    const B1: f32 = 0.9;
+    const B2: f32 = 0.999;
+    const EPS: f32 = 1e-8;
+    
+    // 적응적 학습률 계산
+    let adaptive_lr = if transition_count > 0 {
+        // 상태 전이가 많이 일어났으면 학습률 감소
+        base_lr * (1.0 / (1.0 + transition_count as f32 * 0.01))
+    } else {
+        base_lr
+    };
+    
+    // 그래디언트 클리핑
+    let clipped_gradient = if gradient_norm > 1.0 {
+        gradient / gradient_norm
+    } else {
+        gradient
+    };
+    
+    *momentum = B1 * (*momentum) + (1.0 - B1) * clipped_gradient;
+    *velocity = B2 * (*velocity) + (1.0 - B2) * clipped_gradient * clipped_gradient;
+    
+    let m_hat = *momentum / (1.0 - B1.powi(epoch));
+    let v_hat = *velocity / (1.0 - B2.powi(epoch));
+    
+    *param -= adaptive_lr * m_hat / (v_hat.sqrt() + EPS);
+}
+
+/// 멀티스케일 그래디언트 분석
+pub fn analyze_gradient_scales(
+    gradients_r: &[f32], 
+    gradients_theta: &[f32]
+) -> (f32, f32, f32, f32) {
+    let r_norm = gradients_r.iter().map(|g| g * g).sum::<f32>().sqrt();
+    let theta_norm = gradients_theta.iter().map(|g| g * g).sum::<f32>().sqrt();
+    
+    let r_mean = gradients_r.iter().sum::<f32>() / gradients_r.len() as f32;
+    let theta_mean = gradients_theta.iter().sum::<f32>() / gradients_theta.len() as f32;
+    
+    (r_norm, theta_norm, r_mean, theta_mean)
+} 
