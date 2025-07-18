@@ -11,6 +11,10 @@ pub mod matrix;
 pub mod types;
 pub mod layer;
 
+// 테스트 모듈 추가
+#[cfg(test)]
+pub mod tests;
+
 // 라이브러리 사용자가 편리하게 접근할 수 있도록 주요 구조체와 함수를 공개합니다.
 pub use encoder::{HybridEncoder, GridCompressedMatrix};
 pub use types::{HybridEncodedBlock, TransformType, RbeParameters, ResidualCoefficient, EncodedBlockGradients};

@@ -153,6 +153,216 @@ impl Packed128 {
         Packed64{ rotations: self.hi }.compute_weight(i, j, rows, cols)
     }
     
+    /// 해석적 미분: r 파라미터에 대한 정확한 그래디언트 계산 (수치 미분 대체)
+    #[inline(always)]
+    pub fn analytical_gradient_r(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        // 1. 연속 파라미터 추출
+        let r_fp32 = f32::from_bits((self.lo >> 32) as u32);
+        let theta_fp32 = f32::from_bits(self.lo as u32);
+        
+        // 2. 좌표 정규화
+        let x_norm = (j as f32 / (cols - 1) as f32) * 2.0 - 1.0;
+        let y_norm = (i as f32 / (rows - 1) as f32) * 2.0 - 1.0;
+        let dist = (x_norm * x_norm + y_norm * y_norm).sqrt();
+        let base_angle = y_norm.atan2(x_norm);
+        
+        // 3. 상태 선택
+        let state_bits = self.hi & 0xFFFFF;
+        let coord_hash = ((i * 31 + j) & 0x3) as u64;
+        let state_selector = (state_bits >> (coord_hash * 2)) & 0x3;
+        
+        // 4. base_pattern과 그 미분 (첫 번째 clamp)
+        let base_pattern_unclamped = r_fp32 - dist * r_fp32 + theta_fp32;
+        let base_pattern = base_pattern_unclamped.clamp(0.0, 1.0);
+        
+        // base_pattern의 clamp 미분
+        let base_pattern_clamp_derivative = if base_pattern_unclamped > 0.0 && base_pattern_unclamped < 1.0 {
+            1.0
+        } else {
+            0.0
+        };
+        
+        let d_base_pattern_dr = (1.0 - dist) * base_pattern_clamp_derivative;
+        
+        // 5. 상태별 함수값과 그 미분 계산
+        let (modulated_value, d_modulated_value_dr) = match state_selector {
+            0 => {
+                // sin 상태: base_pattern * sin(base_angle + theta).abs()
+                let sin_arg = base_angle + theta_fp32;
+                let sin_val = sin_arg.sin();
+                let sin_abs = sin_val.abs();
+                
+                let value = base_pattern * sin_abs;
+                let gradient = d_base_pattern_dr * sin_abs; // sin_abs는 r에 의존하지 않음
+                
+                (value, gradient)
+            },
+            1 => {
+                // cos 상태: base_pattern * cos(base_angle + theta).abs()
+                let cos_arg = base_angle + theta_fp32;
+                let cos_val = cos_arg.cos();
+                let cos_abs = cos_val.abs();
+                
+                let value = base_pattern * cos_abs;
+                let gradient = d_base_pattern_dr * cos_abs;
+                
+                (value, gradient)
+            },
+            2 => {
+                // tanh 상태: base_pattern * tanh(dist*r + theta)
+                let tanh_arg = dist * r_fp32 + theta_fp32;
+                let tanh_val = tanh_arg.tanh();
+                let sech_sq = 1.0 - tanh_val * tanh_val;
+                
+                let value = base_pattern * tanh_val;
+                let gradient = d_base_pattern_dr * tanh_val + base_pattern * sech_sq * dist;
+                
+                (value, gradient)
+            },
+            3 => {
+                // exp 상태: base_pattern * (1 - exp(dist*r) * 0.5)
+                let exp_arg = dist * r_fp32;
+                let exp_val = exp_arg.exp();
+                let exp_term = 1.0 - exp_val * 0.5;
+                
+                let value = base_pattern * exp_term;
+                let gradient = d_base_pattern_dr * exp_term + base_pattern * (-0.5 * exp_val * dist);
+                
+                (value, gradient)
+            },
+            _ => {
+                let value = base_pattern;
+                let gradient = d_base_pattern_dr;
+                (value, gradient)
+            }
+        };
+        
+        // 6. detail_factor 적용
+        let detail_bits = (state_bits >> 8) & 0xFFF;
+        let detail_factor = 1.0 + 0.1 * (detail_bits as f32 / 4095.0 - 0.5);
+        
+        let detailed_value = modulated_value * detail_factor;
+        let detailed_gradient = d_modulated_value_dr * detail_factor;
+        
+        // 7. 최종 clamp(0,1) 적용 및 미분
+        let final_value_unclamped = detailed_value;
+        
+        // 최종 clamp의 미분: 범위 [0,1] 내에 있으면 1, 외부면 0
+        if final_value_unclamped > 0.0 && final_value_unclamped < 1.0 {
+            detailed_gradient
+        } else {
+            0.0
+        }
+    }
+    
+    /// 해석적 미분: theta 파라미터에 대한 정확한 그래디언트 계산 (수치 미분 대체)
+    #[inline(always)]
+    pub fn analytical_gradient_theta(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        // 1. 연속 파라미터 추출
+        let r_fp32 = f32::from_bits((self.lo >> 32) as u32);
+        let theta_fp32 = f32::from_bits(self.lo as u32);
+        
+        // 2. 좌표 정규화
+        let x_norm = (j as f32 / (cols - 1) as f32) * 2.0 - 1.0;
+        let y_norm = (i as f32 / (rows - 1) as f32) * 2.0 - 1.0;
+        let dist = (x_norm * x_norm + y_norm * y_norm).sqrt();
+        let base_angle = y_norm.atan2(x_norm);
+        
+        // 3. 상태 선택
+        let state_bits = self.hi & 0xFFFFF;
+        let coord_hash = ((i * 31 + j) & 0x3) as u64;
+        let state_selector = (state_bits >> (coord_hash * 2)) & 0x3;
+        
+        // 4. base_pattern과 그 미분 (첫 번째 clamp)
+        let base_pattern_unclamped = r_fp32 - dist * r_fp32 + theta_fp32;
+        let base_pattern = base_pattern_unclamped.clamp(0.0, 1.0);
+        
+        // base_pattern의 clamp 미분
+        let base_pattern_clamp_derivative = if base_pattern_unclamped > 0.0 && base_pattern_unclamped < 1.0 {
+            1.0
+        } else {
+            0.0
+        };
+        
+        let d_base_pattern_dtheta = 1.0 * base_pattern_clamp_derivative;
+        
+        // 5. 상태별 함수값과 그 미분 계산
+        let (modulated_value, d_modulated_value_dtheta) = match state_selector {
+            0 => {
+                // sin 상태: base_pattern * sin(base_angle + theta).abs()
+                let sin_arg = base_angle + theta_fp32;
+                let sin_val = sin_arg.sin();
+                let cos_val = sin_arg.cos();
+                let sin_abs = sin_val.abs();
+                
+                let value = base_pattern * sin_abs;
+                
+                // d/dtheta[base_pattern * sin(base_angle + theta).abs()]
+                let d_sin_abs_dtheta = if sin_val >= 0.0 { cos_val } else { -cos_val };
+                let gradient = d_base_pattern_dtheta * sin_abs + base_pattern * d_sin_abs_dtheta;
+                
+                (value, gradient)
+            },
+            1 => {
+                // cos 상태: base_pattern * cos(base_angle + theta).abs()
+                let cos_arg = base_angle + theta_fp32;
+                let cos_val = cos_arg.cos();
+                let sin_val = cos_arg.sin();
+                let cos_abs = cos_val.abs();
+                
+                let value = base_pattern * cos_abs;
+                
+                let d_cos_abs_dtheta = if cos_val >= 0.0 { -sin_val } else { sin_val };
+                let gradient = d_base_pattern_dtheta * cos_abs + base_pattern * d_cos_abs_dtheta;
+                
+                (value, gradient)
+            },
+            2 => {
+                // tanh 상태: base_pattern * tanh(dist*r + theta)
+                let tanh_arg = dist * r_fp32 + theta_fp32;
+                let tanh_val = tanh_arg.tanh();
+                let sech_sq = 1.0 - tanh_val * tanh_val;
+                
+                let value = base_pattern * tanh_val;
+                let gradient = d_base_pattern_dtheta * tanh_val + base_pattern * sech_sq;
+                
+                (value, gradient)
+            },
+            3 => {
+                // exp 상태: base_pattern * (1 - exp(dist*r) * 0.5)
+                let exp_val = (dist * r_fp32).exp();
+                let exp_term = 1.0 - exp_val * 0.5;
+                
+                let value = base_pattern * exp_term;
+                let gradient = d_base_pattern_dtheta * exp_term; // exp_term은 theta에 의존하지 않음
+                
+                (value, gradient)
+            },
+            _ => {
+                let value = base_pattern;
+                let gradient = d_base_pattern_dtheta;
+                (value, gradient)
+            }
+        };
+        
+        // 6. detail_factor 적용
+        let detail_bits = (state_bits >> 8) & 0xFFF;
+        let detail_factor = 1.0 + 0.1 * (detail_bits as f32 / 4095.0 - 0.5);
+        
+        let detailed_value = modulated_value * detail_factor;
+        let detailed_gradient = d_modulated_value_dtheta * detail_factor;
+        
+        // 7. 최종 clamp(0,1) 적용 및 미분
+        let final_value_unclamped = detailed_value;
+        
+        // 최종 clamp의 미분: 범위 [0,1] 내에 있으면 1, 외부면 0
+        if final_value_unclamped > 0.0 && final_value_unclamped < 1.0 {
+            detailed_gradient
+        } else {
+            0.0
+        }
+    }
+
     /// 학습 전용: lo(Seed1)의 연속 FP32 직접 사용
     #[inline(always)]
     pub fn compute_weight_continuous(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {

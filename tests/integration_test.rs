@@ -204,11 +204,11 @@ fn generate_gravity_matrix(rows: usize, cols: usize) -> Vec<f32> {
 
 
 #[test]
-fn test_learning_on_gravity_pattern() {
-    println!("=== 중력 패턴 학습 테스트 (64x64) ===");
+fn 대형_행렬_학습() {
+    println!("=== 중력 패턴 학습 테스트 (4096 x 4096) ===");
     
-    let rows = 64;
-    let cols = 64;
+    let rows = 4096;
+    let cols = 4096;
     let mut rng = rand::thread_rng();
     
     // 중력 패턴을 타겟으로 생성
