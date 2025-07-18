@@ -1,7 +1,7 @@
 
 use nalgebra::{DMatrix, DVector};
 use poincare_layer::encoder::HybridEncoder;
-use poincare_layer::types::{TransformType, HybridEncodedBlock};
+use poincare_layer::types::{TransformType};
 use poincare_layer::EncodedLayer;
 
 #[test]

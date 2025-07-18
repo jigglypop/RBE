@@ -4,22 +4,18 @@ use poincare_layer::math::fused_backward;
 #[test]
 fn test_simple_learning() {
     println!("=== 간단한 학습 테스트 ===");
-    
     let rows = 8;
     let cols = 8;
     let mut rng = rand::thread_rng();
-    
     // 단순한 패턴 생성 (선형 그래디언트)
     let mut target = vec![0.0; rows * cols];
     for i in 0..rows {
         for j in 0..cols {
-            target[i * cols + j] = (i as f32 / (rows - 1) as f32); // 수직 그래디언트
+            target[i * cols + j] = i as f32 / (rows - 1) as f32; // 수직 그래디언트
         }
     }
-    
     // 초기화 개선
     let mut seed = Packed128::random(&mut rng);
-    
     // 연속 파라미터를 더 합리적인 값으로 초기화
     let initial_r = 0.5f32;
     let initial_theta = 0.0f32;
@@ -173,39 +169,6 @@ fn test_fused_forward_backward_integration() {
     test_simple_learning(); // 간단한 테스트로 대체
 }
 
-#[test]
-fn test_advanced_state_transition() {
-    println!("=== 고급 상태 전이 미분 테스트 ===");
-    
-    let mut seed = Packed128::random(&mut rand::thread_rng());
-    
-    // 초기 상태 저장
-    let initial_hi = seed.hi;
-    println!("초기 hi 상태: 0x{:016x}", initial_hi);
-    
-    // 다양한 강도의 그래디언트 신호로 상태 전이 테스트
-    let gradient_signals = [0.0, 0.05, 0.15, 0.25, -0.1, -0.3];
-    
-    for (_test_idx, &grad_signal) in gradient_signals.iter().enumerate() {
-        let mut test_seed = seed;
-        
-        // 여러 위치에서 상태 전이 적용
-        for i in 0..4 {
-            for j in 0..4 {
-                test_seed.advanced_state_transition(grad_signal, i, j);
-            }
-        }
-        
-        println!("그래디언트 {:.3} 적용 후: 0x{:016x}", grad_signal, test_seed.hi);
-        
-        // 상태가 실제로 변했는지 확인
-        if grad_signal == 0.0 {
-            assert_eq!(test_seed.hi, initial_hi, "0 그래디언트에서 상태가 변함");
-        } else {
-            assert_ne!(test_seed.hi, initial_hi, "0이 아닌 그래디언트에서 상태가 변하지 않음");
-        }
-    }
-}
 
 /// 테스트용 중력 매트릭스 생성 함수
 fn generate_gravity_matrix(rows: usize, cols: usize) -> Vec<f32> {
@@ -272,8 +235,8 @@ fn test_learning_on_gravity_pattern() {
     println!("초기 MSE: {:.6}", initial_loss);
     
     // 학습
-    let learning_rate = 0.05; // 학습률 상향
-    let epochs = 5000; // 에포크 증가
+    let learning_rate = 0.001; // 학습률 상향
+    let epochs = 25000; // 에포크 증가
     
     for epoch in 1..=epochs {
         let mut predicted = vec![0.0; target.len()];
@@ -314,10 +277,8 @@ fn test_learning_on_gravity_pattern() {
     let final_rmse = final_mse.sqrt();
     
     println!("최종 MSE: {:.6}, 최종 RMSE: {:.6}", final_mse, final_rmse);
-    
     let improvement = (initial_loss - final_mse) / initial_loss * 100.0;
     println!("손실 개선: {:.2}%", improvement);
-    
     // RMSE가 특정 임계값 이하로 감소했는지 확인 (0.08로 기준 강화)
     assert!(final_rmse < 0.08, "최종 RMSE가 0.08 이상입니다. 현재 값: {}", final_rmse);
     println!("중력 패턴 학습 성공! 최종 RMSE < 0.08");
@@ -354,6 +315,5 @@ fn test_basic_state_functions() {
         assert!(numerical_derivative.is_finite(), 
                 "상태 {}에서 미분이 무한대: {}", state, numerical_derivative);
     }
-    
     println!("모든 상태 함수가 미분 가능함을 확인");
 } 

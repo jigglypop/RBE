@@ -1,11 +1,9 @@
 
 use crate::types::{
-    HybridEncodedBlock, TransformType, RbeParameters, ResidualCoefficient, EncodedBlockGradients,
+    HybridEncodedBlock, RbeParameters, EncodedBlockGradients,
     Packed128
 };
-use crate::math::{fused_backward_gemv, fused_backward_adam};
 use nalgebra::{DMatrix, DVector};
-use rustdct::DctPlanner;
 use std::ops::AddAssign;
 
 pub struct EncodedLayer {
@@ -334,7 +332,7 @@ impl EncodedLayer {
 
     pub fn fused_backward(
         &self,
-        x: &DVector<f64>,      // Original input from the forward pass
+        _: &DVector<f64>,      // Original input from the forward pass
         d_loss_d_y: &DVector<f64>, // Gradient from the next layer
     ) -> (DVector<f64>, Vec<Vec<EncodedBlockGradients>>) {
         assert_eq!(d_loss_d_y.nrows(), self.total_rows, "Output gradient dimension mismatch");
@@ -355,21 +353,14 @@ impl EncodedLayer {
                     block.cols,
                     block.decode()
                 ).map(|e| e as f64);
-                
                 let y_start = i * block_height;
                 let x_start = j * block_width;
-
                 let d_loss_d_y_slice = d_loss_d_y.rows(y_start, block_height);
-                let x_slice = x.rows(x_start, block_width);
-
                 // 1. Calculate d_loss/d_x for this block: W^T * d_loss_d_y_slice
                 let d_loss_d_x_block = w_matrix.transpose() * d_loss_d_y_slice;
                 d_loss_d_x.rows_mut(x_start, block_width).add_assign(&d_loss_d_x_block);
-
                 // 2. Calculate d_loss/d_params for this block
                 // d_loss/d_W = d_loss_d_y_slice * x_slice^T (outer product)
-                let d_loss_d_w = d_loss_d_y_slice * x_slice.transpose();
-
                 // This is the hardest part: projecting d_loss/d_W back onto the gradients
                 // of the RBE params and residual coefficients. This requires the chain rule
                 // through the decoding process. For now, we'll leave it as a placeholder.

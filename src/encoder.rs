@@ -5,7 +5,7 @@ use rustdct::DctPlanner;
 use std::sync::Mutex;
 use rayon::prelude::*;
 use ndarray::{Array, Array1, Array2};
-use omni_wave::{wavelet as w, completely_decompose_2d, completely_reconstruct_2d};
+use omni_wave::{wavelet as w, completely_decompose_2d};
 
 /// RBE + DCT/Wavelet 하이브리드 인코더
 pub struct HybridEncoder {

@@ -1,7 +1,6 @@
 use rand::Rng;
 use std::f32;
 use crate::math::{ste_quant_q0x, ste_quant_phase};
-use nalgebra::{DMatrix, DVector};
 
 /// 64-bit Packed Poincaré 시드 표현 (CORDIC 통합)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -179,20 +178,14 @@ impl Packed128 {
     pub fn advanced_state_transition(&mut self, gradient_signal: f32, i: usize, j: usize) {
         // 다중 해시를 사용한 위치별 상태 관리
         let primary_hash = ((i * 31 + j) & 0x7) as u64; // 3비트 선택자
-        let secondary_hash = ((i * 17 + j * 13) & 0x3) as u64; // 2비트 보조 선택자
-        
-        // 주요 상태 (3비트): 8가지 함수 상태
         let primary_bit_pos = primary_hash * 3;
         let current_primary_state = (self.hi >> primary_bit_pos) & 0x7;
-        
         // 보조 상태 (2비트): 4가지 변조 상태
         let secondary_bit_pos = (primary_hash + 8) * 2;
         let current_secondary_state = (self.hi >> secondary_bit_pos) & 0x3;
-        
         // 그래디언트 강도에 따른 전이 결정
         let abs_gradient = gradient_signal.abs();
         let gradient_sign = gradient_signal.signum();
-        
         let new_primary_state = if abs_gradient > 0.2 {
             // 강한 그래디언트: 명확한 미분 전이
             match (current_primary_state, gradient_sign > 0.0) {
@@ -338,11 +331,8 @@ impl Packed128 {
         
         // 5. 다중 상태 기반 함수 선택 및 변조
         let primary_hash = ((i * 31 + j) & 0x7) as u64;
-        let secondary_hash = ((i * 17 + j * 13) & 0x3) as u64;
-        
         let primary_state = (state_bits >> (primary_hash * 3)) & 0x7;
         let secondary_state = (state_bits >> ((primary_hash + 8) * 2)) & 0x3;
-        
         // 주요 함수 계산
         let primary_value = self.compute_state_function(
             primary_state, 
