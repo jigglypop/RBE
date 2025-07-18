@@ -199,16 +199,133 @@ fn test_advanced_state_transition() {
         println!("그래디언트 {:.3} 적용 후: 0x{:016x}", grad_signal, test_seed.hi);
         
         // 상태가 실제로 변했는지 확인
-        if (grad_signal as f32).abs() > 0.1 {
-            assert_ne!(test_seed.hi, initial_hi, "강한 그래디언트에도 상태가 변하지 않음");
+        if grad_signal == 0.0 {
+            assert_eq!(test_seed.hi, initial_hi, "0 그래디언트에서 상태가 변함");
+        } else {
+            assert_ne!(test_seed.hi, initial_hi, "0이 아닌 그래디언트에서 상태가 변하지 않음");
         }
     }
 }
 
-// 나머지 테스트 함수들은 간단한 버전으로 축소
+/// 테스트용 중력 매트릭스 생성 함수
+fn generate_gravity_matrix(rows: usize, cols: usize) -> Vec<f32> {
+    let mut phi = vec![0.0; rows * cols];
+    let x_coords: Vec<f32> = (0..cols).map(|i| 2.0 * i as f32 / (cols - 1) as f32 - 1.0).collect();
+    let y_coords: Vec<f32> = (0..rows).map(|i| 2.0 * i as f32 / (rows - 1) as f32 - 1.0).collect();
+
+    let mut max_phi = f32::MIN;
+    for i in 0..rows {
+        for j in 0..cols {
+            let xv = x_coords[j];
+            let yv = y_coords[i];
+            let mut r = (xv.powi(2) + yv.powi(2)).sqrt();
+            if r < 1e-6 {
+                r = 1e-6;
+            }
+            let val = 1.0 / r;
+            phi[i * cols + j] = val;
+            if val > max_phi {
+                max_phi = val;
+            }
+        }
+    }
+
+    // 정규화
+    if max_phi > 0.0 {
+        for val in phi.iter_mut() {
+            *val /= max_phi;
+        }
+    }
+    phi
+}
+
+
+#[test]
+fn test_learning_on_gravity_pattern() {
+    println!("=== 중력 패턴 학습 테스트 (64x64) ===");
+    
+    let rows = 64;
+    let cols = 64;
+    let mut rng = rand::thread_rng();
+    
+    // 중력 패턴을 타겟으로 생성
+    let target = generate_gravity_matrix(rows, cols);
+    
+    // 초기화
+    let mut seed = Packed128::random(&mut rng);
+    let initial_r = 0.8f32;
+    let initial_theta = 0.1f32;
+    seed.lo = ((initial_r.to_bits() as u64) << 32) | initial_theta.to_bits() as u64;
+    
+    println!("초기 시드: hi=0x{:016x}, lo=0x{:016x}", seed.hi, seed.lo);
+    
+    // 초기 손실
+    let mut initial_predicted = vec![0.0; target.len()];
+    for i in 0..rows {
+        for j in 0..cols {
+            initial_predicted[i * cols + j] = seed.fused_forward(i, j, rows, cols);
+        }
+    }
+    let initial_loss: f32 = target.iter().zip(initial_predicted.iter())
+        .map(|(t, p)| (t - p).powi(2))
+        .sum::<f32>() / target.len() as f32;
+    println!("초기 MSE: {:.6}", initial_loss);
+    
+    // 학습
+    let learning_rate = 0.05; // 학습률 상향
+    let epochs = 5000; // 에포크 증가
+    
+    for epoch in 1..=epochs {
+        let mut predicted = vec![0.0; target.len()];
+        for i in 0..rows {
+            for j in 0..cols {
+                predicted[i * cols + j] = seed.fused_forward(i, j, rows, cols);
+            }
+        }
+        
+        let (mse, _rmse) = fused_backward(
+            &target, 
+            &predicted, 
+            &mut seed, 
+            rows, 
+            cols, 
+            learning_rate
+        );
+        
+        if epoch % 100 == 0 || epoch == epochs { // 로그 출력 간격 조정
+            let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+            let theta_fp32 = f32::from_bits(seed.lo as u32);
+            println!("Epoch {}: MSE={:.6}, r={:.4}, theta={:.4}", 
+                     epoch, mse, r_fp32, theta_fp32);
+        }
+    }
+    
+    // 최종 검증
+    let mut final_predicted = vec![0.0; target.len()];
+    for i in 0..rows {
+        for j in 0..cols {
+            final_predicted[i * cols + j] = seed.fused_forward(i, j, rows, cols);
+        }
+    }
+    
+    let final_mse: f32 = target.iter().zip(final_predicted.iter())
+        .map(|(t, p)| (t - p).powi(2))
+        .sum::<f32>() / target.len() as f32;
+    let final_rmse = final_mse.sqrt();
+    
+    println!("최종 MSE: {:.6}, 최종 RMSE: {:.6}", final_mse, final_rmse);
+    
+    let improvement = (initial_loss - final_mse) / initial_loss * 100.0;
+    println!("손실 개선: {:.2}%", improvement);
+    
+    // RMSE가 특정 임계값 이하로 감소했는지 확인 (0.08로 기준 강화)
+    assert!(final_rmse < 0.08, "최종 RMSE가 0.08 이상입니다. 현재 값: {}", final_rmse);
+    println!("중력 패턴 학습 성공! 최종 RMSE < 0.08");
+}
+
 #[test]
 fn test_basic_state_functions() {
-    println!("=== 기본 상태 함수 테스트 ===");
+    println!("=== 기본 상태 함수 값 테스트 ===");
     
     let seed = Packed128::random(&mut rand::thread_rng());
     
