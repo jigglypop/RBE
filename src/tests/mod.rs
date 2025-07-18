@@ -3,3 +3,4 @@
 pub mod math_test;
 pub mod encoder_test;
 pub mod decoder_test; 
+pub mod generator_test;
