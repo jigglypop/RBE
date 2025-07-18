@@ -632,3 +632,216 @@ pub struct PoincareMatrix {
     pub rows: usize,
     pub cols: usize,
 } 
+
+// ================================
+// 1장: 푸앵카레 볼 기반 데이터 구조 구현
+// ================================
+
+/// 푸앵카레 볼 128비트 인코딩 (1장 문서 정확한 설계)
+/// hi: 푸앵카레 상태 코어, lo: 연속 파라미터 코어
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PoincarePackedBit128 {
+    /// 푸앵카레 상태 코어 (64비트)
+    /// [63:62] poincare_quadrant (2비트)
+    /// [61:50] hyperbolic_frequency (12비트) 
+    /// [49:38] geodesic_amplitude (12비트)
+    /// [37:32] basis_function_selector (6비트)
+    /// [31:0]  cordic_rotation_sequence (32비트)
+    pub hi: u64,
+    
+    /// 연속 파라미터 코어 (64비트)
+    /// [63:32] r_poincare (32비트 IEEE754 float)
+    /// [31:0]  theta_poincare (32비트 IEEE754 float)
+    pub lo: u64,
+}
+
+/// 푸앵카레 사분면 열거형 (2비트 인코딩)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PoincareQuadrant {
+    First,  // 00: sinh(x) - 양의 지수 증가
+    Second, // 01: cosh(x) - 대칭적 지수 증가  
+    Third,  // 10: tanh(x) - S자형 포화 함수
+    Fourth, // 11: sech²(x) - 종 모양 함수
+}
+
+/// 쌍곡 기저 함수 열거형 (6비트 = 64가지 조합)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HyperbolicBasisFunction {
+    Sinh = 0,     // sinh
+    Cosh = 1,     // cosh  
+    Tanh = 2,     // tanh
+    SechSquared = 3, // sech²
+    // ... 60가지 더 (조합)
+}
+
+impl PoincarePackedBit128 {
+    /// 새로운 푸앵카레 볼 인코딩 생성
+    pub fn new(
+        quadrant: PoincareQuadrant,
+        frequency: u16,  // 12비트
+        amplitude: u16,  // 12비트  
+        basis_func: u8,  // 6비트
+        cordic_seq: u32, // 32비트
+        r_poincare: f32, // [0, 1)
+        theta_poincare: f32, // [0, 2π]
+    ) -> Self {
+        let hi = Self::encode_hi_field(quadrant, frequency, amplitude, basis_func, cordic_seq);
+        let lo = Self::encode_lo_field(r_poincare, theta_poincare);
+        
+        Self { hi, lo }
+    }
+    
+    /// hi 필드 인코딩 (푸앵카레 상태 코어)
+    fn encode_hi_field(
+        quadrant: PoincareQuadrant,
+        frequency: u16,
+        amplitude: u16, 
+        basis_func: u8,
+        cordic_seq: u32,
+    ) -> u64 {
+        let quadrant_bits = quadrant as u64;
+        let frequency_bits = (frequency as u64) & 0xFFF; // 12비트
+        let amplitude_bits = (amplitude as u64) & 0xFFF; // 12비트
+        let basis_bits = (basis_func as u64) & 0x3F;     // 6비트
+        let cordic_bits = cordic_seq as u64;             // 32비트
+        
+        (quadrant_bits << 62) |
+        (frequency_bits << 50) |
+        (amplitude_bits << 38) |
+        (basis_bits << 32) |
+        cordic_bits
+    }
+    
+    /// lo 필드 인코딩 (연속 파라미터 코어)
+    fn encode_lo_field(r_poincare: f32, theta_poincare: f32) -> u64 {
+        // r을 [0, 1) 범위로 클램핑
+        let r_clamped = r_poincare.clamp(0.0, 0.99999);
+        let theta_normalized = theta_poincare.rem_euclid(2.0 * std::f32::consts::PI);
+        
+        ((r_clamped.to_bits() as u64) << 32) | (theta_normalized.to_bits() as u64)
+    }
+    
+    /// 푸앵카레 사분면 추출
+    pub fn get_quadrant(&self) -> PoincareQuadrant {
+        match (self.hi >> 62) & 0x3 {
+            0 => PoincareQuadrant::First,
+            1 => PoincareQuadrant::Second,
+            2 => PoincareQuadrant::Third,
+            3 => PoincareQuadrant::Fourth,
+            _ => unreachable!(),
+        }
+    }
+    
+    /// 쌍곡 주파수 추출 (12비트)
+    pub fn get_hyperbolic_frequency(&self) -> u16 {
+        ((self.hi >> 50) & 0xFFF) as u16
+    }
+    
+    /// 측지선 진폭 추출 (12비트)
+    pub fn get_geodesic_amplitude(&self) -> u16 {
+        ((self.hi >> 38) & 0xFFF) as u16
+    }
+    
+    /// 기저 함수 선택자 추출 (6비트)
+    pub fn get_basis_function_selector(&self) -> u8 {
+        ((self.hi >> 32) & 0x3F) as u8
+    }
+    
+    /// CORDIC 회전 시퀀스 추출 (32비트)
+    pub fn get_cordic_rotation_sequence(&self) -> u32 {
+        (self.hi & 0xFFFFFFFF) as u32
+    }
+    
+    /// 푸앵카레 반지름 추출 ([0, 1))
+    pub fn get_r_poincare(&self) -> f32 {
+        f32::from_bits((self.lo >> 32) as u32)
+    }
+    
+    /// 푸앵카레 각도 추출 ([0, 2π])
+    pub fn get_theta_poincare(&self) -> f32 {
+        f32::from_bits((self.lo & 0xFFFFFFFF) as u32)
+    }
+    
+    /// 푸앵카레 볼 내 실제 쌍곡거리 계산
+    pub fn compute_hyperbolic_distance(&self) -> f32 {
+        let r = self.get_r_poincare();
+        if r >= 1.0 {
+            return f32::INFINITY;
+        }
+        // d_h = artanh(r) = 0.5 * ln((1+r)/(1-r))
+        0.5 * ((1.0 + r) / (1.0 - r)).ln()
+    }
+    
+    /// 정보 밀도 계산 (1/(1-r²)²)
+    pub fn compute_information_density(&self) -> f32 {
+        let r = self.get_r_poincare();
+        let r_squared = r * r;
+        let denominator = 1.0 - r_squared;
+        if denominator.abs() < 1e-10 {
+            return f32::INFINITY;
+        }
+        1.0 / (denominator * denominator)
+    }
+}
+
+/// 쌍곡 함수 계산 유틸리티
+impl PoincarePackedBit128 {
+    /// 사분면에 따른 기본 쌍곡 함수 계산
+    pub fn compute_hyperbolic_function(&self, input: f32) -> f32 {
+        match self.get_quadrant() {
+            PoincareQuadrant::First => input.sinh(),
+            PoincareQuadrant::Second => input.cosh(),
+            PoincareQuadrant::Third => input.tanh(),
+            PoincareQuadrant::Fourth => {
+                // sech²(x) = 1/cosh²(x)
+                let cosh_val = input.cosh();
+                1.0 / (cosh_val * cosh_val)
+            }
+        }
+    }
+    
+    /// 쌍곡 주파수를 실제 주파수로 변환
+    pub fn get_real_frequency(&self, max_frequency: f32) -> f32 {
+        let freq_quantized = self.get_hyperbolic_frequency() as f32;
+        (freq_quantized / 4095.0) * max_frequency
+    }
+    
+    /// 측지선 진폭을 실제 진폭으로 변환  
+    pub fn get_real_amplitude(&self, max_amplitude: f32) -> f32 {
+        let amp_quantized = self.get_geodesic_amplitude() as f32;
+        (amp_quantized / 4095.0) * max_amplitude
+    }
+}
+
+/// 랜덤 생성 및 유틸리티
+impl PoincarePackedBit128 {
+    /// 랜덤 푸앵카레 볼 인코딩 생성
+    pub fn random(rng: &mut impl Rng) -> Self {
+        let quadrant = match rng.gen_range(0..4) {
+            0 => PoincareQuadrant::First,
+            1 => PoincareQuadrant::Second, 
+            2 => PoincareQuadrant::Third,
+            3 => PoincareQuadrant::Fourth,
+            _ => unreachable!(),
+        };
+        
+        let frequency: u16 = rng.gen_range(0..4096);
+        let amplitude: u16 = rng.gen_range(0..4096);
+        let basis_func: u8 = rng.gen_range(0..64);
+        let cordic_seq: u32 = rng.gen();
+        
+        // r은 [0, 0.9) 범위로 제한 (수치 안정성)
+        let r_poincare: f32 = rng.gen_range(0.0..0.9);
+        let theta_poincare: f32 = rng.gen_range(0.0..2.0 * std::f32::consts::PI);
+        
+        Self::new(quadrant, frequency, amplitude, basis_func, cordic_seq, r_poincare, theta_poincare)
+    }
+    
+    /// 푸앵카레 볼 경계 조건 검증
+    pub fn is_valid_poincare(&self) -> bool {
+        let r = self.get_r_poincare();
+        let theta = self.get_theta_poincare();
+        
+        r >= 0.0 && r < 1.0 && theta >= 0.0 && theta <= 2.0 * std::f32::consts::PI
+    }
+} 
