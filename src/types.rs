@@ -1,6 +1,7 @@
 use rand::Rng;
 use std::f32;
 use crate::math::{ste_quant_q0x, ste_quant_phase};
+use nalgebra::{DMatrix, DVector};
 
 /// 64-bit Packed Poincaré 시드 표현 (CORDIC 통합)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -136,6 +137,14 @@ impl Packed128 {
     }
 }
 
+/// 잔차 인코딩에 사용할 변환 타입
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformType {
+    Dct,
+    Dwt,
+    Adaptive,
+}
+
 /// DCT/웨이블릿 잔차 계수
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResidualCoefficient {
@@ -147,13 +156,25 @@ pub struct ResidualCoefficient {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HybridEncodedBlock {
     /// RBE 기본 패턴을 생성하는 8개의 연속 파라미터
-    pub rbe_params: [f32; 8],
+    pub rbe_params: RbeParameters,
     /// 잔차 보정을 위한 상위 K개의 DCT 또는 웨이블릿 계수
     pub residuals: Vec<ResidualCoefficient>,
     /// 블록의 원래 크기
     pub rows: usize,
     pub cols: usize,
+    /// 적용된 변환 타입
+    pub transform_type: TransformType,
 }
+
+/// 단일 인코딩 블록의 그래디언트를 저장하는 구조체
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncodedBlockGradients {
+    pub rbe_params_grad: RbeParameters,
+    pub residuals_grad: Vec<ResidualCoefficient>,
+}
+
+/// RBE 기본 패턴 파라미터 타입 별칭
+pub type RbeParameters = [f32; 8];
 
 /// 기저 함수 타입 (기존 유지)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

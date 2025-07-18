@@ -3,16 +3,16 @@
 //! 이 라이브러리는 `README.md`에 설명된 "단일 64비트 시드"를 사용하여
 //! 전체 신경망 레이어를 표현하고 압축/복원하는 기능을 제공합니다.
 
-pub mod types;
-pub mod encoder;
 pub mod decoder;
+pub mod encoder;
 pub mod generator;
 pub mod math;
 pub mod matrix;
+pub mod types;
+pub mod layer;
 
 // 라이브러리 사용자가 편리하게 접근할 수 있도록 주요 구조체와 함수를 공개합니다.
-pub use types::{Packed64, Packed128, PoincareMatrix, BasisFunction};
-pub use math::{compute_full_rmse, mutate_seed};
-pub use encoder::GridCompressedMatrix;
-pub use generator::MatrixGenerator;
+pub use encoder::{HybridEncoder, GridCompressedMatrix};
+pub use types::{HybridEncodedBlock, TransformType, RbeParameters, ResidualCoefficient, EncodedBlockGradients};
+pub use layer::EncodedLayer;
  

@@ -1,15 +1,16 @@
 //! 행렬 압축 해제(디코딩) 관련 기능
 use crate::encoder::GridCompressedMatrix;
-use crate::types::HybridEncodedBlock;
+use crate::types::{HybridEncodedBlock, TransformType};
 use nalgebra::{DMatrix, DVector};
-use ndarray::{Array, Array2};
+use ndarray::{Array, Array1, Array2};
 use rayon::prelude::*;
 use rustdct::DctPlanner;
+use omni_wave::{wavelet as w, completely_reconstruct_2d};
+
 
 impl HybridEncodedBlock {
     /// 하이브리드 압축 블록을 디코딩
     pub fn decode(&self) -> Vec<f32> {
-        let mut dct_planner = DctPlanner::<f32>::new();
         let rows = self.rows;
         let cols = self.cols;
 
@@ -33,39 +34,55 @@ impl HybridEncodedBlock {
             }
         }
         let rbe_params_vec = DVector::from_row_slice(&self.rbe_params);
-        let rbe_pattern_vec = &a_matrix * rbe_params_vec;
+        let rbe_pattern_vec = a_matrix * rbe_params_vec;
         let rbe_pattern_matrix = DMatrix::from_vec(rows, cols, rbe_pattern_vec.data.into());
 
 
-        // --- 2. 잔차 행렬 복원 (IDCT) ---
-        let mut dct_coeffs = Array2::<f32>::zeros((rows, cols));
+        // --- 2. 잔차 행렬 복원 (IDCT 또는 IDWT) ---
+        let mut coeffs_matrix = Array2::<f32>::zeros((rows, cols));
         for coeff in &self.residuals {
-            dct_coeffs[(coeff.index.0 as usize, coeff.index.1 as usize)] = coeff.value;
+            coeffs_matrix[(coeff.index.0 as usize, coeff.index.1 as usize)] = coeff.value;
         }
         
-        // 2D IDCT (DCT-III)
-        let idct_row = dct_planner.plan_dct3(cols);
-        let idct_col = dct_planner.plan_dct3(rows);
+        match self.transform_type {
+            TransformType::Dct => {
+                let mut dct_planner = DctPlanner::<f32>::new();
+                let idct_row = dct_planner.plan_dct3(cols);
+                let idct_col = dct_planner.plan_dct3(rows);
 
-        // 열에 대해 IDCT
-        let mut transposed = dct_coeffs.t().to_owned();
-        for mut col in transposed.rows_mut() {
-            let mut col_vec = col.to_vec();
-            idct_row.process_dct3(&mut col_vec);
-            col.assign(&Array::from(col_vec));
+                // 열에 대해 IDCT
+                let mut transposed = coeffs_matrix.t().to_owned();
+                for mut col in transposed.rows_mut() {
+                    let mut col_vec = col.to_vec();
+                    idct_row.process_dct3(&mut col_vec);
+                    col.assign(&Array::from(col_vec));
+                }
+                
+                // 행에 대해 IDCT
+                let mut dct_matrix = transposed.t().to_owned();
+                for mut row in dct_matrix.rows_mut() {
+                    let mut row_vec = row.to_vec();
+                    idct_col.process_dct3(&mut row_vec);
+                    row.assign(&Array::from(row_vec));
+                }
+
+                // 정규화
+                let normalization_factor = (2.0 * cols as f32) * (2.0 * rows as f32);
+                coeffs_matrix = dct_matrix / normalization_factor;
+            },
+            TransformType::Dwt => {
+                let wavelet = w::BIOR_3_1; // 인코딩과 동일한 웨이블릿 사용
+                let mut buffer = Array1::zeros(rows.max(cols) + wavelet.window_size() - 2);
+                completely_reconstruct_2d(coeffs_matrix.view_mut(), buffer.view_mut(), wavelet);
+            },
+            TransformType::Adaptive => {
+                // 이 브랜치는 디코딩 시에 도달할 수 없습니다.
+                // Adaptive는 인코딩 시에만 사용되는 로직입니다.
+                unreachable!("Decoder should not receive an Adaptive transform type directly.");
+            }
         }
         
-        // 행에 대해 IDCT
-        let mut dct_matrix = transposed.t().to_owned();
-        for mut row in dct_matrix.rows_mut() {
-            let mut row_vec = row.to_vec();
-            idct_col.process_dct3(&mut row_vec);
-            row.assign(&Array::from(row_vec));
-        }
-
-        // 정규화
-        let normalization_factor = (2.0 * cols as f32) * (2.0 * rows as f32);
-        let residual_matrix_nalgebra = DMatrix::from_iterator(rows, cols, dct_matrix.into_raw_vec().into_iter().map(|v| v / normalization_factor));
+        let residual_matrix_nalgebra = DMatrix::from_iterator(rows, cols, coeffs_matrix.into_raw_vec());
         
         // --- 3. 최종 행렬 복원 ---
         let final_matrix = rbe_pattern_matrix + residual_matrix_nalgebra;
