@@ -1,193 +1,120 @@
 //! 행렬 압축(인코딩) 관련 기능
-//! 
-//! 이 모듈은 행렬을 128비트로 압축하는 기능을 제공합니다.
+use crate::types::{HybridEncodedBlock, ResidualCoefficient};
+use nalgebra::{DMatrix, DVector};
+use rustdct::DctPlanner;
+use std::sync::Mutex;
+use rayon::prelude::*;
+use ndarray::{Array, Array2};
 
-use crate::types::{Packed64, Packed128, PoincareMatrix};
-use crate::math::compute_full_rmse;
-use rand::Rng;
+/// RBE + DCT/Wavelet 하이브리드 인코더
+pub struct HybridEncoder {
+    pub k_coeffs: usize, // 유지할 잔차 계수의 개수
+    // planner는 재사용 가능하므로 인코더가 소유하는 것이 효율적
+    dct_planner_f32: DctPlanner<f32>,
+}
 
-impl PoincareMatrix {
-    /// 행렬을 128비트로 압축
-    /// 
-    /// # Arguments
-    /// * `matrix` - 압축할 행렬 데이터
-    /// * `rows` - 행 수
-    /// * `cols` - 열 수
-    /// 
-    /// # Returns
-    /// 압축된 PoincareMatrix
-    pub fn compress(matrix: &[f32], rows: usize, cols: usize) -> Self {
-        // 간단한 brute-force 탐색
-        let mut best_seed = 0u64;
-        let mut best_rmse = f32::INFINITY;
-        
-        let mut rng = rand::thread_rng();
-        
-        // 1000번 랜덤 시도
-        for _ in 0..1000 {
-            let seed = rng.gen::<u64>();
-            let rmse = compute_full_rmse(matrix, &Packed64 { rotations: seed }, rows, cols);
-            
-            if rmse < best_rmse {
-                best_rmse = rmse;
-                best_seed = seed;
+impl HybridEncoder {
+    pub fn new(k_coeffs: usize) -> Self {
+        Self {
+            k_coeffs,
+            dct_planner_f32: DctPlanner::new(),
+        }
+    }
+
+    /// 단일 블록을 RBE+DCT로 압축
+    pub fn encode_block(&mut self, block_data: &[f32], rows: usize, cols: usize) -> HybridEncodedBlock {
+        // --- 1. RBE 기본 파라미터 피팅 (선형 회귀) ---
+
+        // 기저 함수 행렬 A와 원본 벡터 b 생성
+        let mut a_matrix = DMatrix::from_element(rows * cols, 8, 0.0);
+        let b_vector = DVector::from_row_slice(block_data);
+
+        for r in 0..rows {
+            for c in 0..cols {
+                let x = (c as f32 / (cols.saturating_sub(1)) as f32) * 2.0 - 1.0;
+                let y = (r as f32 / (rows.saturating_sub(1)) as f32) * 2.0 - 1.0;
+                let d = (x * x + y * y).sqrt();
+                let pi = std::f32::consts::PI;
+
+                let basis_row = [
+                    1.0,
+                    d,
+                    d * d,
+                    (pi * x).cos(),
+                    (pi * y).cos(),
+                    (2.0 * pi * x).cos(),
+                    (2.0 * pi * y).cos(),
+                    (pi * x).cos() * (pi * y).cos(),
+                ];
+                
+                let matrix_row_index = r * cols + c;
+                for i in 0..8 {
+                    a_matrix[(matrix_row_index, i)] = basis_row[i];
+                }
             }
         }
         
-        println!("[Compress] Best Seed: 0x{:X}, RMSE: {}", best_seed, best_rmse);
+        // SVD를 사용하여 Ax=b 문제의 최소 자승 해를 구함
+        let svd = a_matrix.clone().svd(true, true);
+        let rbe_params_vec = svd.solve(&b_vector, 1e-6).expect("Linear regression failed");
+        let rbe_params: [f32; 8] = core::array::from_fn(|i| rbe_params_vec[i]);
+
+        // --- 2. 잔차 계산 및 DCT ---
+
+        let pred_vector = a_matrix * &rbe_params_vec;
+        let residual_vector = &b_vector - pred_vector;
+
+        // ndarray로 변환하여 2D DCT 수행
+        let mut residual_matrix = Array2::from_shape_vec((rows, cols), residual_vector.into_iter().map(|&v| v).collect()).unwrap();
         
-        PoincareMatrix {
-            seed: Packed128 { hi: best_seed, lo: 0 },
+        let dct_row = self.dct_planner_f32.plan_dct2(cols);
+        let dct_col = self.dct_planner_f32.plan_dct2(rows);
+
+        // 행에 대해 DCT 적용
+        for mut row in residual_matrix.rows_mut() {
+            let mut row_vec = row.to_vec();
+            dct_row.process_dct2(&mut row_vec);
+            row.assign(&Array::from(row_vec));
+        }
+        
+        // 열에 대해 DCT 적용
+        let mut transposed = residual_matrix.t().to_owned();
+        for mut col in transposed.rows_mut() {
+            let mut col_vec = col.to_vec();
+            dct_col.process_dct2(&mut col_vec);
+            col.assign(&Array::from(col_vec));
+        }
+        let dct_matrix = transposed.t();
+
+
+        // --- 3. 상위 K개 계수 추출 ---
+        
+        let mut coeffs: Vec<ResidualCoefficient> = dct_matrix
+            .indexed_iter()
+            .map(|((r, c), &val)| ResidualCoefficient {
+                index: (r as u16, c as u16),
+                value: val,
+            })
+            .collect();
+            
+        // 절댓값 기준 내림차순 정렬
+        coeffs.sort_unstable_by(|a, b| b.value.abs().partial_cmp(&a.value.abs()).unwrap());
+        
+        let top_k_coeffs = coeffs.into_iter().take(self.k_coeffs).collect();
+        
+        HybridEncodedBlock {
+            rbe_params,
+            residuals: top_k_coeffs,
             rows,
             cols,
         }
     }
-    
-    /// 더 정교한 압축 알고리즘 (미래 확장용)
-    /// 
-    /// 현재는 기본 compress와 동일하지만, 
-    /// 추후 유전 알고리즘이나 gradient descent 등을 적용할 수 있습니다.
-    pub fn compress_advanced(matrix: &[f32], rows: usize, cols: usize) -> Self {
-        // TODO: 유전 알고리즘 구현
-        // TODO: Gradient-based 최적화
-        // TODO: Multi-scale 접근
-        Self::compress(matrix, rows, cols)
-    }
-    
-    /// 역 CORDIC 알고리즘을 사용한 정교한 압축
-    pub fn compress_cordic(matrix: &[f32], rows: usize, cols: usize) -> Self {
-        let key_points = extract_key_points(matrix, rows, cols);
-        let mut best_seed = Packed64::new(0);
-        let mut best_rmse = f32::INFINITY;
-
-        for point in key_points {
-            let candidate_seed = find_seed_for_point(point, rows, cols);
-            let rmse = compute_full_rmse(matrix, &candidate_seed, rows, cols);
-
-            if rmse < best_rmse {
-                best_rmse = rmse;
-                best_seed = candidate_seed;
-            }
-        }
-
-        println!("[Compress CORDIC] Best Seed: 0x{:X}, RMSE: {:.6}", best_seed.rotations, best_rmse);
-        PoincareMatrix { seed: Packed128 { hi: best_seed.rotations, lo: 0 }, rows, cols }
-    }
-    
-    /// 그리드 기반 압축 - 큰 행렬을 작은 블록으로 나누어 압축
-    /// 
-    /// # Arguments
-    /// * `matrix` - 압축할 행렬 데이터
-    /// * `rows` - 전체 행 수
-    /// * `cols` - 전체 열 수
-    /// * `block_size` - 각 블록의 크기 (예: 32면 32x32 블록)
-    /// 
-    /// # Returns
-    /// 그리드 압축된 결과
-    pub fn compress_grid(matrix: &[f32], rows: usize, cols: usize, block_size: usize) -> GridCompressedMatrix {
-        let grid_rows = (rows + block_size - 1) / block_size;
-        let grid_cols = (cols + block_size - 1) / block_size;
-        let mut blocks = Vec::with_capacity(grid_rows * grid_cols);
-        
-        for grid_i in 0..grid_rows {
-            for grid_j in 0..grid_cols {
-                // 블록의 시작과 끝 계산
-                let start_i = grid_i * block_size;
-                let start_j = grid_j * block_size;
-                let end_i = (start_i + block_size).min(rows);
-                let end_j = (start_j + block_size).min(cols);
-                
-                let block_rows = end_i - start_i;
-                let block_cols = end_j - start_j;
-                
-                // 블록 데이터 추출
-                let mut block_data = Vec::with_capacity(block_rows * block_cols);
-                for i in start_i..end_i {
-                    for j in start_j..end_j {
-                        block_data.push(matrix[i * cols + j]);
-                    }
-                }
-                
-                // 블록 압축
-                let compressed_block = Self::compress(&block_data, block_rows, block_cols);
-                blocks.push(compressed_block);
-            }
-        }
-        
-        GridCompressedMatrix {
-            blocks,
-            grid_rows,
-            grid_cols,
-            block_size,
-            total_rows: rows,
-            total_cols: cols,
-        }
-    }
 }
 
-/// CORDIC 기반으로 최적의 회전 시퀀스를 찾습니다
-fn find_seed_for_point(point: (usize, usize, f32), rows: usize, cols: usize) -> Packed64 {
-    let (i, j, target_value) = point;
-    let mut rotations = 0u64;
-
-    // 초기 벡터 설정
-    let mut x = (j as f32 / (cols.saturating_sub(1)) as f32) * 2.0 - 1.0;
-    let mut y = (i as f32 / (rows.saturating_sub(1)) as f32) * 2.0 - 1.0;
-
-    // 최종 목표 벡터를 (target_value, 0)으로 가정
-    let target_angle = 0.0f32.atan2(target_value);
-
-    for k in 0..64 {
-        let power_of_2 = (2.0f32).powi(-(k as i32));
-        
-        // 현재 벡터의 각도
-        let current_angle = y.atan2(x);
-        
-        // 목표 각도까지 남은 차이
-        let angle_diff = target_angle - current_angle;
-
-        // CORDIC 회전 각도 (arctan(2^-k))
-        let cordic_angle = power_of_2.atan();
-
-        // 각도 차이를 줄이는 방향으로 회전
-        let sigma = -angle_diff.signum();
-
-        if sigma > 0.0 {
-             rotations |= 1 << k;
-        }
-
-        let x_new = x - sigma * y * power_of_2;
-        let y_new = y + sigma * x * power_of_2;
-        x = x_new;
-        y = y_new;
-
-        if k % 4 == 0 {
-            let r = (x * x + y * y).sqrt();
-            if r > 1e-9 {
-                let tanh_r = r.tanh();
-                x *= tanh_r;
-                y *= tanh_r;
-            }
-        }
-    }
-
-    Packed64::new(rotations)
-}
-
-/// 행렬에서 분석할 주요 특징점을 추출합니다
-fn extract_key_points(matrix: &[f32], rows: usize, cols: usize) -> Vec<(usize, usize, f32)> {
-    let mut points = Vec::with_capacity(5);
-    points.push((0, 0, matrix[0]));
-    points.push((0, cols - 1, matrix[cols - 1]));
-    points.push((rows - 1, 0, matrix[(rows - 1) * cols]));
-    points.push((rows - 1, cols - 1, matrix[rows * cols - 1]));
-    points.push((rows / 2, cols / 2, matrix[rows / 2 * cols + cols / 2]));
-    points
-} 
 
 /// 그리드로 압축된 행렬
 pub struct GridCompressedMatrix {
-    pub blocks: Vec<PoincareMatrix>,
+    pub blocks: Vec<HybridEncodedBlock>,
     pub grid_rows: usize,
     pub grid_cols: usize,
     pub block_size: usize,
@@ -196,18 +123,64 @@ pub struct GridCompressedMatrix {
 }
 
 impl GridCompressedMatrix {
+    /// 그리드 기반 하이브리드 압축 (병렬, 캐싱)
+    pub fn compress_grid_hybrid(
+        matrix: &[f32],
+        rows: usize,
+        cols: usize,
+        block_size: usize,
+        k_coeffs: usize,
+    ) -> Self {
+        let grid_rows = (rows + block_size - 1) / block_size;
+        let grid_cols = (cols + block_size - 1) / block_size;
+        
+        // 스레드별 인코더를 위한 Mutex
+        let encoder = Mutex::new(HybridEncoder::new(k_coeffs));
+
+        let blocks: Vec<HybridEncodedBlock> = (0..grid_rows * grid_cols)
+            .into_par_iter()
+            .map(|block_idx| {
+                let grid_i = block_idx / grid_cols;
+                let grid_j = block_idx % grid_cols;
+                
+                let start_i = grid_i * block_size;
+                let start_j = grid_j * block_size;
+                let end_i = (start_i + block_size).min(rows);
+                let end_j = (start_j + block_size).min(cols);
+                
+                let block_rows = end_i - start_i;
+                let block_cols = end_j - start_j;
+                
+                let mut block_data = Vec::with_capacity(block_rows * block_cols);
+                for i in start_i..end_i {
+                    for j in start_j..end_j {
+                        block_data.push(matrix[i * cols + j]);
+                    }
+                }
+                
+                // 각 스레드가 Mutex를 lock하고 인코더를 사용하여 블록 압축
+                let mut encoder_guard = encoder.lock().unwrap();
+                encoder_guard.encode_block(&block_data, block_rows, block_cols)
+            })
+            .collect();
+
+        Self {
+            blocks,
+            grid_rows,
+            grid_cols,
+            block_size,
+            total_rows: rows,
+            total_cols: cols,
+        }
+    }
+
     /// 압축률 계산
     pub fn compression_ratio(&self) -> f32 {
         let original_size = self.total_rows * self.total_cols * 4; // f32 = 4 bytes
-        let compressed_size = self.blocks.len() * 16; // 각 블록 = 128 bits = 16 bytes
-        original_size as f32 / compressed_size as f32
-    }
-    
-    /// 메타데이터 포함 압축률
-    pub fn effective_compression_ratio(&self) -> f32 {
-        let original_size = self.total_rows * self.total_cols * 4;
-        // 블록 데이터 + 메타데이터 (grid info)
-        let compressed_size = self.blocks.len() * 16 + 24; // 24 bytes for metadata
+        let compressed_size: usize = self.blocks.iter().map(|b| {
+            8 * 4 + // rbe_params: 8 * f32
+            b.residuals.len() * (2 * 2 + 4) // residuals: N * (u16, u16, f32)
+        }).sum();
         original_size as f32 / compressed_size as f32
     }
 } 

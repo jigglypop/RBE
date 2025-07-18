@@ -1,165 +1,109 @@
 //! 행렬 압축 해제(디코딩) 관련 기능
-//! 
-//! 이 모듈은 압축된 128비트 시드로부터 원본 행렬을 복원하는 기능을 제공합니다.
-
-use crate::types::{Packed64, PoincareMatrix};
 use crate::encoder::GridCompressedMatrix;
+use crate::types::HybridEncodedBlock;
+use nalgebra::{DMatrix, DVector};
+use ndarray::{Array, Array2};
+use rayon::prelude::*;
+use rustdct::DctPlanner;
 
-impl Packed64 {
-    /// 인코딩된 `u64` 값을 그대로 반환합니다.
-    /// CORDIC 모델에서는 이 `rotations`값이 모든 정보를 담고 있습니다.
-    pub fn decode(&self) -> u64 {
-        self.rotations
+impl HybridEncodedBlock {
+    /// 하이브리드 압축 블록을 디코딩
+    pub fn decode(&self) -> Vec<f32> {
+        let mut dct_planner = DctPlanner::<f32>::new();
+        let rows = self.rows;
+        let cols = self.cols;
+
+        // --- 1. RBE 기본 패턴 복원 ---
+        let mut a_matrix = DMatrix::from_element(rows * cols, 8, 0.0);
+        for r in 0..rows {
+            for c in 0..cols {
+                let x = (c as f32 / (cols.saturating_sub(1)) as f32) * 2.0 - 1.0;
+                let y = (r as f32 / (rows.saturating_sub(1)) as f32) * 2.0 - 1.0;
+                let d = (x * x + y * y).sqrt();
+                let pi = std::f32::consts::PI;
+
+                let basis_row = [
+                    1.0, d, d * d, (pi * x).cos(), (pi * y).cos(),
+                    (2.0 * pi * x).cos(), (2.0 * pi * y).cos(), (pi * x).cos() * (pi * y).cos(),
+                ];
+                let matrix_row_index = r * cols + c;
+                for i in 0..8 {
+                    a_matrix[(matrix_row_index, i)] = basis_row[i];
+                }
+            }
+        }
+        let rbe_params_vec = DVector::from_row_slice(&self.rbe_params);
+        let rbe_pattern_vec = &a_matrix * rbe_params_vec;
+        let rbe_pattern_matrix = DMatrix::from_vec(rows, cols, rbe_pattern_vec.data.into());
+
+
+        // --- 2. 잔차 행렬 복원 (IDCT) ---
+        let mut dct_coeffs = Array2::<f32>::zeros((rows, cols));
+        for coeff in &self.residuals {
+            dct_coeffs[(coeff.index.0 as usize, coeff.index.1 as usize)] = coeff.value;
+        }
+        
+        // 2D IDCT (DCT-III)
+        let idct_row = dct_planner.plan_dct3(cols);
+        let idct_col = dct_planner.plan_dct3(rows);
+
+        // 열에 대해 IDCT
+        let mut transposed = dct_coeffs.t().to_owned();
+        for mut col in transposed.rows_mut() {
+            let mut col_vec = col.to_vec();
+            idct_row.process_dct3(&mut col_vec);
+            col.assign(&Array::from(col_vec));
+        }
+        
+        // 행에 대해 IDCT
+        let mut dct_matrix = transposed.t().to_owned();
+        for mut row in dct_matrix.rows_mut() {
+            let mut row_vec = row.to_vec();
+            idct_col.process_dct3(&mut row_vec);
+            row.assign(&Array::from(row_vec));
+        }
+
+        // 정규화
+        let normalization_factor = (2.0 * cols as f32) * (2.0 * rows as f32);
+        let residual_matrix_nalgebra = DMatrix::from_iterator(rows, cols, dct_matrix.into_raw_vec().into_iter().map(|v| v / normalization_factor));
+        
+        // --- 3. 최종 행렬 복원 ---
+        let final_matrix = rbe_pattern_matrix + residual_matrix_nalgebra;
+        final_matrix.data.as_vec().clone()
     }
 }
 
-impl PoincareMatrix {
-    /// 압축된 시드로부터 전체 행렬을 복원
-    /// 
-    /// # Returns
-    /// 복원된 행렬 데이터
-    pub fn decompress(&self) -> Vec<f32> {
-        let mut matrix = Vec::with_capacity(self.rows * self.cols);
-        
-        for i in 0..self.rows {
-            for j in 0..self.cols {
-                let value = self.seed.compute_weight(i, j, self.rows, self.cols);
-                matrix.push(value);
-            }
-        }
-        
-        matrix
-    }
-    
-    /// 특정 위치의 값만 복원 (메모리 효율적)
-    /// 
-    /// # Arguments
-    /// * `i` - 행 인덱스
-    /// * `j` - 열 인덱스
-    /// 
-    /// # Returns
-    /// 해당 위치의 복원된 값
-    pub fn decompress_at(&self, i: usize, j: usize) -> f32 {
-        self.seed.compute_weight(i, j, self.rows, self.cols)
-    }
-    
-    /// 연속 값으로 압축 해제 (학습용)
-    pub fn decompress_continuous(&self) -> Vec<f32> {
-        let mut matrix = Vec::with_capacity(self.rows * self.cols);
-        
-        for i in 0..self.rows {
-            for j in 0..self.cols {
-                let value = self.seed.compute_weight_continuous(i, j, self.rows, self.cols);
-                matrix.push(value);
-            }
-        }
-        
-        matrix
-    }
-    
-    /// 배치 단위로 압축 해제 (GPU 최적화용)
-    /// 
-    /// # Arguments
-    /// * `batch_size` - 한 번에 처리할 원소 개수
-    /// * `callback` - 각 배치 처리 후 호출되는 콜백
-    pub fn decompress_batched<F>(&self, batch_size: usize, mut callback: F) 
-    where
-        F: FnMut(&[f32])
-    {
-        let total_elements = self.rows * self.cols;
-        let mut batch = Vec::with_capacity(batch_size);
-        
-        for idx in 0..total_elements {
-            let i = idx / self.cols;
-            let j = idx % self.cols;
-            let value = self.seed.compute_weight(i, j, self.rows, self.cols);
-            batch.push(value);
-            
-            if batch.len() == batch_size || idx == total_elements - 1 {
-                callback(&batch);
-                batch.clear();
-            }
-        }
-    }
-} 
-
 impl GridCompressedMatrix {
-    /// 그리드 압축된 행렬을 전체 복원
-    pub fn decompress(&self) -> Vec<f32> {
+    /// 그리드 압축된 행렬을 전체 복원 (병렬)
+    pub fn decompress_hybrid(&self) -> Vec<f32> {
         let mut matrix = vec![0.0; self.total_rows * self.total_cols];
-        
-        for grid_i in 0..self.grid_rows {
-            for grid_j in 0..self.grid_cols {
-                let block_idx = grid_i * self.grid_cols + grid_j;
-                let block = &self.blocks[block_idx];
-                
-                let start_i = grid_i * self.block_size;
-                let start_j = grid_j * self.block_size;
-                
-                // 블록 압축 해제
-                let block_data = block.decompress();
-                
-                // 전체 행렬에 복사
-                for bi in 0..block.rows {
-                    for bj in 0..block.cols {
-                        let global_i = start_i + bi;
-                        let global_j = start_j + bj;
-                        if global_i < self.total_rows && global_j < self.total_cols {
-                            matrix[global_i * self.total_cols + global_j] = 
-                                block_data[bi * block.cols + bj];
-                        }
+
+        // 디코딩된 블록들을 저장할 벡터
+        let decoded_blocks: Vec<(usize, Vec<f32>)> = self.blocks.par_iter().enumerate().map(|(block_idx, block)| {
+            (block_idx, block.decode())
+        }).collect();
+
+        // 순서를 보장하며 전체 행렬에 복사
+        for (block_idx, block_data) in decoded_blocks {
+            let grid_i = block_idx / self.grid_cols;
+            let grid_j = block_idx % self.grid_cols;
+            
+            let start_i = grid_i * self.block_size;
+            let start_j = grid_j * self.block_size;
+            
+            let block_rows = self.blocks[block_idx].rows;
+            let block_cols = self.blocks[block_idx].cols;
+
+            for bi in 0..block_rows {
+                for bj in 0..block_cols {
+                    let global_i = start_i + bi;
+                    let global_j = start_j + bj;
+                    if global_i < self.total_rows && global_j < self.total_cols {
+                        matrix[global_i * self.total_cols + global_j] = block_data[bi * block_cols + bj];
                     }
                 }
             }
         }
-        
-        matrix
-    }
-    
-    /// 특정 위치의 값만 복원 (메모리 효율적)
-    pub fn decompress_at(&self, i: usize, j: usize) -> f32 {
-        // 어느 블록에 속하는지 계산
-        let grid_i = i / self.block_size;
-        let grid_j = j / self.block_size;
-        let block_idx = grid_i * self.grid_cols + grid_j;
-        
-        // 블록 내 로컬 좌표
-        let local_i = i % self.block_size;
-        let local_j = j % self.block_size;
-        
-        // 해당 블록에서 값 추출
-        self.blocks[block_idx].decompress_at(local_i, local_j)
-    }
-    
-    /// 연속 값으로 압축 해제 (학습용)
-    pub fn decompress_continuous(&self) -> Vec<f32> {
-        let mut matrix = vec![0.0; self.total_rows * self.total_cols];
-        
-        for grid_i in 0..self.grid_rows {
-            for grid_j in 0..self.grid_cols {
-                let block_idx = grid_i * self.grid_cols + grid_j;
-                let block = &self.blocks[block_idx];
-                
-                let start_i = grid_i * self.block_size;
-                let start_j = grid_j * self.block_size;
-                
-                // 블록 압축 해제 (연속 값)
-                let block_data = block.decompress_continuous();
-                
-                // 전체 행렬에 복사
-                for bi in 0..block.rows {
-                    for bj in 0..block.cols {
-                        let global_i = start_i + bi;
-                        let global_j = start_j + bj;
-                        if global_i < self.total_rows && global_j < self.total_cols {
-                            matrix[global_i * self.total_cols + global_j] = 
-                                block_data[bi * block.cols + bj];
-                        }
-                    }
-                }
-            }
-        }
-        
         matrix
     }
 } 

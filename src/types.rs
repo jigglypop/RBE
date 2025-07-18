@@ -136,6 +136,25 @@ impl Packed128 {
     }
 }
 
+/// DCT/웨이블릿 잔차 계수
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidualCoefficient {
+    pub index: (u16, u16), // 블록 내 좌표 (최대 65535x65535)
+    pub value: f32,
+}
+
+/// RBE 기본 패턴 + 잔차 계수를 포함하는 하이브리드 압축 블록
+#[derive(Debug, Clone, PartialEq)]
+pub struct HybridEncodedBlock {
+    /// RBE 기본 패턴을 생성하는 8개의 연속 파라미터
+    pub rbe_params: [f32; 8],
+    /// 잔차 보정을 위한 상위 K개의 DCT 또는 웨이블릿 계수
+    pub residuals: Vec<ResidualCoefficient>,
+    /// 블록의 원래 크기
+    pub rows: usize,
+    pub cols: usize,
+}
+
 /// 기저 함수 타입 (기존 유지)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

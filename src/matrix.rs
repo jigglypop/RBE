@@ -1,5 +1,5 @@
-use crate::math::{adam_update, compute_full_rmse};
-use crate::types::{Packed64, Packed128, PoincareMatrix};
+use crate::math::adam_update;
+use crate::types::PoincareMatrix;
 use std::f32::consts::PI;
 
 impl PoincareMatrix {
