@@ -78,12 +78,10 @@ pub struct DecodedParams { // DecodedParams128 -> DecodedParams. 기존것과 �
 impl Packed128 {
     /// Seed0+1 디코딩
     pub fn decode(&self) -> DecodedParams {
-        // let base = Packed64(self.hi).decode(); // Packed64에는 decode가 없으므로 일단 주석처리.
         let r_fp32     = f32::from_bits((self.lo >> 32) as u32);
         let theta_fp32 = f32::from_bits(self.lo as u32);
         DecodedParams { r_fp32, theta_fp32, ..Default::default() }
     }
-
     /// 연속 파라미터 → 128 bit 시드
     pub fn from_continuous(p: &DecodedParams) -> Self {
         // new.md의 비트 레이아웃에 따라 hi 필드를 구성합니다.

@@ -1,12 +1,5 @@
-use crate::types::*;
-use crate::math::*;
-use crate::encoder::HybridEncoder; // 🚀 하이브리드 인코더 추가
-use rayon::prelude::*;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
-use rand::Rng;
+use crate::math::adam_update;
+use crate::types::PoincareMatrix;
 use std::f32::consts::PI;
 
 impl PoincareMatrix {
@@ -117,7 +110,11 @@ impl PoincareMatrix {
 // 6장: 대규모 행렬 연산: 푸앵카레 볼 기반 선형대수 최적화
 // ============================================================================
 
-// 중복 imports 제거됨
+use crate::types::Packed128;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::sync::mpsc;
 
 /// 6.2 계층적 블록 분할 시스템
 /// 
@@ -137,7 +134,7 @@ pub struct HierarchicalBlockMatrix {
 }
 
 /// 6.2.1 품질 등급 정의
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub enum QualityLevel {
     Ultra,   // PSNR > 50 dB, 32×32 블록
     High,    // PSNR > 40 dB, 64×64 블록
@@ -191,29 +188,6 @@ pub struct L1Block {
     pub global_params: Packed128,
 }
 
-impl L1Block {
-    pub fn new() -> Self {
-        // 4×4 L2 블록들로 구성 (4096 / 1024 = 4)
-        let mut l2_blocks = Vec::with_capacity(4);
-        for _ in 0..4 {
-            let mut row = Vec::with_capacity(4);
-            for _ in 0..4 {
-                row.push(L2Block::new());
-            }
-            l2_blocks.push(row);
-        }
-        
-        Self {
-            row_start: 0,
-            col_start: 0,
-            rows: 4096,
-            cols: 4096,
-            l2_blocks,
-            global_params: Packed128 { hi: 0, lo: 0 },
-        }
-    }
-}
-
 /// L2 블록 (1024×1024)
 #[derive(Debug, Clone)]
 pub struct L2Block {
@@ -225,29 +199,6 @@ pub struct L2Block {
     pub macro_params: Packed128,
 }
 
-impl L2Block {
-    pub fn new() -> Self {
-        // 4×4 L3 블록들로 구성 (1024 / 256 = 4)
-        let mut l3_blocks = Vec::with_capacity(4);
-        for _ in 0..4 {
-            let mut row = Vec::with_capacity(4);
-            for _ in 0..4 {
-                row.push(L3Block::new());
-            }
-            l3_blocks.push(row);
-        }
-        
-        Self {
-            row_start: 0,
-            col_start: 0,
-            rows: 1024,
-            cols: 1024,
-            l3_blocks,
-            macro_params: Packed128 { hi: 0, lo: 0 },
-        }
-    }
-}
-
 /// L3 블록 (256×256)
 #[derive(Debug, Clone)]
 pub struct L3Block {
@@ -255,35 +206,19 @@ pub struct L3Block {
     pub col_start: usize,
     pub rows: usize,
     pub cols: usize,
-    pub l4_blocks: Vec<Vec<Packed128>>, // L4Block → Packed128으로 변경
+    pub l4_blocks: Vec<Vec<L4Block>>,
     pub mid_params: Packed128,
 }
 
-impl L3Block {
-    pub fn new() -> Self {
-        // 4×4 L4 블록들로 구성 (256 / 64 = 4)
-        let mut l4_blocks = Vec::with_capacity(4);
-        for _ in 0..4 {
-            let mut row = Vec::with_capacity(4);
-            for _ in 0..4 {
-                row.push(Packed128 { hi: 0, lo: 0 });
-            }
-            l4_blocks.push(row);
-        }
-        
-        Self {
-            row_start: 0,
-            col_start: 0,
-            rows: 256,
-            cols: 256,
-            l4_blocks,
-            mid_params: Packed128 { hi: 0, lo: 0 },
-        }
-    }
+/// L4 블록 (64×64, 최소 단위)
+#[derive(Debug, Clone)]
+pub struct L4Block {
+    pub row_start: usize,
+    pub col_start: usize,
+    pub rows: usize,
+    pub cols: usize,
+    pub detail_params: Packed128,
 }
-
-/// L4 블록은 이제 Packed128 타입으로 직접 사용
-pub type L4Block = Packed128;
 
 /// 6.2.4 오차 제어 시스템
 #[derive(Debug, Clone)]
@@ -353,376 +288,22 @@ impl ErrorController {
 impl HierarchicalBlockMatrix {
     /// 새로운 계층적 블록 행렬 생성
     pub fn new(rows: usize, cols: usize, quality: QualityLevel) -> Self {
-        let l1_blocks_rows = (rows + 4095) / 4096;
-        let l1_blocks_cols = (cols + 4095) / 4096;
-        
-        let mut l1_blocks = Vec::with_capacity(l1_blocks_rows);
-        
-        for _ in 0..l1_blocks_rows {
-            let mut row = Vec::with_capacity(l1_blocks_cols);
-            for _ in 0..l1_blocks_cols {
-                row.push(L1Block::new());
-            }
-            l1_blocks.push(row);
-        }
+        let error_threshold = match quality {
+            QualityLevel::Ultra => 1e-4,
+            QualityLevel::High => 1e-3,
+            QualityLevel::Medium => 1e-2,
+            QualityLevel::Low => 1e-1,
+        };
         
         Self {
             total_rows: rows,
             total_cols: cols,
-            l1_blocks,
+            l1_blocks: Vec::new(),
             quality_level: quality,
-            error_controller: ErrorController::new(0.0), // 0.0으로 변경
+            error_controller: ErrorController::new(error_threshold),
         }
     }
     
-    /// 압축된 크기 계산 (바이트)
-    pub fn compressed_size(&self) -> usize {
-        let mut total_size = 0;
-        
-        for l1_row in &self.l1_blocks {
-            for l1_block in l1_row {
-                // L1 블록 헤더
-                total_size += std::mem::size_of::<L1Block>();
-                
-                // L2 블록들
-                for l2_row in &l1_block.l2_blocks {
-                    for l2_block in l2_row {
-                        total_size += std::mem::size_of::<L2Block>();
-                        
-                        // L3 블록들
-                        for l3_row in &l2_block.l3_blocks {
-                            for l3_block in l3_row {
-                                total_size += std::mem::size_of::<L3Block>();
-                                
-                                // L4 블록들 (Packed128)
-                                total_size += l3_block.l4_blocks.len() * l3_block.l4_blocks[0].len() * 16; // Packed128 크기
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        total_size
-    }
-    
-    /// Dense 행렬에서 RBE 인코딩 (진행률 바 지원)
-    pub fn encode_from_dense(&mut self, matrix: &[Vec<f32>], epoch_progress: Option<&indicatif::ProgressBar>, main_progress: Option<&indicatif::ProgressBar>) -> Result<(), String> {
-        if matrix.len() != self.total_rows {
-            return Err(format!("행 수 불일치: {} vs {}", matrix.len(), self.total_rows));
-        }
-        
-        if !matrix.is_empty() && matrix[0].len() != self.total_cols {
-            return Err(format!("열 수 불일치: {} vs {}", matrix[0].len(), self.total_cols));
-        }
-        
-        // L1 블록 크기를 더 작게 조정 (원래 4096 → 512)
-        let l1_block_size = 512;
-        
-        // 블록별로 인코딩
-        for (l1_i, l1_row) in self.l1_blocks.iter_mut().enumerate() {
-            for (l1_j, l1_block) in l1_row.iter_mut().enumerate() {
-                let l1_start_row = l1_i * l1_block_size;
-                let l1_start_col = l1_j * l1_block_size;
-                
-                // L1 블록 영역의 데이터 추출 및 인코딩
-                Self::encode_l1_block(l1_block, matrix, l1_start_row, l1_start_col, epoch_progress, main_progress)?;
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// RBE에서 Dense 행렬로 디코딩
-    pub fn decode_to_dense(&self) -> Result<Vec<Vec<f32>>, String> {
-        let mut result = vec![vec![0.0; self.total_cols]; self.total_rows];
-        
-        // L1 블록 크기를 더 작게 조정 (원래 4096 → 512)
-        let l1_block_size = 512;
-        
-        for (l1_i, l1_row) in self.l1_blocks.iter().enumerate() {
-            for (l1_j, l1_block) in l1_row.iter().enumerate() {
-                let l1_start_row = l1_i * l1_block_size;
-                let l1_start_col = l1_j * l1_block_size;
-                
-                // L1 블록 디코딩
-                Self::decode_l1_block(l1_block, &mut result, l1_start_row, l1_start_col)?;
-            }
-        }
-        
-        Ok(result)
-    }
-    
-    /// L1 블록 인코딩
-    fn encode_l1_block(
-        l1_block: &mut L1Block,
-        matrix: &[Vec<f32>],
-        start_row: usize,
-        start_col: usize,
-        epoch_progress: Option<&indicatif::ProgressBar>,
-        main_progress: Option<&indicatif::ProgressBar>
-    ) -> Result<(), String> {
-        // L2 블록 크기를 더 작게 조정 (원래 1024 → 128)
-        let l2_block_size = 128;
-        
-        for (l2_i, l2_row) in l1_block.l2_blocks.iter_mut().enumerate() {
-            for (l2_j, l2_block) in l2_row.iter_mut().enumerate() {
-                let l2_start_row = start_row + l2_i * l2_block_size;
-                let l2_start_col = start_col + l2_j * l2_block_size;
-                
-                // L2 블록 인코딩
-                Self::encode_l2_block(l2_block, matrix, l2_start_row, l2_start_col, epoch_progress, main_progress)?;
-            }
-        }
-        Ok(())
-    }
-    
-    /// L2 블록 인코딩
-    fn encode_l2_block(
-        l2_block: &mut L2Block,
-        matrix: &[Vec<f32>],
-        start_row: usize,
-        start_col: usize,
-        epoch_progress: Option<&indicatif::ProgressBar>,
-        main_progress: Option<&indicatif::ProgressBar>
-    ) -> Result<(), String> {
-        // L3 블록 크기를 더 작게 조정 (원래 256 → 64)
-        let l3_block_size = 64;
-        
-        for (l3_i, l3_row) in l2_block.l3_blocks.iter_mut().enumerate() {
-            for (l3_j, l3_block) in l3_row.iter_mut().enumerate() {
-                let l3_start_row = start_row + l3_i * l3_block_size;
-                let l3_start_col = start_col + l3_j * l3_block_size;
-                
-                // L3 블록 인코딩
-                Self::encode_l3_block(l3_block, matrix, l3_start_row, l3_start_col, epoch_progress, main_progress)?;
-            }
-        }
-        Ok(())
-    }
-    
-    /// L3 블록 인코딩 (다층 잔차학습 + 초정밀 Riemann Adam)
-    fn encode_l3_block(
-        l3_block: &mut L3Block,
-        matrix: &[Vec<f32>],
-        start_row: usize,
-        start_col: usize,
-        epoch_progress: Option<&indicatif::ProgressBar>,
-        main_progress: Option<&indicatif::ProgressBar>
-    ) -> Result<(), String> {
-        // 실제 블록 크기는 32x32 (테스트에서 확인된 크기)
-        let actual_block_size = 32;
-        
-        // 🚀 다층 하이브리드 인코더 초기화
-        let mut primary_encoder = HybridEncoder::new(15, TransformType::Dct); // 1차: DCT
-        let mut secondary_encoder = HybridEncoder::new(10, TransformType::Dwt); // 2차: 웨이블릿
-        let mut tertiary_encoder = HybridEncoder::new(8, TransformType::Dct); // 3차: 정밀 DCT
-        
-        for (l4_i, l4_row) in l3_block.l4_blocks.iter_mut().enumerate() {
-            for (l4_j, l4_block) in l4_row.iter_mut().enumerate() {
-                let l4_start_row = start_row + l4_i * actual_block_size;
-                let l4_start_col = start_col + l4_j * actual_block_size;
-                
-                // 현재 블록 데이터 추출
-                let mut current_block = vec![vec![0.0; actual_block_size]; actual_block_size];
-                for i in 0..actual_block_size {
-                    for j in 0..actual_block_size {
-                        if l4_start_row + i < matrix.len() && l4_start_col + j < matrix[0].len() {
-                            current_block[i][j] = matrix[l4_start_row + i][l4_start_col + j];
-                        }
-                    }
-                }
-                
-                // 단순화된 다층 하이브리드 압축 (현재 블록을 1D 벡터로 변환)
-                let mut block_data = vec![0.0; actual_block_size * actual_block_size];
-                for i in 0..actual_block_size {
-                    for j in 0..actual_block_size {
-                        block_data[i * actual_block_size + j] = current_block[i][j];
-                    }
-                }
-                
-                // === 1단계: 주 성분 DCT 압축 ===
-                let primary_compressed = primary_encoder.encode_block(&block_data, actual_block_size, actual_block_size);
-                let primary_decoded = primary_compressed.decode();
-                
-                // 1차 잔차 계산
-                let mut first_residual = vec![0.0; block_data.len()];
-                for i in 0..block_data.len() {
-                    first_residual[i] = block_data[i] - primary_decoded[i];
-                }
-                
-                // === 2단계: 잔차 웨이블릿 압축 ===
-                let secondary_compressed = secondary_encoder.encode_block(&first_residual, actual_block_size, actual_block_size);
-                let secondary_decoded = secondary_compressed.decode();
-                
-                // 2차 잔차 계산
-                let mut second_residual = vec![0.0; first_residual.len()];
-                for i in 0..first_residual.len() {
-                    second_residual[i] = first_residual[i] - secondary_decoded[i];
-                }
-                
-                // === 3단계: 미세 잔차 정밀 DCT ===
-                let tertiary_compressed = tertiary_encoder.encode_block(&second_residual, actual_block_size, actual_block_size);
-                let tertiary_decoded = tertiary_compressed.decode();
-                
-                // 최종 잔차 계산 (RBE로 학습할 부분)
-                let mut final_target = vec![0.0; second_residual.len()];
-                for i in 0..second_residual.len() {
-                    final_target[i] = second_residual[i] - tertiary_decoded[i];
-                }
-                
-                // === 4단계: 초정밀 RBE 학습 ===
-                let mut best_seed = Packed128::random(&mut rand::thread_rng());
-                let mut best_rmse = f32::INFINITY;
-                let mut optimizer = RiemannianAdamOptimizer::new();
-                
-                // 적응적 학습률 (잔차 크기에 따라)
-                let residual_magnitude: f32 = final_target.iter().map(|x| x.abs()).sum::<f32>() / final_target.len() as f32;
-                let adaptive_lr = if residual_magnitude < 0.01 {
-                    0.0001 // 미세 잔차는 매우 작은 학습률
-                } else if residual_magnitude < 0.1 {
-                    0.001  // 중간 잔차는 작은 학습률
-                } else {
-                    0.005  // 큰 잔차는 기본 학습률
-                };
-                
-                // 고정밀 학습 (에포크 증가)
-                let epochs = 8000; // 더 많은 에포크로 정밀도 향상
-                
-                for epoch in 1..=epochs {
-                    // 현재 예측 생성
-                    let mut predicted = vec![0.0; final_target.len()];
-                    for i in 0..actual_block_size {
-                        for j in 0..actual_block_size {
-                            let idx = i * actual_block_size + j;
-                            predicted[idx] = best_seed.fused_forward(i, j, actual_block_size, actual_block_size);
-                        }
-                    }
-                    
-                    // 고도화된 역전파
-                    let (mse, rmse) = optimizer.fused_backward_step(
-                        &final_target, 
-                        &predicted, 
-                        &mut best_seed, 
-                        actual_block_size, 
-                        actual_block_size, 
-                        adaptive_lr
-                    );
-                    
-                    if rmse < best_rmse {
-                        best_rmse = rmse;
-                    }
-                    
-                    // 조기 종료 조건 (초정밀)
-                    if rmse < 0.0001 {
-                        break;
-                    }
-                    
-                    // 실시간 진행률 업데이트
-                    if let Some(epoch_bar) = epoch_progress {
-                        if epoch % 100 == 0 || epoch == epochs {
-                            let quality_grade = if rmse < 0.001 { "S급" }
-                            else if rmse < 0.01 { "A급" }
-                            else if rmse < 0.05 { "B급" }
-                            else if rmse < 0.1 { "C급" }
-                            else { "D급" };
-                            
-                            epoch_bar.set_message(format!(
-                                "다층 잔차 RMSE: {:.6}, 품질: {}, LR: {:.6}", 
-                                rmse, quality_grade, adaptive_lr
-                            ));
-                            epoch_bar.set_position(epoch as u64);
-                        }
-                    }
-                }
-                
-                // L4 블록에 최적화된 시드 저장
-                *l4_block = best_seed;
-                
-                // 메인 진행률 업데이트
-                if let Some(main_bar) = main_progress {
-                    main_bar.inc(1);
-                }
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// L1 블록 디코딩
-    fn decode_l1_block(
-        l1_block: &L1Block,
-        result: &mut [Vec<f32>],
-        start_row: usize,
-        start_col: usize
-    ) -> Result<(), String> {
-        // L2 블록 크기를 더 작게 조정 (원래 1024 → 128)
-        let l2_block_size = 128;
-        
-        for (l2_i, l2_row) in l1_block.l2_blocks.iter().enumerate() {
-            for (l2_j, l2_block) in l2_row.iter().enumerate() {
-                let l2_start_row = start_row + l2_i * l2_block_size;
-                let l2_start_col = start_col + l2_j * l2_block_size;
-                
-                Self::decode_l2_block(l2_block, result, l2_start_row, l2_start_col)?;
-            }
-        }
-        Ok(())
-    }
-    
-    /// L2 블록 디코딩
-    fn decode_l2_block(
-        l2_block: &L2Block,
-        result: &mut [Vec<f32>],
-        start_row: usize,
-        start_col: usize
-    ) -> Result<(), String> {
-        // L3 블록 크기를 더 작게 조정 (원래 256 → 64)
-        let l3_block_size = 64;
-        
-        for (l3_i, l3_row) in l2_block.l3_blocks.iter().enumerate() {
-            for (l3_j, l3_block) in l3_row.iter().enumerate() {
-                let l3_start_row = start_row + l3_i * l3_block_size;
-                let l3_start_col = start_col + l3_j * l3_block_size;
-                
-                Self::decode_l3_block(l3_block, result, l3_start_row, l3_start_col)?;
-            }
-        }
-        Ok(())
-    }
-    
-    /// L3 블록 디코딩
-    fn decode_l3_block(
-        l3_block: &L3Block,
-        result: &mut [Vec<f32>],
-        start_row: usize,
-        start_col: usize
-    ) -> Result<(), String> {
-        // 실제 블록 크기는 32x32 (테스트에서 확인된 크기)
-        let actual_block_size = 32;
-        
-        for (l4_i, l4_row) in l3_block.l4_blocks.iter().enumerate() {
-            for (l4_j, l4_block) in l4_row.iter().enumerate() {
-                let l4_start_row = start_row + l4_i * actual_block_size;
-                let l4_start_col = start_col + l4_j * actual_block_size;
-                
-                // Packed128에서 32×32 블록 복원
-                for i in 0..actual_block_size {
-                    for j in 0..actual_block_size {
-                        let row = l4_start_row + i;
-                        let col = l4_start_col + j;
-                        
-                        if row < result.len() && col < result[0].len() {
-                            // fused_forward로 값 생성
-                            result[row][col] = l4_block.fused_forward(i, j, actual_block_size, actual_block_size);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// 6.2.2 적응적 블록 분할 수행
     pub fn adaptive_partition(&mut self, source_matrix: &[f32]) {
         let l1_block_size = 4096;
@@ -875,7 +456,7 @@ impl HierarchicalBlockMatrix {
     
     /// L4 블록들 생성 (최소 단위)
     fn create_l4_blocks(&mut self, source_matrix: &[f32], row_start: usize, col_start: usize, 
-                        rows: usize, cols: usize) -> Vec<Vec<Packed128>> {
+                        rows: usize, cols: usize) -> Vec<Vec<L4Block>> {
         let l4_block_size = self.quality_level.optimal_block_size();
         let mut l4_blocks = Vec::new();
         
@@ -890,9 +471,12 @@ impl HierarchicalBlockMatrix {
                                                                  row_start + i, col_start + j, 
                                                                  sub_rows, sub_cols);
                 
-                let l4_block = Packed128 {
-                    hi: 0x12345678,  // 기본 상태 비트
-                    lo: ((detail_params.lo >> 32) as u64) | (detail_params.hi << 32),
+                let l4_block = L4Block {
+                    row_start: row_start + i,
+                    col_start: col_start + j,
+                    rows: sub_rows,
+                    cols: sub_cols,
+                    detail_params,
                 };
                 
                 l4_row.push(l4_block);
@@ -1132,25 +716,27 @@ impl HierarchicalBlockMatrix {
         let mut result = vec![0.0; block.rows];
         
         if !block.l4_blocks.is_empty() {
-            for (l4_i, l4_row) in block.l4_blocks.iter().enumerate() {
-                for (l4_j, l4_block) in l4_row.iter().enumerate() {
-                    // L4 블록의 위치와 크기 계산 (64×64)
-                    let l4_row_start = l4_i * 64;
-                    let l4_col_start = l4_j * 64;
-                    let l4_rows = 64.min(block.rows - l4_row_start);
-                    let l4_cols = 64.min(input.len() - (block.col_start + l4_col_start));
-                    
-                    for i in 0..l4_rows {
-                        for j in 0..l4_cols {
-                            let input_idx = block.col_start + l4_col_start + j;
-                            if input_idx < input.len() {
-                                let weight = l4_block.fused_forward(i, j, 64, 64);
-                                let result_idx = l4_row_start + i;
-                                if result_idx < result.len() {
-                                    result[result_idx] += weight * input[input_idx];
+            for l4_row in &block.l4_blocks {
+                for l4_block in l4_row {
+                    for i in 0..l4_block.rows {
+                        for j in 0..l4_block.cols {
+                            if l4_block.col_start + j < input.len() {
+                                let weight = l4_block.detail_params.fused_forward(i, j, l4_block.rows, l4_block.cols);
+                                let global_i = l4_block.row_start - block.row_start + i;
+                                if global_i < result.len() {
+                                    result[global_i] += weight * input[l4_block.col_start + j];
                                 }
                             }
                         }
+                    }
+                }
+            }
+        } else {
+            for i in 0..block.rows {
+                for j in 0..block.cols {
+                    if block.col_start + j < input.len() {
+                        let weight = block.mid_params.fused_forward(i, j, block.rows, block.cols);
+                        result[i] += weight * input[block.col_start + j];
                     }
                 }
             }
@@ -1202,13 +788,10 @@ impl HierarchicalBlockMatrix {
     /// 품질 통계 계산
     pub fn quality_statistics(&self) -> QualityStats {
         let total_error = self.error_controller.compute_total_error();
-        
-        // PSNR 계산: 20 * log10(MAX_VALUE / RMS_ERROR)
-        // 여기서 MAX_VALUE = 1.0 (정규화된 값 기준)
-        let psnr = if total_error > 1e-10 {
-            20.0 * (1.0 / total_error).log10()
+        let psnr = if total_error > 0.0 {
+            -20.0 * total_error.log10()
         } else {
-            f32::INFINITY // 완벽한 복원 시
+            f32::INFINITY
         };
         
         let (memory_bytes, compression_ratio) = self.memory_usage();

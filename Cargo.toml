@@ -3,6 +3,30 @@ name = "RBE-LLM"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "download"
+path = "src/bin/download.rs"
+
+[[bin]]
+name = "compress_model"
+path = "src/bin/compress_model.rs"
+
+[[bin]]
+name = "run"
+path = "src/bin/run.rs"
+
+[[bin]]
+name = "test_models"
+path = "src/bin/test_models.rs"
+
+[[bin]]
+name = "compress_multi"
+path = "src/bin/compress_multi.rs"
+
+[[bin]]
+name = "compress"
+path = "src/bin/compress.rs"
+
 [dependencies]
 rand = "0.8"
 approx = "0.5"
@@ -30,18 +54,8 @@ memmap2 = "0.9"
 safetensors = { version = "0.4", default-features = false }
 half = "2.4" # f16 변환 지원
 anyhow = "1.0.98"
+tokenizers = "0.21.2"
+# tch = "0.20.0"
 
 # Test dependencies
 [dev-dependencies]
-
-[[bin]]
-name = "compress_model"
-path = "src/bin/compress_model.rs"
-
-[[bin]]
-name = "compress_and_test"
-path = "src/bin/compress_and_test.rs"
-
-[[bin]]
-name = "test_compressed_models"
-path = "src/bin/test_compressed_models.rs"
