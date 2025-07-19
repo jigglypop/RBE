@@ -33,3 +33,11 @@ anyhow = "1.0.98"
 
 # Test dependencies
 [dev-dependencies]
+
+[[bin]]
+name = "compress_model"
+path = "src/bin/compress_model.rs"
+
+[[bin]]
+name = "compress_and_test"
+path = "src/bin/compress_and_test.rs"

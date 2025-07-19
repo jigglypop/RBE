@@ -1,0 +1,4 @@
+{
+                "model_type": "gpt2",
+                "tokenizer_class": "PreTrainedTokenizerFast"
+            }
