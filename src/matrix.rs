@@ -1,5 +1,12 @@
-use crate::math::adam_update;
-use crate::types::PoincareMatrix;
+use crate::types::*;
+use crate::math::*;
+use crate::encoder::HybridEncoder; // 🚀 하이브리드 인코더 추가
+use rayon::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use rand::Rng;
 use std::f32::consts::PI;
 
 impl PoincareMatrix {
@@ -110,12 +117,7 @@ impl PoincareMatrix {
 // 6장: 대규모 행렬 연산: 푸앵카레 볼 기반 선형대수 최적화
 // ============================================================================
 
-use crate::types::Packed128;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
-use indicatif::{ProgressBar, ProgressStyle};
-use rand::Rng;
+// 중복 imports 제거됨
 
 /// 6.2 계층적 블록 분할 시스템
 /// 
@@ -499,7 +501,7 @@ impl HierarchicalBlockMatrix {
         Ok(())
     }
     
-    /// L3 블록 인코딩 (실시간 진행률 바 지원)
+    /// L3 블록 인코딩 (다층 잔차학습 + 초정밀 Riemann Adam)
     fn encode_l3_block(
         l3_block: &mut L3Block,
         matrix: &[Vec<f32>],
@@ -511,50 +513,85 @@ impl HierarchicalBlockMatrix {
         // 실제 블록 크기는 32x32 (테스트에서 확인된 크기)
         let actual_block_size = 32;
         
+        // 🚀 다층 하이브리드 인코더 초기화
+        let mut primary_encoder = HybridEncoder::new(15, TransformType::Dct); // 1차: DCT
+        let mut secondary_encoder = HybridEncoder::new(10, TransformType::Dwt); // 2차: 웨이블릿
+        let mut tertiary_encoder = HybridEncoder::new(8, TransformType::Dct); // 3차: 정밀 DCT
+        
         for (l4_i, l4_row) in l3_block.l4_blocks.iter_mut().enumerate() {
             for (l4_j, l4_block) in l4_row.iter_mut().enumerate() {
                 let l4_start_row = start_row + l4_i * actual_block_size;
                 let l4_start_col = start_col + l4_j * actual_block_size;
                 
-                // 32×32 블록 데이터 추출
-                let mut block_data = Vec::new();
+                // 현재 블록 데이터 추출
+                let mut current_block = vec![vec![0.0; actual_block_size]; actual_block_size];
                 for i in 0..actual_block_size {
                     for j in 0..actual_block_size {
-                        let row = l4_start_row + i;
-                        let col = l4_start_col + j;
-                        
-                        if row < matrix.len() && col < matrix[0].len() {
-                            block_data.push(matrix[row][col]);
-                        } else {
-                            block_data.push(0.0); // 패딩
+                        if l4_start_row + i < matrix.len() && l4_start_col + j < matrix[0].len() {
+                            current_block[i][j] = matrix[l4_start_row + i][l4_start_col + j];
                         }
                     }
                 }
                 
-                // 실제 RBE 학습으로 최적 파라미터 찾기 (효율적 100 에포크)
-                let mut best_seed = Packed128::random(&mut rand::thread_rng());
-                
-                // 초기 파라미터 설정
-                let initial_r = 0.5f32;
-                let initial_theta = 0.0f32;
-                best_seed.lo = ((initial_r.to_bits() as u64) << 32) | initial_theta.to_bits() as u64;
-                
-                // 🚀 5000 에포크 RBE 학습으로 RMSE 최소화 (안정적 고품질 변환)
-                let mut learning_rate = 0.005; // RMSE 안정성 우선 학습률 (사용자 요청)
-                let epochs = 5000; // 사용자 요청: 5000 에포크로 균형잡힌 품질
-                let mut best_rmse = f32::INFINITY;
-                let mut no_improvement_count = 0;
-                
-                // 🎯 진행률 바 초기화 (있는 경우)
-                if let Some(progress) = epoch_progress {
-                    progress.reset();
-                    progress.set_length(epochs as u64);
-                    progress.set_message("RBE 학습 시작...");
+                // 단순화된 다층 하이브리드 압축 (현재 블록을 1D 벡터로 변환)
+                let mut block_data = vec![0.0; actual_block_size * actual_block_size];
+                for i in 0..actual_block_size {
+                    for j in 0..actual_block_size {
+                        block_data[i * actual_block_size + j] = current_block[i][j];
+                    }
                 }
+                
+                // === 1단계: 주 성분 DCT 압축 ===
+                let primary_compressed = primary_encoder.encode_block(&block_data, actual_block_size, actual_block_size);
+                let primary_decoded = primary_compressed.decode();
+                
+                // 1차 잔차 계산
+                let mut first_residual = vec![0.0; block_data.len()];
+                for i in 0..block_data.len() {
+                    first_residual[i] = block_data[i] - primary_decoded[i];
+                }
+                
+                // === 2단계: 잔차 웨이블릿 압축 ===
+                let secondary_compressed = secondary_encoder.encode_block(&first_residual, actual_block_size, actual_block_size);
+                let secondary_decoded = secondary_compressed.decode();
+                
+                // 2차 잔차 계산
+                let mut second_residual = vec![0.0; first_residual.len()];
+                for i in 0..first_residual.len() {
+                    second_residual[i] = first_residual[i] - secondary_decoded[i];
+                }
+                
+                // === 3단계: 미세 잔차 정밀 DCT ===
+                let tertiary_compressed = tertiary_encoder.encode_block(&second_residual, actual_block_size, actual_block_size);
+                let tertiary_decoded = tertiary_compressed.decode();
+                
+                // 최종 잔차 계산 (RBE로 학습할 부분)
+                let mut final_target = vec![0.0; second_residual.len()];
+                for i in 0..second_residual.len() {
+                    final_target[i] = second_residual[i] - tertiary_decoded[i];
+                }
+                
+                // === 4단계: 초정밀 RBE 학습 ===
+                let mut best_seed = Packed128::random(&mut rand::thread_rng());
+                let mut best_rmse = f32::INFINITY;
+                let mut optimizer = RiemannianAdamOptimizer::new();
+                
+                // 적응적 학습률 (잔차 크기에 따라)
+                let residual_magnitude: f32 = final_target.iter().map(|x| x.abs()).sum::<f32>() / final_target.len() as f32;
+                let adaptive_lr = if residual_magnitude < 0.01 {
+                    0.0001 // 미세 잔차는 매우 작은 학습률
+                } else if residual_magnitude < 0.1 {
+                    0.001  // 중간 잔차는 작은 학습률
+                } else {
+                    0.005  // 큰 잔차는 기본 학습률
+                };
+                
+                // 고정밀 학습 (에포크 증가)
+                let epochs = 8000; // 더 많은 에포크로 정밀도 향상
                 
                 for epoch in 1..=epochs {
                     // 현재 예측 생성
-                    let mut predicted = vec![0.0; actual_block_size * actual_block_size];
+                    let mut predicted = vec![0.0; final_target.len()];
                     for i in 0..actual_block_size {
                         for j in 0..actual_block_size {
                             let idx = i * actual_block_size + j;
@@ -562,88 +599,53 @@ impl HierarchicalBlockMatrix {
                         }
                     }
                     
-                    // fused_backward로 파라미터 최적화
-                    let (mse, rmse) = crate::math::fused_backward(
-                        &block_data,
-                        &predicted,
-                        &mut best_seed,
-                        actual_block_size,
-                        actual_block_size,
-                        learning_rate
+                    // 고도화된 역전파
+                    let (mse, rmse) = optimizer.fused_backward_step(
+                        &final_target, 
+                        &predicted, 
+                        &mut best_seed, 
+                        actual_block_size, 
+                        actual_block_size, 
+                        adaptive_lr
                     );
                     
-                    // 적응적 학습률 조정
                     if rmse < best_rmse {
                         best_rmse = rmse;
-                        no_improvement_count = 0;
-                        learning_rate *= 1.02; // 성능 향상시 학습률 약간 증가
-                    } else {
-                        no_improvement_count += 1;
-                        if no_improvement_count > 10 { // 더 빠른 적응
-                            learning_rate *= 0.9; // 개선 없으면 학습률 감소
-                            no_improvement_count = 0;
-                        }
                     }
                     
-                    // 🔥 실시간 진행률 바 업데이트 (매 에포크마다)
-                    if let Some(progress) = epoch_progress {
-                        progress.set_position(epoch as u64);
-                        
-                        // 품질 등급 계산 (RMSE 기반)
-                        let quality_grade = if rmse < 0.01 { "🟢 우수" } 
-                                           else if rmse < 0.05 { "🟡 양호" } 
-                                           else if rmse < 0.1 { "🟠 보통" } 
-                                           else { "🔴 개선중" };
-                        
-                        progress.set_message(format!(
-                            "{:.4} | LR: {:.4} | Best: {:.4} | 개선: {}회", 
-                            rmse, learning_rate, best_rmse, epochs as i32 - no_improvement_count
-                        ));
-                        
-                        // 10 에포크마다 상세 정보 업데이트
-                        if epoch % 10 == 0 {
-                            progress.set_message(format!(
-                                "{} | RMSE: {:.6} | LR: {:.4} | 최고: {:.6}", 
-                                quality_grade, rmse, learning_rate, best_rmse
+                    // 조기 종료 조건 (초정밀)
+                    if rmse < 0.0001 {
+                        break;
+                    }
+                    
+                    // 실시간 진행률 업데이트
+                    if let Some(epoch_bar) = epoch_progress {
+                        if epoch % 100 == 0 || epoch == epochs {
+                            let quality_grade = if rmse < 0.001 { "S급" }
+                            else if rmse < 0.01 { "A급" }
+                            else if rmse < 0.05 { "B급" }
+                            else if rmse < 0.1 { "C급" }
+                            else { "D급" };
+                            
+                            epoch_bar.set_message(format!(
+                                "다층 잔차 RMSE: {:.6}, 품질: {}, LR: {:.6}", 
+                                rmse, quality_grade, adaptive_lr
                             ));
+                            epoch_bar.set_position(epoch as u64);
                         }
-                    }
-                    
-                    // 🎯 조기 종료 조건들 (품질 우선 + 효율적 수렴)
-                    if rmse < 0.005 {  // 매우 좋은 품질 달성
-                        if let Some(progress) = epoch_progress {
-                            progress.finish_with_message("🎉 목표 품질 달성! 조기 종료".to_string());
-                        }
-                        break;
-                    }
-                    if no_improvement_count > 50 {  // 50 에포크 동안 개선 없음 (더 인내심)
-                        if let Some(progress) = epoch_progress {
-                            progress.finish_with_message(format!("⏹️ 수렴 완료 | 최종 RMSE: {:.6}", best_rmse));
-                        }
-                        break;
                     }
                 }
                 
-                // 🏁 정상 완료 시 진행률 바 마무리
-                if let Some(progress) = epoch_progress {
-                    if !progress.is_finished() {
-                        progress.finish_with_message(format!("✅ 학습 완료 | 최종 RMSE: {:.6}", best_rmse));
-                    }
-                }
-                
-                // 학습 완료 시 최종 상태
-                // if !progress.is_finished() {
-                //     progress.finish_with_message(format!("✅ 학습 완료: Best RMSE: {:.6}", best_rmse));
-                // }
-                
-                // 🔥 상위 진행률 바 업데이트 (각 L4 블록 완료시마다)
-                if let Some(main_prog) = main_progress {
-                    main_prog.inc(1); // L4 블록 하나씩 완료 증가
-                }
-                
+                // L4 블록에 최적화된 시드 저장
                 *l4_block = best_seed;
+                
+                // 메인 진행률 업데이트
+                if let Some(main_bar) = main_progress {
+                    main_bar.inc(1);
+                }
             }
         }
+        
         Ok(())
     }
     

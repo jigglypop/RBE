@@ -1299,3 +1299,359 @@ impl HybridRiemannianOptimizer {
         continuous_converged && discrete_converged
     }
 } 
+
+/// 🚀 고도화된 리만 Adam 옵티마이저
+/// 푸앵카레 볼의 리만 기하학을 활용한 적응적 최적화
+#[derive(Debug, Clone)]
+pub struct RiemannianAdamOptimizer {
+    /// 리만 기하학 파라미터
+    pub poincare_curvature: f32,
+    /// 적응적 학습률 파라미터
+    pub beta1: f32,  // 모멘텀 계수
+    pub beta2: f32,  // RMSprop 계수  
+    pub epsilon: f32, // 수치 안정성
+    /// 푸앵카레 볼 경계 보호
+    pub boundary_protection: f32,
+    /// 기하학적 가중치
+    pub geometric_scaling: f32,
+    /// 모멘텀 메모리
+    pub momentum_r: f32,
+    pub momentum_theta: f32,
+    /// RMSprop 메모리
+    pub rmsprop_r: f32,
+    pub rmsprop_theta: f32,
+    /// 시간 스텝
+    pub time_step: u32,
+}
+
+impl RiemannianAdamOptimizer {
+    /// 새로운 리만 Adam 옵티마이저 생성
+    pub fn new() -> Self {
+        Self {
+            poincare_curvature: -1.0,  // 푸앵카레 볼의 음의 곡률
+            beta1: 0.9,               // 모멘텀 계수
+            beta2: 0.999,             // RMSprop 계수
+            epsilon: 1e-8,            // 수치 안정성
+            boundary_protection: 0.95, // 경계 보호 (r < 0.95)
+            geometric_scaling: 1.0,    // 기하학적 스케일링
+            momentum_r: 0.0,
+            momentum_theta: 0.0,
+            rmsprop_r: 0.0,
+            rmsprop_theta: 0.0,
+            time_step: 0,
+        }
+    }
+    
+    /// 푸앵카레 볼에서의 리만 메트릭 계산
+    fn compute_riemannian_metric(&self, r: f32, theta: f32) -> (f32, f32) {
+        // 푸앵카레 볼의 리만 메트릭: g_rr = 4/(1-r²)², g_θθ = 4r²/(1-r²)²
+        let r_clamped = r.clamp(0.01, 0.99); // 경계 보호
+        let one_minus_r2 = 1.0 - r_clamped.powi(2);
+        let metric_factor = 4.0 / one_minus_r2.powi(2);
+        
+        let g_rr = metric_factor;
+        let g_theta_theta = metric_factor * r_clamped.powi(2).max(0.01);
+        
+        (g_rr, g_theta_theta)
+    }
+    
+    /// 지수 매핑 (Exponential Map) 적용
+    fn exponential_map(&self, r: f32, theta: f32, grad_r: f32, grad_theta: f32, learning_rate: f32) -> (f32, f32) {
+        let (g_rr, g_theta_theta) = self.compute_riemannian_metric(r, theta);
+        
+        // 리만 그래디언트 정규화
+        let riemannian_grad_r = grad_r / g_rr.sqrt();
+        let riemannian_grad_theta = grad_theta / g_theta_theta.sqrt();
+        
+        // 그래디언트 노름 계산
+        let grad_norm = (riemannian_grad_r.powi(2) + riemannian_grad_theta.powi(2)).sqrt();
+        
+        if grad_norm < self.epsilon {
+            return (r, theta);
+        }
+        
+        // 지수 매핑을 통한 업데이트
+        let step_size = learning_rate * grad_norm;
+        let direction_r = riemannian_grad_r / grad_norm;
+        let direction_theta = riemannian_grad_theta / grad_norm;
+        
+        // 푸앵카레 볼에서의 지수 매핑 (근사)
+        let new_r = r - step_size * direction_r;
+        let new_theta = theta - step_size * direction_theta;
+        
+        // 경계 조건 적용
+        let final_r = new_r.clamp(0.01, self.boundary_protection);
+        let final_theta = new_theta;
+        
+        (final_r, final_theta)
+    }
+    
+    /// 고도화된 리만 Adam 최적화 스텝
+    pub fn optimization_step(
+        &mut self,
+        seed: &mut Packed128,
+        grad_r: f32,
+        grad_theta: f32,
+        learning_rate: f32
+    ) {
+        self.time_step += 1;
+        
+        // 현재 파라미터 추출
+        let r = f32::from_bits((seed.lo >> 32) as u32);
+        let theta = f32::from_bits(seed.lo as u32);
+        
+        // 리만 메트릭 고려
+        let (g_rr, g_theta_theta) = self.compute_riemannian_metric(r, theta);
+        
+        // 자연 그래디언트 (Natural Gradient) 계산
+        let natural_grad_r = grad_r / g_rr;
+        let natural_grad_theta = grad_theta / g_theta_theta;
+        
+        // Adam 모멘텀 업데이트
+        self.momentum_r = self.beta1 * self.momentum_r + (1.0 - self.beta1) * natural_grad_r;
+        self.momentum_theta = self.beta1 * self.momentum_theta + (1.0 - self.beta1) * natural_grad_theta;
+        
+        // Adam RMSprop 업데이트
+        self.rmsprop_r = self.beta2 * self.rmsprop_r + (1.0 - self.beta2) * natural_grad_r.powi(2);
+        self.rmsprop_theta = self.beta2 * self.rmsprop_theta + (1.0 - self.beta2) * natural_grad_theta.powi(2);
+        
+        // 편향 보정 (Bias Correction)
+        let bias_correction1 = 1.0 - self.beta1.powi(self.time_step as i32);
+        let bias_correction2 = 1.0 - self.beta2.powi(self.time_step as i32);
+        
+        let corrected_momentum_r = self.momentum_r / bias_correction1;
+        let corrected_momentum_theta = self.momentum_theta / bias_correction1;
+        
+        let corrected_rmsprop_r = self.rmsprop_r / bias_correction2;
+        let corrected_rmsprop_theta = self.rmsprop_theta / bias_correction2;
+        
+        // 적응적 학습률 계산
+        let adaptive_lr_r = learning_rate / (corrected_rmsprop_r.sqrt() + self.epsilon);
+        let adaptive_lr_theta = learning_rate / (corrected_rmsprop_theta.sqrt() + self.epsilon);
+        
+        // 지수 매핑을 통한 파라미터 업데이트
+        let (new_r, new_theta) = self.exponential_map(
+            r, theta,
+            corrected_momentum_r,
+            corrected_momentum_theta,
+            adaptive_lr_r.min(adaptive_lr_theta) * self.geometric_scaling
+        );
+        
+        // 파라미터 업데이트
+        seed.lo = ((new_r.to_bits() as u64) << 32) | new_theta.to_bits() as u64;
+    }
+    
+    /// 🚀 융합 역전파 스텝 (다층 잔차학습용)
+    pub fn fused_backward_step(
+        &mut self,
+        target: &[f32],
+        predicted: &[f32], 
+        seed: &mut Packed128,
+        rows: usize,
+        cols: usize,
+        learning_rate: f32
+    ) -> (f32, f32) {
+        // 시간 스텝 증가
+        self.time_step += 1;
+        
+        // 그래디언트 누적
+        let mut grad_r_sum = 0.0;
+        let mut grad_theta_sum = 0.0;
+        let mut total_loss = 0.0;
+        
+        for i in 0..rows {
+            for j in 0..cols {
+                let idx = i * cols + j;
+                let error = predicted[idx] - target[idx];
+                total_loss += error * error;
+                
+                // 상태 전이 미분 (이산 공간 탐색)
+                self.apply_state_transition(seed, error, i, j);
+                
+                // 연속 파라미터 해석적 그래디언트
+                let dr = self.analytical_gradient_r(seed, i, j, rows, cols);
+                let dtheta = self.analytical_gradient_theta(seed, i, j, rows, cols);
+                
+                grad_r_sum += error * dr;
+                grad_theta_sum += error * dtheta;
+            }
+        }
+        
+        // 평균 그래디언트
+        let total_elements = (rows * cols) as f32;
+        grad_r_sum /= total_elements;
+        grad_theta_sum /= total_elements;
+        
+        // 현재 파라미터 추출
+        let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+        let theta_fp32 = f32::from_bits(seed.lo as u32);
+        
+        // Adam 모멘텀 업데이트
+        self.momentum_r = self.beta1 * self.momentum_r + (1.0 - self.beta1) * grad_r_sum;
+        self.momentum_theta = self.beta1 * self.momentum_theta + (1.0 - self.beta1) * grad_theta_sum;
+        
+        // RMSprop 업데이트
+        self.rmsprop_r = self.beta2 * self.rmsprop_r + (1.0 - self.beta2) * grad_r_sum * grad_r_sum;
+        self.rmsprop_theta = self.beta2 * self.rmsprop_theta + (1.0 - self.beta2) * grad_theta_sum * grad_theta_sum;
+        
+        // 편향 보정
+        let momentum_r_hat = self.momentum_r / (1.0 - self.beta1.powi(self.time_step as i32));
+        let momentum_theta_hat = self.momentum_theta / (1.0 - self.beta1.powi(self.time_step as i32));
+        let rmsprop_r_hat = self.rmsprop_r / (1.0 - self.beta2.powi(self.time_step as i32));
+        let rmsprop_theta_hat = self.rmsprop_theta / (1.0 - self.beta2.powi(self.time_step as i32));
+        
+        // 리만 기하학적 스케일링
+        let (metric_r, metric_theta) = self.compute_riemannian_metric(r_fp32, theta_fp32);
+        
+        // 적응적 파라미터 업데이트
+        let new_r = (r_fp32 - learning_rate * metric_r * momentum_r_hat / 
+                    (rmsprop_r_hat.sqrt() + self.epsilon)).clamp(0.1, 2.0);
+        let new_theta = theta_fp32 - learning_rate * metric_theta * momentum_theta_hat / 
+                       (rmsprop_theta_hat.sqrt() + self.epsilon);
+        
+        // 푸앵카레 볼 경계 보호
+        let protected_r = if new_r >= self.boundary_protection {
+            new_r * 0.99 // 경계에서 살짝 안쪽으로
+        } else {
+            new_r
+        };
+        
+        // 파라미터 업데이트
+        seed.lo = ((protected_r.to_bits() as u64) << 32) | new_theta.to_bits() as u64;
+        
+        // MSE 및 RMSE 계산
+        let mse = total_loss / total_elements;
+        let rmse = mse.sqrt();
+        
+        (mse, rmse)
+    }
+    
+    /// 상태 전이 미분 적용
+    fn apply_state_transition(&mut self, seed: &mut Packed128, gradient_signal: f32, i: usize, j: usize) {
+        let hash = (i * 31 + j) & 0x7;
+        let bit_pos = hash * 3;
+        let current_state = (seed.hi >> bit_pos) & 0x7;
+        
+        let new_state = if gradient_signal.abs() > 0.1 {
+            if gradient_signal > 0.0 {
+                // 양의 그래디언트: 함수 미분 방향
+                match current_state {
+                    0 => 1, // sin → cos
+                    1 => 0, // cos → -sin  
+                    2 => 3, // tanh → sech²
+                    3 => 2, // sech² → tanh
+                    4 => 5, // exp → log
+                    5 => 6, // log → 1/x
+                    6 => 7, // 1/x → poly
+                    7 => 4, // poly → exp
+                    _ => current_state,
+                }
+            } else {
+                // 음의 그래디언트: 역방향 전이
+                match current_state {
+                    0 => 7, // sin → poly
+                    1 => 6, // cos → 1/x
+                    2 => 5, // tanh → log
+                    3 => 4, // sech² → exp
+                    4 => 3, // exp → sech²
+                    5 => 2, // log → tanh
+                    6 => 1, // 1/x → cos
+                    7 => 0, // poly → sin
+                    _ => current_state,
+                }
+            }
+        } else {
+            current_state // 약한 그래디언트는 상태 유지
+        };
+        
+        // 비트 업데이트
+        seed.hi = (seed.hi & !(0x7 << bit_pos)) | (new_state << bit_pos);
+    }
+    
+    /// 해석적 r 파라미터 그래디언트
+    fn analytical_gradient_r(&self, seed: &Packed128, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        // 수치 미분으로 근사 (향후 해석적 구현 예정)
+        let epsilon = 1e-5;
+        let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+        let theta_fp32 = f32::from_bits(seed.lo as u32);
+        
+        // r + epsilon
+        let mut seed_plus = *seed;
+        let r_plus = r_fp32 + epsilon;
+        seed_plus.lo = ((r_plus.to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+        let f_plus = seed_plus.fused_forward(i, j, rows, cols);
+        
+        // r - epsilon  
+        let mut seed_minus = *seed;
+        let r_minus = (r_fp32 - epsilon).max(0.1);
+        seed_minus.lo = ((r_minus.to_bits() as u64) << 32) | theta_fp32.to_bits() as u64;
+        let f_minus = seed_minus.fused_forward(i, j, rows, cols);
+        
+        (f_plus - f_minus) / (2.0 * epsilon)
+    }
+    
+    /// 해석적 theta 파라미터 그래디언트
+    fn analytical_gradient_theta(&self, seed: &Packed128, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        // 수치 미분으로 근사 (향후 해석적 구현 예정)
+        let epsilon = 1e-5;
+        let r_fp32 = f32::from_bits((seed.lo >> 32) as u32);
+        let theta_fp32 = f32::from_bits(seed.lo as u32);
+        
+        // theta + epsilon
+        let mut seed_plus = *seed;
+        let theta_plus = theta_fp32 + epsilon;
+        seed_plus.lo = ((r_fp32.to_bits() as u64) << 32) | theta_plus.to_bits() as u64;
+        let f_plus = seed_plus.fused_forward(i, j, rows, cols);
+        
+        // theta - epsilon
+        let mut seed_minus = *seed;  
+        let theta_minus = theta_fp32 - epsilon;
+        seed_minus.lo = ((r_fp32.to_bits() as u64) << 32) | theta_minus.to_bits() as u64;
+        let f_minus = seed_minus.fused_forward(i, j, rows, cols);
+        
+        (f_plus - f_minus) / (2.0 * epsilon)
+    }
+}
+
+/// 🚀 리만 Adam을 사용한 고도화된 역전파
+pub fn fused_backward_riemannian_adam(
+    target: &[f32], 
+    predicted: &[f32], 
+    seed: &mut Packed128, 
+    optimizer: &mut RiemannianAdamOptimizer,
+    rows: usize, 
+    cols: usize,
+    learning_rate: f32
+) -> (f32, f32) {
+    let mut total_loss = 0.0;
+    let mut grad_r_sum = 0.0;
+    let mut grad_theta_sum = 0.0;
+    
+    for i in 0..rows {
+        for j in 0..cols {
+            let idx = i * cols + j;
+            let error = predicted[idx] - target[idx];
+            total_loss += error * error;
+            
+            // 1. 상태 전이 미분 적용 (hi 비트 업데이트)
+            seed.apply_state_transition(error, i, j);
+            
+            // 2. 해석적 미분으로 그래디언트 계산
+            let dr = seed.analytical_gradient_r(i, j, rows, cols);
+            let dtheta = seed.analytical_gradient_theta(i, j, rows, cols);
+            
+            grad_r_sum += error * dr;
+            grad_theta_sum += error * dtheta;
+        }
+    }
+    
+    let batch_size = (rows * cols) as f32;
+    grad_r_sum /= batch_size;
+    grad_theta_sum /= batch_size;
+    
+    // 🚀 리만 Adam 최적화 적용
+    optimizer.optimization_step(seed, grad_r_sum, grad_theta_sum, learning_rate);
+    
+    let mse = total_loss / batch_size;
+    (mse, mse.sqrt())
+} 
