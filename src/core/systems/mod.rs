@@ -5,7 +5,6 @@ pub mod performance;
 pub mod state_management;
 pub mod compute_engine;
 
-// 재수출
 pub use core_layer::{EncodedLayer, FusedEncodedLayer};
 pub use hybrid_system::{
     HybridPoincareRBESystem, HybridPoincareLayer, 
