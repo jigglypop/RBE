@@ -4,8 +4,6 @@ pub mod hybrid;
 pub mod analyzer;
 pub mod config;
 
-// 테스트 모듈은 __tests__/mod.rs에 통합되어 있음
-
 // 주요 타입들 재수출
 pub use adam::{AdamState};
 pub use riemannian_adam::{RiemannianAdamState};
@@ -20,4 +18,12 @@ pub enum OptimizerType {
     RiemannianAdam,
     SGD,
     RMSprop,
+} 
+
+#[cfg(test)]
+pub mod __tests__;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 } 

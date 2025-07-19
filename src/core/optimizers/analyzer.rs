@@ -34,7 +34,7 @@ impl TransformAnalyzer {
         total_variation / (signal.len() - 1) as f32
     }
     
-    /// 주파수 집중도 측정 (DCT 기반)
+    /// 주파수 집중도 측정 (DCT 기반 에너지 집중도)
     pub fn measure_frequency_concentration(&self, signal: &[f32]) -> f32 {
         if signal.is_empty() {
             return 0.0;
@@ -51,15 +51,20 @@ impl TransformAnalyzer {
             dct_coeffs[k] = sum;
         }
         
-        // 최대값과 RMS 비율
-        let max_coeff = dct_coeffs.iter().map(|x| x.abs()).fold(0.0, f32::max);
-        let rms = (dct_coeffs.iter().map(|x| x * x).sum::<f32>() / dct_coeffs.len() as f32).sqrt();
+        // 에너지 기반 집중도 계산
+        let mut energy_coeffs: Vec<f32> = dct_coeffs.iter().map(|x| x * x).collect();
+        energy_coeffs.sort_by(|a, b| b.partial_cmp(a).unwrap());
         
-        if rms > 1e-8 {
-            max_coeff / rms
-        } else {
-            0.0
+        let total_energy: f32 = energy_coeffs.iter().sum();
+        if total_energy < 1e-8 {
+            return 0.0;
         }
+        
+        // 상위 25% 계수들이 차지하는 에너지 비율
+        let top_count = (signal.len() / 4).max(1);
+        let top_energy: f32 = energy_coeffs.iter().take(top_count).sum();
+        
+        top_energy / total_energy
     }
     
     /// 최적 변환 방법 선택
