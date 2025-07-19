@@ -61,7 +61,7 @@ impl Packed64 {
 }
 
 /// 128-bit 시드 (Seed0: 비트필드, Seed1: 연속 FP32×2)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Packed128 {
     pub hi: u64,   // Seed0 : 기존 Packed64 비트필드
     pub lo: u64,   // Seed1 : [63:32] r_fp32  |  [31:0] θ_fp32

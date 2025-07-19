@@ -9,7 +9,7 @@ pub mod compression_demo_test; // 🆕 압축 데모 테스트
 // pub mod sllm_integration_test; // 🆕 SLLM 전체 파이프라인 테스트 (임시 비활성화)
 // pub mod llm_korean_test; // 🆕 LLM 한글 응답 테스트 (임시 비활성화)
 pub mod math_test;
-pub mod matrix_test;
+// pub mod matrix_test; // 삭제됨 - matrix 테스트는 core::matrix::__tests__에 있음
 pub mod encoder_test;
 pub mod decoder_test; 
 pub mod generator_test;

@@ -22,5 +22,28 @@ pub use encoder::{HybridEncoder, GridCompressedMatrix};
 pub use decoder::*;
 pub use generator::*;
 pub use matrix::*;
-pub use systems::*;
-pub use optimizers::*;
+
+// systems 모듈 - config 충돌 방지를 위해 명시적 import
+pub use systems::{
+    EncodedLayer, FusedEncodedLayer,
+    HybridPoincareRBESystem, HybridPoincareLayer, 
+    PoincareEncodingLayer, FusionProcessingLayer, HybridLearningLayer,
+    SystemConfiguration, LearningParameters, AdaptiveLearningRateConfig,
+    LossWeights, HardwareConfiguration,
+    PerformanceMonitor, MemoryUsageTracker, ComputationTimeTracker,
+    QualityMetricsTracker, EnergyEfficiencyTracker,
+    LearningState, LossComponents, ConvergenceStatus,
+    StateManager, ParameterManager,
+    ResidualCompressor, CORDICEngine, BasisFunctionLUT,
+    ParallelGEMMEngine, RiemannianGradientComputer, StateTransitionDifferentiator,
+    AdaptiveScheduler, PerformanceAnalyzer, LayerMetrics,
+    ActivationStatistics, WeightStatistics, GradientStatistics,
+    InternalTransformType, LearningRateStrategy
+};
+
+// optimizers 모듈 - config 충돌 방지를 위해 명시적 import  
+pub use optimizers::{
+    AdamState, RiemannianAdamState, HybridOptimizer, OptimizationPhase, 
+    PerformanceMetrics, TransformAnalyzer, OptimizerConfig, 
+    AdamConfig, RiemannianAdamConfig, OptimizerType
+};
