@@ -41,3 +41,7 @@ path = "src/bin/compress_model.rs"
 [[bin]]
 name = "compress_and_test"
 path = "src/bin/compress_and_test.rs"
+
+[[bin]]
+name = "test_compressed_models"
+path = "src/bin/test_compressed_models.rs"
