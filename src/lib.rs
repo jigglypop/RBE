@@ -9,5 +9,5 @@ pub use core::*;
 pub use sllm::*;
 pub use core::encoder::{HybridEncoder, GridCompressedMatrix};
 pub use core::types::{HybridEncodedBlock, TransformType, RbeParameters, ResidualCoefficient, EncodedBlockGradients};
-pub use core::layer::EncodedLayer;
+pub use core::systems::EncodedLayer;
  
