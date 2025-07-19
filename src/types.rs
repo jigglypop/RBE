@@ -570,7 +570,7 @@ impl Packed128 {
 }
 
 /// 잔차 인코딩에 사용할 변환 타입
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransformType {
     Dct,
     Dwt,
@@ -578,14 +578,14 @@ pub enum TransformType {
 }
 
 /// DCT/웨이블릿 잔차 계수
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResidualCoefficient {
     pub index: (u16, u16), // 블록 내 좌표 (최대 65535x65535)
     pub value: f32,
 }
 
 /// RBE 기본 패턴 + 잔차 계수를 포함하는 하이브리드 압축 블록
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HybridEncodedBlock {
     /// RBE 기본 패턴을 생성하는 8개의 연속 파라미터
     pub rbe_params: RbeParameters,

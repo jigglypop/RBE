@@ -1,9 +1,7 @@
 [package]
-name = "poincare_layer"
+name = "RBE-LLM"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 rand = "0.8"
@@ -21,3 +19,17 @@ libm = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 num_cpus = "1.0"
 indicatif = "0.17"
+
+hf-hub = { version = "0.3", features = ["tokio"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+flate2 = "1.0"
+tar = "0.4"
+memmap2 = "0.9"
+safetensors = { version = "0.4", default-features = false }
+half = "2.4" # f16 변환 지원
+anyhow = "1.0.98"
+
+# Test dependencies
+[dev-dependencies]
