@@ -787,9 +787,17 @@ impl HierarchicalBlockMatrix {
     
     /// 품질 통계 계산
     pub fn quality_statistics(&self) -> QualityStats {
-        let total_error = self.error_controller.compute_total_error();
+        let total_error = self.error_controller.compute_total_error(); // RMSE
+        
+        // 디버그: 실제 error 값 확인
+        println!("DEBUG: total_error (RMSE) = {}", total_error);
+        
         let psnr = if total_error > 0.0 {
-            -20.0 * total_error.log10()
+            // 올바른 PSNR 공식: 20 * log10(MAX_VALUE / RMSE)
+            // 정규화된 신호의 최대값을 1.0으로 가정
+            let psnr_value = 20.0 * (1.0 / total_error).log10();
+            println!("DEBUG: calculated PSNR = {}", psnr_value);
+            psnr_value
         } else {
             f32::INFINITY
         };
