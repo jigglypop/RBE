@@ -1,4 +1,4 @@
-use crate::types::Packed128;
+use crate::packed_params::Packed128;
 
 use super::{QualityLevel, ErrorController, L1Block, L2Block, QualityStats};
 

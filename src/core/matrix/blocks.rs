@@ -1,4 +1,4 @@
-use crate::types::Packed128;
+use crate::packed_params::Packed128;
 
 /// L1 블록 (최상위 레벨)
 #[derive(Debug, Clone)]

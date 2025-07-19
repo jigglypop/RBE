@@ -1,6 +1,6 @@
 use RBE_LLM::encoder::HybridEncoder;
 use RBE_LLM::sllm::model_downloader::ModelDownloader;
-use RBE_LLM::types::{HybridEncodedBlock, TransformType};
+use RBE_LLM::packed_params::{HybridEncodedBlock, TransformType};
 use std::fs;
 use std::time::Instant;
 use anyhow::Result;

@@ -8,7 +8,7 @@ use crate::core::systems::hybrid_system::{
 };
 use crate::core::systems::config::{SystemConfiguration, LearningParameters, HardwareConfiguration};
 use crate::core::systems::state_management::LossComponents;
-use crate::core::types::Packed128;
+use crate::core::packed_params::Packed128;
 use std::collections::HashMap;
 
 #[cfg(test)]

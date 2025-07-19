@@ -1,5 +1,5 @@
 use super::super::{L1Block, L2Block, L3Block, L4Block};
-use crate::types::Packed128;
+use crate::packed_params::Packed128;
 use rand::thread_rng;
 
 #[test]

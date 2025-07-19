@@ -157,6 +157,4 @@ impl ModelDownloader {
         
         true
     }
-    
-    // 이 함수를 포함한 모든 관련 호출을 삭제합니다.
 } 

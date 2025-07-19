@@ -1,4 +1,4 @@
-use RBE_LLM::types::HybridEncodedBlock;
+use RBE_LLM::packed_params::HybridEncodedBlock;
 use std::fs;
 use std::io::{self, Write};
 use anyhow::Result;

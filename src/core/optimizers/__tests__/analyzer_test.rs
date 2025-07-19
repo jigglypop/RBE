@@ -1,5 +1,5 @@
 use crate::core::optimizers::TransformAnalyzer;
-use crate::types::TransformType;
+use crate::packed_params::TransformType;
 
 #[test]
 fn 변환분석기_초기화_테스트() {

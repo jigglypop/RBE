@@ -2,7 +2,7 @@
 //!
 //! 푸앵카레 볼 기반 리만 기저 인코딩의 핵심 구성 요소들
 
-pub mod types;
+pub mod packed_params;
 pub mod math;
 pub mod encoder;
 pub mod decoder;
@@ -11,7 +11,7 @@ pub mod matrix;
 pub mod systems;
 pub mod optimizers;
 
-pub use types::{
+pub use packed_params::{
     Packed64, Packed128, DecodedParams, PoincareMatrix, PoincarePackedBit128,
     PoincareQuadrant, HybridEncodedBlock, TransformType, RbeParameters, 
     ResidualCoefficient, EncodedBlockGradients

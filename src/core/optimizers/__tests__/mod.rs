@@ -9,7 +9,7 @@ pub mod config_test;
 
 // 통합 테스트들
 use crate::core::optimizers::*;
-use crate::types::TransformType;
+use crate::packed_params::TransformType;
 
 #[test]
 fn 모든_모듈_통합_테스트() {

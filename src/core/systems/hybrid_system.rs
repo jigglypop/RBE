@@ -177,7 +177,7 @@ impl HybridPoincareRBESystem {
         &self,
         predictions: &[f32],
         targets: &[f32],
-        _poincare_params: &[crate::types::Packed128],
+        _poincare_params: &[crate::packed_params::Packed128],
         _state_usage: &std::collections::HashMap<usize, usize>,
         _residuals: &[f32]
     ) -> (f32, LossComponents) {

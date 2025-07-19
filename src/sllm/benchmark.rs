@@ -1,5 +1,5 @@
 /// SLLM 성능 벤치마크 모듈
-use crate::types::*;
+use crate::packed_params::*;
 use crate::encoder::HybridEncoder;
 use std::time::Instant;
 use std::collections::HashMap;

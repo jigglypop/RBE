@@ -1,4 +1,4 @@
-use crate::types::TransformType;
+use crate::packed_params::TransformType;
 use std::f32::consts::PI;
 
 /// 변환 알고리즘 성능 분석기

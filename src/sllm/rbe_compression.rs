@@ -1,4 +1,4 @@
-use crate::types::*;
+use crate::packed_params::*;
 use crate::encoder::HybridEncoder;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

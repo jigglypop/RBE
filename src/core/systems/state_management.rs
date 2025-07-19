@@ -91,7 +91,7 @@ impl StateManager {
     pub fn new() -> Self {
         Self {
             state_distribution: [0.125; 8], // 균등 분포로 초기화
-            transition_graph: StateTransitionGraph::new(1024, 1.0),
+            transition_graph: StateTransitionGraph::new(1024),
             usage_history: Vec::new(),
         }
     }

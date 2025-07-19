@@ -4,8 +4,6 @@
 //! 하이브리드 RBE 시스템의 핵심 계산 엔진들
 
 use crate::math::{RiemannianGeometry, StateTransitionGraph};
-use std::collections::HashMap;
-
 /// 잔차 압축기
 #[derive(Debug, Clone)]
 pub struct ResidualCompressor {
@@ -267,7 +265,7 @@ impl RiemannianGradientComputer {
 impl StateTransitionDifferentiator {
     pub fn new() -> Self {
         Self {
-            transition_graph: StateTransitionGraph::new(1024, 1.0),
+            transition_graph: StateTransitionGraph::new(1024),
             transition_threshold: 0.1,
             state_change_history: Vec::new(),
         }
