@@ -222,62 +222,78 @@ pub fn analyze_gradient_scales(
  
 /// 해석적 그래디언트 계산을 위한 Packed128 확장 트레이트
 pub trait AnalyticalGradient {
-    /// R 파라미터에 대한 해석적 그래디언트 (리만 기하학 기반)
-    fn analytical_gradient_r(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32;
+    /// R 파라미터에 대한 해석적 그래디언트 (안정적 비트 연산)
+    fn analytical_gradient_r(&self, i: usize, j: usize, _rows: usize, _cols: usize) -> f32;
     
-    /// Theta 파라미터에 대한 해석적 그래디언트 (리만 기하학 기반)
-    fn analytical_gradient_theta(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32;
+    /// Theta 파라미터에 대한 해석적 그래디언트 (안정적 비트 연산)
+    fn analytical_gradient_theta(&self, i: usize, j: usize, _rows: usize, _cols: usize) -> f32;
 }
 
 impl AnalyticalGradient for Packed128 {
-    /// R 파라미터에 대한 해석적 그래디언트 (순수 비트 연산)
-    fn analytical_gradient_r(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
-        // 논문 5.4.3: D_s'F(s) = F(flip_bit(s, s')) - F(s)
-        // 순수 비트 연산만 사용, 초월함수 없음
-        // 1. R에 영향을 주는 상태 비트 선택 (위치 기반)
-        let position_hash = ((i * 31 + j) & 0x1F) as u64;
-        let bit_position = position_hash % 20; // hi 필드의 하위 20비트
-        // 2. 비트 플립으로 상태 전이
-        let original_hi = self.hi;
-        let flipped_hi = original_hi ^ (1u64 << bit_position);
-        // 3. 비트 연산만으로 그래디언트 근사
+    /// R 파라미터에 대한 해석적 그래디언트 (안정적 비트 연산)
+    fn analytical_gradient_r(&self, i: usize, j: usize, _rows: usize, _cols: usize) -> f32 {
+        // 단순하지만 안정적인 접근법
+        
         let r_bits = (self.lo >> 32) as u32;
-        // 비트 패턴 기반 차분 계산 (비트 시프트와 마스킹만 사용)
-        let original_pattern = ((original_hi >> (position_hash % 32)) & 0xFF) as u32;
-        let flipped_pattern = ((flipped_hi >> (position_hash % 32)) & 0xFF) as u32;
-        // R 방향 가중치 (비트 연산)
-        let r_weight = ((r_bits >> 24) & 0xFF) as f32 / 255.0;
-        let position_weight = ((i ^ j) & 0x1F) as f32 / 31.0;
-        // 차분을 비트 연산으로 계산
-        let bit_diff = (flipped_pattern ^ original_pattern).count_ones() as f32;
-        let sign = if flipped_pattern > original_pattern { 1.0 } else { -1.0 };
-        // 최종 그래디언트 (순수 비트 연산 결과)
-        sign * bit_diff * r_weight * position_weight * 0.1
+        
+        // 1. 안전한 perturbation
+        let r_plus_bits = r_bits.saturating_add(1);
+        let r_minus_bits = r_bits.saturating_sub(1);
+        
+        // 2. 안전한 차분 계산 (오버플로우 방지)
+        let bit_diff = r_plus_bits.wrapping_sub(r_minus_bits) as i64;
+        
+        // 3. 상태 기반 가중치 (간단하게)
+        let position_hash = ((i * 31 + j * 17) & 0x3F) as u64;
+        let state_bits = (self.hi >> (position_hash % 64)) & 0xFF;
+        
+        // 4. 정규화된 가중치 [-1, 1]
+        let state_weight = (state_bits as f32 - 128.0) / 128.0;
+        
+        // 5. 위치 가중치
+        let pos_weight = ((i ^ j) as f32 / 31.0) - 0.5;  // [-0.5, 0.5]
+        
+        // 6. 결합된 가중치
+        let combined_weight = state_weight * (1.0 + pos_weight);
+        
+        // 7. 안전한 스케일링 (고정값 사용)
+        let gradient = (bit_diff as f32) * combined_weight * 1e-7;
+        
+        // 8. 안전한 범위 제한
+        gradient.clamp(-1.0, 1.0)
     }
 
-    /// Theta 파라미터에 대한 해석적 그래디언트 (순수 비트 연산)
-    fn analytical_gradient_theta(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
-        // 논문 5.4.3: D_s'F(s) = F(flip_bit(s, s')) - F(s)
-        // 순수 비트 연산만 사용, 초월함수 없음
-        // 1. Theta에 영향을 주는 상태 비트 선택 (다른 해시)
-        let position_hash = ((i * 17 + j * 23) & 0x1F) as u64;
-        let bit_position = (position_hash % 20) + 20; // hi 필드의 상위 20비트
-        // 2. 비트 플립으로 상태 전이
-        let original_hi = self.hi;
-        let flipped_hi = original_hi ^ (1u64 << (bit_position % 64));
-        // 3. 비트 연산만으로 그래디언트 근사
+    /// Theta 파라미터에 대한 해석적 그래디언트 (안정적 비트 연산)
+    fn analytical_gradient_theta(&self, i: usize, j: usize, _rows: usize, _cols: usize) -> f32 {
+        // 동일한 안정적 접근법
+        
         let theta_bits = self.lo as u32;
-        // 비트 패턴 기반 차분 계산 (비트 시프트와 마스킹만 사용)
-        let original_pattern = ((original_hi >> (position_hash % 32)) & 0xFF) as u32;
-        let flipped_pattern = ((flipped_hi >> (position_hash % 32)) & 0xFF) as u32;
-        // Theta 방향 가중치 (비트 연산)
-        let theta_weight = ((theta_bits >> 16) & 0xFF) as f32 / 255.0;
-        let position_weight = ((i + j) & 0x1F) as f32 / 31.0;
-        // 차분을 비트 연산으로 계산
-        let bit_diff = (flipped_pattern ^ original_pattern).count_ones() as f32;
-        let sign = if flipped_pattern > original_pattern { 1.0 } else { -1.0 };
-        // 최종 그래디언트 (순수 비트 연산 결과)
-        sign * bit_diff * theta_weight * position_weight * 0.05
+        
+        // 1. 안전한 perturbation
+        let theta_plus_bits = theta_bits.saturating_add(1);
+        let theta_minus_bits = theta_bits.saturating_sub(1);
+        
+        // 2. 안전한 차분
+        let bit_diff = theta_plus_bits.wrapping_sub(theta_minus_bits) as i64;
+        
+        // 3. 다른 해시 패턴
+        let position_hash = ((i * 23 + j * 41) & 0x3F) as u64;
+        let state_bits = (self.hi >> ((position_hash + 32) % 64)) & 0xFF;
+        
+        // 4. 정규화된 가중치
+        let state_weight = (state_bits as f32 - 128.0) / 128.0;
+        
+        // 5. 각도 특성 가중치
+        let angle_weight = ((i + j) as f32 / 31.0) - 0.5;
+        
+        // 6. 결합
+        let combined_weight = state_weight * (1.0 + angle_weight * 0.5);
+        
+        // 7. 더 작은 스케일링 (theta는 더 민감)
+        let gradient = (bit_diff as f32) * combined_weight * 1e-8;
+        
+        // 8. 안전한 범위
+        gradient.clamp(-1.0, 1.0)
     }
 }
  
