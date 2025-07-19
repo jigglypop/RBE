@@ -10,7 +10,6 @@ pub mod compression_demo_test; // 🆕 압축 데모 테스트
 // pub mod llm_korean_test; // 🆕 LLM 한글 응답 테스트 (임시 비활성화)
 pub mod math_test;
 pub mod matrix_test;
-pub mod hybrid_learning_test;
 pub mod encoder_test;
 pub mod decoder_test; 
 pub mod generator_test;

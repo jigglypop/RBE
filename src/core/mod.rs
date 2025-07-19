@@ -8,7 +8,8 @@ pub mod encoder;
 pub mod decoder;
 pub mod generator;
 pub mod matrix;
-pub mod layer;
+pub mod systems;
+pub mod optimizers;
 
 // 🎯 주요 타입들 명시적 재수출 (types 모듈에서 우선)
 pub use types::{
@@ -30,5 +31,8 @@ pub use generator::*;
 // 🧱 행렬 연산 재수출
 pub use matrix::*;
 
-// 🔗 레이어 관련 재수출 (TransformType 제외하여 충돌 방지)
-pub use layer::{EncodedLayer};
+// 🔗 시스템 관련 재수출 (분리된 systems 모듈에서)
+pub use systems::*;
+
+// ⚙️ 최적화 관련 재수출
+pub use optimizers::*;
