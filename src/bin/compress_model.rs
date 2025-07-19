@@ -1,7 +1,7 @@
 use std::path::Path;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
-use RBE_LLM::types::{HybridEncodedBlock, TransformType};
+use RBE_LLM::packed_params::{HybridEncodedBlock, TransformType};
 use RBE_LLM::encoder::HybridEncoder;
 use std::collections::HashMap;
 use std::fs::{self, File};

@@ -1,4 +1,4 @@
-use crate::types::{Packed128, TransformType};
+use crate::packed_params::{Packed128, TransformType};
 use super::{OptimizerType, AdamState, RiemannianAdamState, TransformAnalyzer};
 use std::collections::HashMap;
 use std::f32::consts::PI;

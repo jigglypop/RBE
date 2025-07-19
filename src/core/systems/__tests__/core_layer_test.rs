@@ -3,7 +3,7 @@
 //! EncodedLayer와 FusedEncodedLayer의 기능 검증
 
 use crate::core::systems::core_layer::{EncodedLayer, FusedEncodedLayer};
-use crate::core::types::{HybridEncodedBlock, RbeParameters, Packed128, ResidualCoefficient, TransformType};
+use crate::core::packed_params::{HybridEncodedBlock, RbeParameters, Packed128, ResidualCoefficient, TransformType};
 use nalgebra::DVector;
 
 #[cfg(test)]

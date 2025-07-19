@@ -1,5 +1,5 @@
 use crate::core::optimizers::{HybridOptimizer, OptimizationPhase, OptimizerType};
-use crate::types::Packed128;
+use crate::packed_params::Packed128;
 use std::f32::consts::PI;
 
 #[test]

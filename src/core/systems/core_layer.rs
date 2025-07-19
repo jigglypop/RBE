@@ -2,7 +2,7 @@
 //!
 //! EncodedLayer와 FusedEncodedLayer의 구현
 
-use crate::types::{
+use crate::packed_params::{
     HybridEncodedBlock, RbeParameters, EncodedBlockGradients,
     Packed128
 };
