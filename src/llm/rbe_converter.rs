@@ -177,7 +177,9 @@ impl RBEConverter {
         // 1. 적응적 블록 크기 결정
         let block_config = self.determine_optimal_block_config(layer_info)?;
         
-        // 🎯 통합 진행률 바 생성
+        // 🎯 이중 진행률 바 생성 (MultiProgress)
+        let multi_progress = MultiProgress::new();
+        
         // W1: 768×3072, W2: 3072×768에 대한 총 블록 수 계산
         let w1_blocks = ((768 + block_config.block_size - 1) / block_config.block_size) * 
                         ((3072 + block_config.block_size - 1) / block_config.block_size);
@@ -185,35 +187,48 @@ impl RBEConverter {
                         ((768 + block_config.block_size - 1) / block_config.block_size);
         let total_blocks = w1_blocks + w2_blocks;
         
-        let progress = ProgressBar::new(total_blocks as u64);
-        progress.set_style(
+        // 🔥 상위 바: 전체 블록 진행률
+        let main_progress = multi_progress.add(ProgressBar::new(total_blocks as u64));
+        main_progress.set_style(
             ProgressStyle::default_bar()
-                .template("🔥 [{elapsed_precise}] [{bar:50.cyan/blue}] {pos:>4}/{len:4} ({percent:>3}%) {msg}")
+                .template("🔥 전체: [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>4}/{len:4} ({percent:>3}%) | {msg}")
                 .unwrap()
                 .progress_chars("█▉▊▋▌▍▎▏ ")
         );
-        progress.set_message("FFN 레이어 변환 준비 중...");
+        main_progress.set_message(format!("FFN Layer {} | 블록 대기 중...", layer_info.layer_id));
+        
+        // ⚡ 하위 바: 현재 블록 에포크 진행률 (동적 생성)
+        let epoch_progress = multi_progress.add(ProgressBar::new(5000));
+        epoch_progress.set_style(
+            ProgressStyle::default_bar()
+                .template("⚡ 현재블록: [{bar:30.green/yellow}] {pos:>4}/{len:4} | RMSE: {msg}")
+                .unwrap()
+                .progress_chars("█▉▊▋▌▍▎▏ ")
+        );
+        epoch_progress.set_message("학습 대기 중...");
         
         // 2. W1 행렬 변환 (768 → 3072)
-        progress.set_message(format!("W1 행렬 변환 중... (768×3072, {}블록)", w1_blocks));
+        main_progress.set_message(format!("W1 행렬 변환 중... (768×3072, {}블록)", w1_blocks));
         let w1_rbe = self.convert_weight_matrix_with_progress(
             w1_weights, 
             768, 
             3072, 
             &block_config,
             "W1",
-            &progress
+            &main_progress,
+            &epoch_progress
         )?;
         
         // 3. W2 행렬 변환 (3072 → 768)  
-        progress.set_message(format!("W2 행렬 변환 중... (3072×768, {}블록)", w2_blocks));
+        main_progress.set_message(format!("W2 행렬 변환 중... (3072×768, {}블록)", w2_blocks));
         let w2_rbe = self.convert_weight_matrix_with_progress(
             w2_weights, 
             3072, 
             768, 
             &block_config,
             "W2",
-            &progress
+            &main_progress,
+            &epoch_progress
         )?;
         
         // 4. 품질 검증
@@ -234,7 +249,7 @@ impl RBEConverter {
         let compressed_size = w1_rbe.compressed_size() + w2_rbe.compressed_size();
         let compression_ratio = original_size as f32 / compressed_size as f32;
         
-        progress.finish_with_message(format!(
+        main_progress.finish_with_message(format!(
             "✅ FFN Layer {} 완료! | 품질: {:.1}/100 | 압축: {:.1}:1", 
             layer_info.layer_id, combined_quality.quality_score, compression_ratio
         ));
@@ -525,7 +540,7 @@ impl RBEConverter {
             .collect();
         
         // RBE 인코딩 수행
-        block_matrix.encode_from_dense(&weight_matrix)
+        block_matrix.encode_from_dense(&weight_matrix, None, None)
             .map_err(|e| format!("RBE 인코딩 실패 ({}): {}", matrix_name, e))?;
         
         println!("  ✓ {} 변환 완료", matrix_name);
@@ -541,7 +556,8 @@ impl RBEConverter {
         cols: usize,
         block_config: &BlockConfig,
         matrix_name: &str,
-        progress: &ProgressBar
+        main_progress: &ProgressBar,
+        epoch_progress: &ProgressBar
     ) -> Result<HierarchicalBlockMatrix, String> {
         
         // 예상 블록 수 계산
@@ -562,26 +578,28 @@ impl RBEConverter {
             })
             .collect();
         
-        // RBE 인코딩 수행 (시뮬레이션된 진행률)
-        progress.set_message(format!("{}: 블록 인코딩 시작...", matrix_name));
+        // RBE 인코딩 수행 (이중 진행률 바로 모니터링)
+        main_progress.set_message(format!("{}: 블록 인코딩 시작...", matrix_name));
+        epoch_progress.reset();
+        epoch_progress.set_message("블록 학습 준비 중...");
         
         // 인코딩 시작
         let start_time = std::time::Instant::now();
-        block_matrix.encode_from_dense(&weight_matrix)
+        block_matrix.encode_from_dense(&weight_matrix, Some(epoch_progress), Some(main_progress))
             .map_err(|e| format!("RBE 인코딩 실패 ({}): {}", matrix_name, e))?;
         let elapsed = start_time.elapsed();
         
-        // 예상 블록 수만큼 진행률 증가
-        progress.inc(expected_blocks as u64);
+        // 🚫 진행률은 이제 각 L4 블록마다 개별적으로 증가됨 (matrix.rs에서)
         
         // 품질 통계 가져오기
         let stats = block_matrix.quality_statistics();
         let rmse = stats.total_error.sqrt(); // RMSE 계산
         
-        progress.set_message(format!(
+        main_progress.set_message(format!(
             "{}: ✅ 완료 | RMSE: {:.6} | 압축: {:.1}:1 | 시간: {:?}", 
             matrix_name, rmse, stats.compression_ratio, elapsed
         ));
+        epoch_progress.finish_with_message(format!("✅ {} 블록 학습 완료", matrix_name));
         
         Ok(block_matrix)
     }

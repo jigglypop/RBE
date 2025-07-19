@@ -404,8 +404,8 @@ impl HierarchicalBlockMatrix {
         total_size
     }
     
-    /// Dense 행렬에서 RBE 인코딩
-    pub fn encode_from_dense(&mut self, matrix: &[Vec<f32>]) -> Result<(), String> {
+    /// Dense 행렬에서 RBE 인코딩 (진행률 바 지원)
+    pub fn encode_from_dense(&mut self, matrix: &[Vec<f32>], epoch_progress: Option<&indicatif::ProgressBar>, main_progress: Option<&indicatif::ProgressBar>) -> Result<(), String> {
         if matrix.len() != self.total_rows {
             return Err(format!("행 수 불일치: {} vs {}", matrix.len(), self.total_rows));
         }
@@ -424,7 +424,7 @@ impl HierarchicalBlockMatrix {
                 let l1_start_col = l1_j * l1_block_size;
                 
                 // L1 블록 영역의 데이터 추출 및 인코딩
-                Self::encode_l1_block(l1_block, matrix, l1_start_row, l1_start_col)?;
+                Self::encode_l1_block(l1_block, matrix, l1_start_row, l1_start_col, epoch_progress, main_progress)?;
             }
         }
         
@@ -456,7 +456,9 @@ impl HierarchicalBlockMatrix {
         l1_block: &mut L1Block,
         matrix: &[Vec<f32>],
         start_row: usize,
-        start_col: usize
+        start_col: usize,
+        epoch_progress: Option<&indicatif::ProgressBar>,
+        main_progress: Option<&indicatif::ProgressBar>
     ) -> Result<(), String> {
         // L2 블록 크기를 더 작게 조정 (원래 1024 → 128)
         let l2_block_size = 128;
@@ -467,7 +469,7 @@ impl HierarchicalBlockMatrix {
                 let l2_start_col = start_col + l2_j * l2_block_size;
                 
                 // L2 블록 인코딩
-                Self::encode_l2_block(l2_block, matrix, l2_start_row, l2_start_col)?;
+                Self::encode_l2_block(l2_block, matrix, l2_start_row, l2_start_col, epoch_progress, main_progress)?;
             }
         }
         Ok(())
@@ -478,7 +480,9 @@ impl HierarchicalBlockMatrix {
         l2_block: &mut L2Block,
         matrix: &[Vec<f32>],
         start_row: usize,
-        start_col: usize
+        start_col: usize,
+        epoch_progress: Option<&indicatif::ProgressBar>,
+        main_progress: Option<&indicatif::ProgressBar>
     ) -> Result<(), String> {
         // L3 블록 크기를 더 작게 조정 (원래 256 → 64)
         let l3_block_size = 64;
@@ -489,18 +493,20 @@ impl HierarchicalBlockMatrix {
                 let l3_start_col = start_col + l3_j * l3_block_size;
                 
                 // L3 블록 인코딩
-                Self::encode_l3_block(l3_block, matrix, l3_start_row, l3_start_col)?;
+                Self::encode_l3_block(l3_block, matrix, l3_start_row, l3_start_col, epoch_progress, main_progress)?;
             }
         }
         Ok(())
     }
     
-    /// L3 블록 인코딩
+    /// L3 블록 인코딩 (실시간 진행률 바 지원)
     fn encode_l3_block(
         l3_block: &mut L3Block,
         matrix: &[Vec<f32>],
         start_row: usize,
-        start_col: usize
+        start_col: usize,
+        epoch_progress: Option<&indicatif::ProgressBar>,
+        main_progress: Option<&indicatif::ProgressBar>
     ) -> Result<(), String> {
         // 실제 블록 크기는 32x32 (테스트에서 확인된 크기)
         let actual_block_size = 32;
@@ -533,11 +539,18 @@ impl HierarchicalBlockMatrix {
                 let initial_theta = 0.0f32;
                 best_seed.lo = ((initial_r.to_bits() as u64) << 32) | initial_theta.to_bits() as u64;
                 
-                // 🚀 5000 에포크 RBE 학습으로 RMSE 최소화 (고품질 변환)
-                let mut learning_rate = 0.05; // 안정적인 학습률
-                let epochs = 5000; // 사용자 요청: 5000 에포크로 품질 최대화
+                // 🚀 5000 에포크 RBE 학습으로 RMSE 최소화 (안정적 고품질 변환)
+                let mut learning_rate = 0.005; // RMSE 안정성 우선 학습률 (사용자 요청)
+                let epochs = 5000; // 사용자 요청: 5000 에포크로 균형잡힌 품질
                 let mut best_rmse = f32::INFINITY;
                 let mut no_improvement_count = 0;
+                
+                // 🎯 진행률 바 초기화 (있는 경우)
+                if let Some(progress) = epoch_progress {
+                    progress.reset();
+                    progress.set_length(epochs as u64);
+                    progress.set_message("RBE 학습 시작...");
+                }
                 
                 for epoch in 1..=epochs {
                     // 현재 예측 생성
@@ -572,12 +585,49 @@ impl HierarchicalBlockMatrix {
                         }
                     }
                     
+                    // 🔥 실시간 진행률 바 업데이트 (매 에포크마다)
+                    if let Some(progress) = epoch_progress {
+                        progress.set_position(epoch as u64);
+                        
+                        // 품질 등급 계산 (RMSE 기반)
+                        let quality_grade = if rmse < 0.01 { "🟢 우수" } 
+                                           else if rmse < 0.05 { "🟡 양호" } 
+                                           else if rmse < 0.1 { "🟠 보통" } 
+                                           else { "🔴 개선중" };
+                        
+                        progress.set_message(format!(
+                            "{:.4} | LR: {:.4} | Best: {:.4} | 개선: {}회", 
+                            rmse, learning_rate, best_rmse, epochs as i32 - no_improvement_count
+                        ));
+                        
+                        // 10 에포크마다 상세 정보 업데이트
+                        if epoch % 10 == 0 {
+                            progress.set_message(format!(
+                                "{} | RMSE: {:.6} | LR: {:.4} | 최고: {:.6}", 
+                                quality_grade, rmse, learning_rate, best_rmse
+                            ));
+                        }
+                    }
+                    
                     // 🎯 조기 종료 조건들 (품질 우선 + 효율적 수렴)
                     if rmse < 0.005 {  // 매우 좋은 품질 달성
+                        if let Some(progress) = epoch_progress {
+                            progress.finish_with_message("🎉 목표 품질 달성! 조기 종료".to_string());
+                        }
                         break;
                     }
                     if no_improvement_count > 50 {  // 50 에포크 동안 개선 없음 (더 인내심)
+                        if let Some(progress) = epoch_progress {
+                            progress.finish_with_message(format!("⏹️ 수렴 완료 | 최종 RMSE: {:.6}", best_rmse));
+                        }
                         break;
+                    }
+                }
+                
+                // 🏁 정상 완료 시 진행률 바 마무리
+                if let Some(progress) = epoch_progress {
+                    if !progress.is_finished() {
+                        progress.finish_with_message(format!("✅ 학습 완료 | 최종 RMSE: {:.6}", best_rmse));
                     }
                 }
                 
@@ -585,6 +635,11 @@ impl HierarchicalBlockMatrix {
                 // if !progress.is_finished() {
                 //     progress.finish_with_message(format!("✅ 학습 완료: Best RMSE: {:.6}", best_rmse));
                 // }
+                
+                // 🔥 상위 진행률 바 업데이트 (각 L4 블록 완료시마다)
+                if let Some(main_prog) = main_progress {
+                    main_prog.inc(1); // L4 블록 하나씩 완료 증가
+                }
                 
                 *l4_block = best_seed;
             }
