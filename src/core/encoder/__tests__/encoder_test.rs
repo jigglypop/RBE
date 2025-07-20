@@ -1,4 +1,4 @@
-use super::super::encoder::{AutoOptimizedEncoder, QualityGrade};
+use super::super::encoder::{AutoOptimizedEncoder, QualityGrade, CompressionConfig};
 use super::super::hybrid_encoder::HybridEncoder;
 use crate::packed_params::{TransformType, HybridEncodedBlock};
 
@@ -315,4 +315,64 @@ fn generate_asymmetric_pattern(height: usize, width: usize) -> Vec<f32> {
     }
     
     data
+}
+
+#[test]
+fn 설정_기반_압축_테스트() {
+    println!("🧪 설정 기반 압축 파라미터 테스트");
+    
+    let test_data = generate_asymmetric_pattern(512, 1024);
+    
+    // 1. UltraHigh 품질 프리셋
+    println!("\n📊 UltraHigh 품질 프리셋");
+    let ultra_config = CompressionConfig::ultra_high();
+    let result = AutoOptimizedEncoder::compress_with_config(&test_data, 512, 1024, &ultra_config);
+    assert!(result.is_ok(), "UltraHigh 압축 실패: {:?}", result.err());
+    let (_, time, ratio, rmse) = result.unwrap();
+    println!("✅ UltraHigh: 압축률 {:.1}x, RMSE {:.6}, 시간 {:.3}초", ratio, rmse, time);
+    
+    // 2. Fast 압축 프리셋
+    println!("\n📊 Fast 압축 프리셋");
+    let fast_config = CompressionConfig::fast();
+    let result = AutoOptimizedEncoder::compress_with_config(&test_data, 512, 1024, &fast_config);
+    assert!(result.is_ok(), "Fast 압축 실패: {:?}", result.err());
+    let (_, time, ratio, rmse) = result.unwrap();
+    println!("✅ Fast: 압축률 {:.1}x, RMSE {:.6}, 시간 {:.3}초", ratio, rmse, time);
+    
+    // 3. 사용자 정의 설정 (RMSE 임계값)
+    println!("\n📊 사용자 정의 설정 (RMSE 0.001 임계값)");
+    let custom_config = CompressionConfig::custom(64, 0.001, 20.0, Some(100));
+    let result = AutoOptimizedEncoder::compress_with_config(&test_data, 512, 1024, &custom_config);
+    assert!(result.is_ok(), "사용자 정의 압축 실패: {:?}", result.err());
+    let (blocks, time, ratio, rmse) = result.unwrap();
+    println!("✅ 사용자 정의: {}개 블록, 압축률 {:.1}x, RMSE {:.6}, 시간 {:.3}초", 
+             blocks.len(), ratio, rmse, time);
+    
+    // 4. 임계값 실패 테스트
+    println!("\n📊 임계값 실패 테스트");
+    let strict_config = CompressionConfig::custom(64, 0.000001, 1000.0, None); // 매우 엄격한 조건
+    let result = AutoOptimizedEncoder::compress_with_config(&test_data, 512, 1024, &strict_config);
+    assert!(result.is_err(), "엄격한 조건에서 성공하면 안됨");
+    println!("✅ 예상대로 실패: {}", result.err().unwrap());
+}
+
+#[test]
+fn 최소_블록_개수_테스트() {
+    println!("🧪 최소 블록 개수 하드코딩 테스트");
+    
+    let test_data = generate_asymmetric_pattern(256, 512);
+    
+    // 1. 달성 가능한 최소 블록 개수
+    let config = CompressionConfig::custom(64, 0.1, 10.0, Some(20)); // 256x512 / 64x64 = 32개 > 20개
+    let result = AutoOptimizedEncoder::compress_with_config(&test_data, 256, 512, &config);
+    assert!(result.is_ok(), "달성 가능한 블록 개수에서 실패");
+    let (blocks, _, _, _) = result.unwrap();
+    assert!(blocks.len() >= 20, "최소 블록 개수 미달: {}개", blocks.len());
+    println!("✅ 최소 20개 블록 달성: 실제 {}개", blocks.len());
+    
+    // 2. 달성 불가능한 최소 블록 개수
+    let config = CompressionConfig::custom(64, 0.1, 10.0, Some(100)); // 32개 < 100개
+    let result = AutoOptimizedEncoder::compress_with_config(&test_data, 256, 512, &config);
+    assert!(result.is_err(), "달성 불가능한 블록 개수에서 성공하면 안됨");
+    println!("✅ 예상대로 실패: {}", result.err().unwrap());
 }
