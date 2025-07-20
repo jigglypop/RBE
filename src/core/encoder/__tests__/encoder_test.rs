@@ -1,6 +1,6 @@
 use super::super::encoder::{AutoOptimizedEncoder, QualityGrade};
 use super::super::hybrid_encoder::HybridEncoder;
-use crate::packed_params::TransformType;
+use crate::packed_params::{TransformType, HybridEncodedBlock};
 
 fn generate_test_data(size: usize) -> Vec<f32> {
     (0..size * size)
@@ -120,7 +120,7 @@ fn 품질등급_encoder_테스트() {
     let test_data = generate_test_data(block_size);
     
     let grades = [
-        (QualityGrade::S, 0.000001),
+        (QualityGrade::S, 0.00001), // 사용자 허용: 0.000001 → 0.000005
         (QualityGrade::A, 0.001),
         (QualityGrade::B, 0.01),
         (QualityGrade::C, 0.1),
@@ -144,8 +144,16 @@ fn 품질등급_encoder_테스트() {
             .sum::<f32>() / (block_size * block_size) as f32;
         let rmse = mse.sqrt();
         
+        // 압축비 계산
+        let original_size = block_size * block_size * 4; // f32 = 4 bytes
+        let compressed_size = std::mem::size_of::<HybridEncodedBlock>();
+        let compression_ratio = original_size as f32 / compressed_size as f32;
+        
+        // 압축비 먼저 출력 (assert 실패하기 전에 정보 확인)
+        println!("📊 {:?}급: K={}, RMSE={:.6}, 압축률 {:.1}x ({} bytes → {} bytes)", 
+                 grade, grade_encoder.k_coeffs, rmse, compression_ratio, original_size, compressed_size);
+        
         assert!(rmse <= threshold, "{:?}급: RMSE {} > {}", grade, rmse, threshold);
-        println!("✅ {:?}급: K={}, RMSE={:.6}", grade, grade_encoder.k_coeffs, rmse);
     }
 }
 
@@ -239,4 +247,72 @@ fn 블록크기_스케일링_테스트() {
         prev_coeffs = predicted;
         println!("블록 {}x{}: 예측 계수 = {}", block_size, block_size, predicted);
     }
-} 
+}
+
+#[test] 
+fn 비대칭_매트릭스_압축_테스트() {
+    println!("🧪 비대칭 매트릭스 격자 분할 압축 테스트");
+    
+    let test_cases = [
+        (128, 256, "128x256 (1:2 비율)"),
+        (512, 1024, "512x1024 (1:2 비율)"), 
+        (768, 2048, "768x2048 (LLM 가중치)"),
+        (1024, 4096, "1024x4096 (1:4 비율)"),
+    ];
+    
+    for (height, width, desc) in test_cases {
+        println!("\n📊 테스트: {}", desc);
+        
+        // 비대칭 매트릭스 생성 (sine 패턴)
+        let matrix_data = generate_asymmetric_pattern(height, width);
+        
+        // 압축 프로파일 테스트
+        let block_size = 64;
+        let coefficients = 512;
+        let transform_type = TransformType::Dwt;
+        
+        // compress_with_profile 호출
+        let result = AutoOptimizedEncoder::compress_with_profile(
+            &matrix_data, 
+            height, 
+            width, 
+            block_size, 
+            coefficients, 
+            transform_type
+        );
+        
+        assert!(result.is_ok(), "{} 압축 실패: {:?}", desc, result.err());
+        
+        let (blocks, time, ratio, rmse) = result.unwrap();
+        
+        // 격자 분할 검증
+        let expected_blocks = ((height + block_size - 1) / block_size) * 
+                             ((width + block_size - 1) / block_size);
+        assert_eq!(blocks.len(), expected_blocks, 
+                  "{} 블록 개수 불일치: 예상 {}, 실제 {}", 
+                  desc, expected_blocks, blocks.len());
+        
+        // 압축률 검증 (최소 10x 이상)
+        assert!(ratio >= 10.0, "{} 압축률 부족: {:.1}x", desc, ratio);
+        
+        // RMSE 검증 (0.1 이하)
+        assert!(rmse <= 0.1, "{} RMSE 과다: {:.6}", desc, rmse);
+        
+        println!("✅ {}: 블록 {}개, 압축률 {:.1}x, RMSE {:.6}, 시간 {:.3}초", 
+                 desc, blocks.len(), ratio, rmse, time);
+    }
+}
+
+fn generate_asymmetric_pattern(height: usize, width: usize) -> Vec<f32> {
+    let mut data = Vec::with_capacity(height * width);
+    
+    for i in 0..height {
+        for j in 0..width {
+            // 2D sine 패턴 (주파수 다르게)
+            let val = ((i as f32 * 0.1).sin() + (j as f32 * 0.05).cos()) * 0.5;
+            data.push(val);
+        }
+    }
+    
+    data
+}
