@@ -3,6 +3,7 @@ pub mod grid_decoder;
 pub mod cordic;
 pub mod weight_generator;
 pub mod fused_forward;
+pub mod optimized_decoder;
 
 // 테스트 모듈
 #[cfg(test)]

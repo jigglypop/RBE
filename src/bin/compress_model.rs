@@ -82,14 +82,9 @@ async fn main() -> Result<()> {
     
     println!("✅ 발견된 레이어: {} 개", metadata.len());
     
-    // 압축 설정들
+    // 압축 설정 - 빠른 1개만!
     let configs = vec![
-        ("insane", 8, 128, TransformType::Dwt),     // 미친 압축! 128²/8 = 2048x!
-        ("ultra", 16, 128, TransformType::Dwt),     // 초압축 128²/16 = 1024x!
-        ("extreme", 32, 128, TransformType::Dwt),   // 극도 압축 128²/32 = 512x!
-        ("high", 64, 128, TransformType::Dwt),      // 고압축 128²/64 = 256x!
-        ("balanced", 128, 128, TransformType::Dwt), // 균형 128²/128 = 128x!
-        ("lossless", 2000, 64, TransformType::Adaptive), // 거의 무손실
+        ("fast", 4, 64, TransformType::Dwt),     // 빠른 압축! 64²/4 = 1024x!
     ];
     
     // 출력 디렉토리 생성
@@ -256,11 +251,24 @@ async fn main() -> Result<()> {
 }
 
 fn save_compressed_model(weights: &HashMap<String, Vec<HybridEncodedBlock>>, path: &str) -> Result<()> {
-    let summary = format!(
-        "Compressed model with {} layers, total {} blocks", 
-        weights.len(),
-        weights.values().map(|v| v.len()).sum::<usize>()
-    );
-    fs::write(path, summary)?;
+    // 실제 압축 데이터를 JSON으로 저장
+    let compressed_model = serde_json::json!({
+        "metadata": {
+            "model_name": "kogpt2-insane",
+            "total_layers": weights.len(),
+            "total_blocks": weights.values().map(|v| v.len()).sum::<usize>(),
+            "compression_type": "RBE_DWT",
+            "block_size": 128,
+            "coefficients": 8,
+            "timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs()
+        },
+        "layers": weights
+    });
+    
+    let json_string = serde_json::to_string(&compressed_model)?;
+    fs::write(path, json_string)?;
+    println!("📦 실제 압축 데이터 저장 완료: {} 레이어", weights.len());
     Ok(())
 } 
