@@ -1,9 +1,7 @@
 use rbe_llm::{HybridEncoder, HybridEncodedBlock, TransformType};
-use std::fs;
 use std::time::Instant;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use serde_json;
 
 #[derive(Debug, Clone)]
 struct CompressionProfile {
