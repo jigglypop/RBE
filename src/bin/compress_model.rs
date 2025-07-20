@@ -148,9 +148,11 @@ async fn main() -> Result<()> {
                                 
                                 let mut encoded_blocks = Vec::new();
                                 let mut total_block_rmse = 0.0;
+                                let mut processed_blocks = 0;
                                 
                                 for block_row in 0..blocks_per_row {
                                     for block_col in 0..blocks_per_col {
+                                        processed_blocks += 1;
                                         let start_i = block_row * block_size;
                                         let start_j = block_col * block_size;
                                         let end_i = (start_i + block_size).min(height);
@@ -183,8 +185,17 @@ async fn main() -> Result<()> {
                                                 println!("  ❌ 블록 압축 실패: {}", e);
                                             }
                                         }
+                                        
+                                        // 진행률 표시 (1개마다)
+                                        let progress = (processed_blocks as f32 / total_blocks as f32) * 100.0;
+                                        print!("\r  🔄 블록 진행률: {}/{} ({:.1}%)", 
+                                               processed_blocks, total_blocks, progress);
+                                        use std::io::{self, Write};
+                                        io::stdout().flush().unwrap();
                                     }
                                 }
+                                
+                                println!(); // 진행률 표시 줄바꿈
                                 
                                 let avg_rmse = total_block_rmse / total_blocks as f32;
                                 
@@ -193,8 +204,11 @@ async fn main() -> Result<()> {
                                 let compressed_size = encoded_blocks.len() * std::mem::size_of::<HybridEncodedBlock>();
                                 let compression_ratio = original_size as f32 / compressed_size as f32;
                                 
-                                println!("  ✅ 격자 압축 완료: RMSE {:.6}, 압축률 {:.1}x ({} 블록)", 
-                                        avg_rmse, compression_ratio, total_blocks);
+                                println!("  ✅ [{}] 레이어 완료:", layer_name);
+                                println!("     📊 압축률: {:.1}x ({} KB → {} KB)", 
+                                        compression_ratio, original_size / 1024, compressed_size / 1024);
+                                println!("     📈 RMSE: {:.6} (평균 {}개 블록)", avg_rmse, total_blocks);
+                                println!("     ⚡ 총 압축된 블록: {} 개", encoded_blocks.len());
                                 
                                 total_rmse += avg_rmse;
                                 count += 1;

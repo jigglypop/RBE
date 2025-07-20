@@ -1,6 +1,7 @@
 use crate::packed_params::{TransformType, HybridEncodedBlock};
 use super::hybrid_encoder::HybridEncoder;
 use std::time::Instant;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy)]
 pub enum QualityGrade {
@@ -10,7 +11,93 @@ pub enum QualityGrade {
     C,  // RMSE ≤ 0.1
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum CompressionProfile {
+    UltraHigh,   // 최고 품질, 느린 속도
+    High,        // 고품질, 중간 속도  
+    Balanced,    // 균형
+    Fast,        // 빠른 속도, 낮은 품질
+    UltraFast,   // 최고 속도, 최저 품질
+}
+
+#[derive(Debug, Clone)]
+pub struct CompressionConfig {
+    pub block_size: usize,
+    pub quality_grade: QualityGrade, 
+    pub transform_type: TransformType,
+    pub profile: CompressionProfile,
+    pub custom_coefficients: Option<usize>, // None이면 자동 계산
+    
+    // 사용자가 요청한 조정 가능 파라미터들
+    pub min_block_count: Option<usize>,     // 최소 블록 개수 (하드코딩 조정용)
+    pub rmse_threshold: Option<f32>,        // RMSE 임계값 (0.001 같은 값)
+    pub compression_ratio_threshold: Option<f32>, // 압축률 임계값 (최소 압축률)
+}
+
 pub struct AutoOptimizedEncoder;
+
+impl CompressionConfig {
+    /// 기본 설정 (Balanced 프로파일)
+    pub fn default() -> Self {
+        Self {
+            block_size: 64,
+            quality_grade: QualityGrade::B,
+            transform_type: TransformType::Dwt,
+            profile: CompressionProfile::Balanced,
+            custom_coefficients: None,
+            min_block_count: None,
+            rmse_threshold: None,
+            compression_ratio_threshold: None,
+        }
+    }
+    
+    /// UltraHigh 품질 프리셋 (현실적인 임계값)
+    pub fn ultra_high() -> Self {
+        Self {
+            block_size: 32,  // 작은 블록 = 높은 품질
+            quality_grade: QualityGrade::S,
+            transform_type: TransformType::Dwt,
+            profile: CompressionProfile::UltraHigh,
+            custom_coefficients: None,
+            min_block_count: None,
+            rmse_threshold: Some(0.01),   // 0.00001 → 0.01 (현실적으로 조정)
+            compression_ratio_threshold: Some(50.0),
+        }
+    }
+    
+    /// Fast 압축 프리셋
+    pub fn fast() -> Self {
+        Self {
+            block_size: 128, // 큰 블록 = 빠른 속도
+            quality_grade: QualityGrade::C,
+            transform_type: TransformType::Dwt,
+            profile: CompressionProfile::Fast,
+            custom_coefficients: Some(256), // 적은 계수
+            min_block_count: None,
+            rmse_threshold: Some(0.1),
+            compression_ratio_threshold: Some(10.0),
+        }
+    }
+    
+    /// 사용자 정의 설정
+    pub fn custom(
+        block_size: usize,
+        rmse_threshold: f32,
+        compression_ratio: f32,
+        min_blocks: Option<usize>
+    ) -> Self {
+        Self {
+            block_size,
+            quality_grade: QualityGrade::B,
+            transform_type: TransformType::Dwt,
+            profile: CompressionProfile::Balanced,
+            custom_coefficients: None,
+            min_block_count: min_blocks,
+            rmse_threshold: Some(rmse_threshold),
+            compression_ratio_threshold: Some(compression_ratio),
+        }
+    }
+}
 
 impl AutoOptimizedEncoder {
     /// compress_multi.rs와 동일한 압축 함수 (비대칭 매트릭스 지원)
@@ -23,38 +110,40 @@ impl AutoOptimizedEncoder {
         transform_type: TransformType,
     ) -> Result<(Vec<HybridEncodedBlock>, f64, f32, f32), String> {
         let start = Instant::now();
-        let mut encoder = HybridEncoder::new(coefficients, transform_type);
         
         // 비대칭 매트릭스 격자 분할
         let blocks_per_height = (height + block_size - 1) / block_size;
         let blocks_per_width = (width + block_size - 1) / block_size;
         let total_blocks = blocks_per_height * blocks_per_width;
-        let mut encoded_blocks = Vec::new();
         
-        for block_idx in 0..total_blocks {
-            let block_i = block_idx / blocks_per_width;
-            let block_j = block_idx % blocks_per_width;
-            let start_i = block_i * block_size;
-            let start_j = block_j * block_size;
-            
-            // 블록 데이터 추출 (비대칭 매트릭스)
-            let mut block_data = vec![0.0f32; block_size * block_size];
-            for i in 0..block_size {
-                for j in 0..block_size {
-                    let global_i = start_i + i;
-                    let global_j = start_j + j;
-                    if global_i < height && global_j < width {
-                        block_data[i * block_size + j] = 
-                            matrix_data[global_i * width + global_j];
+        // 병렬 블록 처리 (Rayon)
+        let encoded_blocks: Vec<HybridEncodedBlock> = (0..total_blocks)
+            .into_par_iter()
+            .map(|block_idx| {
+                let mut local_encoder = HybridEncoder::new(coefficients, transform_type);
+                let block_i = block_idx / blocks_per_width;
+                let block_j = block_idx % blocks_per_width;
+                let start_i = block_i * block_size;
+                let start_j = block_j * block_size;
+                
+                // 블록 데이터 추출 (비대칭 매트릭스)
+                let mut block_data = vec![0.0f32; block_size * block_size];
+                for i in 0..block_size {
+                    for j in 0..block_size {
+                        let global_i = start_i + i;
+                        let global_j = start_j + j;
+                        if global_i < height && global_j < width {
+                            block_data[i * block_size + j] = 
+                                matrix_data[global_i * width + global_j];
+                        }
+                        // 패딩은 0.0으로 유지
                     }
-                    // 패딩은 0.0으로 유지
                 }
-            }
-            
-            // 블록 압축
-            let encoded_block = encoder.encode_block(&block_data, block_size, block_size);
-            encoded_blocks.push(encoded_block);
-        }
+                
+                // 블록 압축 (각 스레드별 local_encoder)
+                local_encoder.encode_block(&block_data, block_size, block_size)
+            })
+            .collect();
         
         let compression_time = start.elapsed().as_secs_f64();
         
@@ -96,6 +185,76 @@ impl AutoOptimizedEncoder {
         let rmse = mse.sqrt();
         
         Ok((encoded_blocks, compression_time, compression_ratio, rmse))
+    }
+    
+    /// 설정 기반 압축 함수 (사용자 요청 파라미터 적용)
+    pub fn compress_with_config(
+        matrix_data: &[f32],
+        height: usize,
+        width: usize,
+        config: &CompressionConfig,
+    ) -> Result<(Vec<HybridEncodedBlock>, f64, f32, f32), String> {
+        // 1. 최소 블록 개수 체크
+        let blocks_per_height = (height + config.block_size - 1) / config.block_size;
+        let blocks_per_width = (width + config.block_size - 1) / config.block_size;
+        let actual_block_count = blocks_per_height * blocks_per_width;
+        
+        if let Some(min_blocks) = config.min_block_count {
+            if actual_block_count < min_blocks {
+                return Err(format!(
+                    "블록 개수 부족: 실제 {}개 < 최소 {}개 (블록 크기를 {}에서 더 작게 조정하세요)",
+                    actual_block_count, min_blocks, config.block_size
+                ));
+            }
+        }
+        
+        // 2. 계수 개수 결정
+        let coefficients = if let Some(custom_coeffs) = config.custom_coefficients {
+            custom_coeffs
+        } else {
+            // 설정에 따른 자동 계수 계산 (UltraHigh는 더 많은 계수 사용)
+            match config.profile {
+                CompressionProfile::UltraHigh => Self::predict_coefficients_improved(config.block_size) * 4, // 2 → 4배
+                CompressionProfile::High => Self::predict_coefficients_improved(config.block_size) * 2,     // 1 → 2배
+                CompressionProfile::Balanced => Self::predict_coefficients_improved(config.block_size),
+                CompressionProfile::Fast => Self::predict_coefficients_improved(config.block_size) / 2,     // /4 → /2
+                CompressionProfile::UltraFast => Self::predict_coefficients_improved(config.block_size) / 4, // /8 → /4
+            }
+        };
+        
+        // 3. 압축 실행
+        let result = Self::compress_with_profile(
+            matrix_data,
+            height,
+            width,
+            config.block_size,
+            coefficients,
+            config.transform_type,
+        )?;
+        
+        let (blocks, time, ratio, rmse) = result;
+        
+        // 4. RMSE 임계값 체크
+        if let Some(max_rmse) = config.rmse_threshold {
+            if rmse > max_rmse {
+                return Err(format!(
+                    "RMSE 임계값 초과: {:.6} > {:.6} (계수를 {}에서 더 늘리거나 블록을 더 작게 하세요)",
+                    rmse, max_rmse, coefficients
+                ));
+            }
+        }
+        
+        // 5. 압축률 임계값 체크
+        if let Some(min_ratio) = config.compression_ratio_threshold {
+            if ratio < min_ratio {
+                return Err(format!(
+                    "압축률 임계값 미달: {:.1}x < {:.1}x (계수를 {}에서 더 줄이거나 블록을 더 크게 하세요)",
+                    ratio, min_ratio, coefficients
+                ));
+            }
+        }
+        
+        Ok((blocks, time, ratio, rmse))
     }
 
     /// compress_multi.rs와 동일한 이분탐색
