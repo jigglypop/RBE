@@ -25,11 +25,11 @@ struct Args {
     /// 생성할 텍스트 프롬프트
     #[arg(short, long, default_value = "Once upon a time")]
     prompt: String,
-    
+
     /// 생성할 최대 토큰 수
     #[arg(short = 'n', long, default_value = "100")]
     max_tokens: usize,
-    
+
     /// 온도 (0.0 = deterministic, 1.0 = creative)
     #[arg(short = 'T', long, default_value = "0.8")]
     temperature: f32,
@@ -511,7 +511,7 @@ fn main() -> Result<()> {
     // 모델 생성
     println!("🏗️ GPT-2 모델 구성 중...");
     let model = GPT2::new(&config, &rbe_builder)?;
-    
+
     // 텍스트 생성
     let generated = generate(
         &model,
