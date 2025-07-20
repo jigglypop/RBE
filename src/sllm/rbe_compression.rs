@@ -246,21 +246,56 @@ impl SLLMCompressor {
         let rows = shape[0];
         let cols = shape[1];
         
-        // 웨이블릿 + RBE 압축
-        let mut wavelet_encoder = HybridEncoder::new(
-            self.config.wavelet_coefficients, 
-            TransformType::Dwt
-        );
+        // 웨이블릿 + RBE 압축 (블록 단위)
+        let block_size = self.config.block_size;
+        let mut all_compressed_blocks = Vec::new();
+        let mut total_reconstructed = vec![0.0f32; float_data.len()];
         
-        let compressed = wavelet_encoder.encode_block(&float_data, rows, cols);
-        let decoded = compressed.decode();
+        // 행렬을 블록으로 나누어 압축
+        for block_row in (0..rows).step_by(block_size) {
+            for block_col in (0..cols).step_by(block_size) {
+                let end_row = (block_row + block_size).min(rows);
+                let end_col = (block_col + block_size).min(cols);
+                let block_height = end_row - block_row;
+                let block_width = end_col - block_col;
+                
+                // 블록 데이터 추출
+                let mut block_data = Vec::with_capacity(block_height * block_width);
+                for r in block_row..end_row {
+                    for c in block_col..end_col {
+                        block_data.push(float_data[r * cols + c]);
+                    }
+                }
+                
+                // 블록 압축
+                let mut encoder = HybridEncoder::new(
+                    self.config.wavelet_coefficients, 
+                    TransformType::Dwt
+                );
+                let compressed_block = encoder.encode_block(&block_data, block_height, block_width);
+                let reconstructed_block = compressed_block.decode();
+                
+                // 복원된 데이터를 전체 행렬에 다시 배치
+                for (i, &val) in reconstructed_block.iter().enumerate() {
+                    let block_r = i / block_width;
+                    let block_c = i % block_width;
+                    let global_r = block_row + block_r;
+                    let global_c = block_col + block_c;
+                    if global_r < rows && global_c < cols {
+                        total_reconstructed[global_r * cols + global_c] = val;
+                    }
+                }
+                
+                all_compressed_blocks.push(compressed_block);
+            }
+        }
         
         // RMSE 계산
-        let rmse = calculate_rmse(&float_data, &decoded);
+        let rmse = calculate_rmse(&float_data, &total_reconstructed);
         
         // 압축률 계산
         let original_size = float_data.len() * 4; // f32 = 4 bytes
-        let compressed_size = 16; // Packed128 = 16 bytes
+        let compressed_size = all_compressed_blocks.len() * std::mem::size_of::<HybridEncodedBlock>();
         let compression_ratio = original_size as f32 / compressed_size as f32;
         
         Ok(CompressedLayer {
@@ -269,7 +304,7 @@ impl SLLMCompressor {
             compressed_size,
             compression_ratio,
             rmse,
-            compressed_data: vec![compressed], // HybridEncodedBlock 그대로 사용
+            compressed_data: all_compressed_blocks,
             shape: shape.to_vec(),
             dtype: format!("{:?}", tensor.dtype()),
         })

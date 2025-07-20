@@ -1,5 +1,5 @@
 [package]
-name = "RBE-LLM"
+name = "rbe_llm"
 version = "0.1.0"
 edition = "2021"
 
@@ -27,7 +27,25 @@ path = "src/bin/compress_multi.rs"
 name = "compress"
 path = "src/bin/compress.rs"
 
+# SLLM API 도구들
+[[bin]]
+name = "rbe-server"
+path = "src/bin/rbe_server.rs"
+
+[[bin]]
+name = "rbe-cli"
+path = "src/bin/rbe_cli.rs"
+
+[[bin]]
+name = "rbe-inference"
+path = "src/bin/rbe_inference.rs"
+
+[[bin]]
+name = "korean-rbe"
+path = "src/bin/korean_rbe.rs"
+
 [dependencies]
+# 기존 의존성들
 rand = "0.8"
 approx = "0.5"
 rustfft = "6.4.0"
@@ -38,24 +56,40 @@ rustdct = "0.7.1"
 omni-wave = "0.2.1"
 ndarray-stats = "0.6.0"
 nalgebra = "0.33.2"
-ndarray = "0.15.6"
+ndarray = { version = "0.15.6", features = ["rayon"] }
 libm = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 num_cpus = "1.0"
 indicatif = "0.17"
 
+# HTTP 및 네트워킹
 hf-hub = { version = "0.3", features = ["tokio"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
-flate2 = "1.0"
-tar = "0.4"
+
+# SLLM API 새 의존성들
+clap = { version = "4.0", features = ["derive"] }
+warp = "0.3"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+env_logger = "0.10"
+
+# 모델 로딩 및 처리
+safetensors = "0.4"
 memmap2 = "0.9"
-safetensors = { version = "0.4", default-features = false }
-half = "2.4" # f16 변환 지원
-anyhow = "1.0.98"
-tokenizers = "0.21.2"
-# tch = "0.20.0"
+half = "2.3"
+
+# Python 연동 (옵셔널)
+pyo3 = { version = "0.21", features = ["auto-initialize", "gil-refs"], optional = true }
+numpy = { version = "0.21", optional = true }
+
+# 토크나이저
+tokenizers = "0.21"
+
+[dependencies.tch]
+version = "0.16"
+optional = true
 
 # Test dependencies
 [dev-dependencies]

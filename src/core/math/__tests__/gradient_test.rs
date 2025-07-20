@@ -63,13 +63,11 @@ fn 해석적_미분_성능_벤치마크_테스트() {
         }
     }
     let numerical_time = start.elapsed();
-    
     // 결과 출력
     println!("해석적 미분 소요시간: {:?}", analytical_time);
     println!("수치적 미분 소요시간: {:?}", numerical_time);
     let speedup = numerical_time.as_secs_f64() / analytical_time.as_secs_f64();
     println!("속도 향상: {:.2}x", speedup);
-    
     // 해석적 미분이 최소 8배는 빨라야 함 (비트 연산 기반)
     assert!(speedup >= 8.0, "해석적 미분이 충분히 빠르지 않음: {:.2}x", speedup);
 }
