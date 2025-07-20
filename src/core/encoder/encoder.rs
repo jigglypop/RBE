@@ -1,7 +1,17 @@
-use crate::packed_params::{TransformType, HybridEncodedBlock};
-use super::hybrid_encoder::HybridEncoder;
+use crate::packed_params::{TransformType, HybridEncodedBlock, ResidualCoefficient};
 use std::time::Instant;
 use rayon::prelude::*;
+use nalgebra::{DMatrix, DVector, RowDVector};
+use rustdct::DctPlanner;
+use ndarray::{Array, Array1, Array2};
+use omni_wave::{wavelet as w, completely_decompose_2d};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use once_cell::sync::Lazy;
+
+// A matrix 캐시 (thread-safe)
+static A_MATRIX_CACHE: Lazy<Arc<RwLock<HashMap<(usize, usize), Arc<DMatrix<f32>>>>>> = 
+    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 #[derive(Debug, Clone, Copy)]
 pub enum QualityGrade {
@@ -34,7 +44,16 @@ pub struct CompressionConfig {
     pub compression_ratio_threshold: Option<f32>, // 압축률 임계값 (최소 압축률)
 }
 
-pub struct AutoOptimizedEncoder;
+/// 통합된 RBE 인코더 (기존 AutoOptimizedEncoder + HybridEncoder)
+pub struct RBEEncoder {
+    pub k_coeffs: usize, // 유지할 잔차 계수의 개수
+    pub transform_type: TransformType,
+    // planner는 재사용 가능하므로 인코더가 소유하는 것이 효율적
+    dct_planner_f32: DctPlanner<f32>,
+}
+
+// 기존 AutoOptimizedEncoder는 호환성을 위해 타입 별칭으로 유지
+pub type AutoOptimizedEncoder = RBEEncoder;
 
 impl CompressionConfig {
     /// 기본 설정 (Balanced 프로파일)
@@ -99,8 +118,166 @@ impl CompressionConfig {
     }
 }
 
-impl AutoOptimizedEncoder {
-    /// compress_multi.rs와 동일한 압축 함수 (비대칭 매트릭스 지원)
+impl RBEEncoder {
+    /// 새로운 RBE 인코더 생성
+    pub fn new(k_coeffs: usize, transform_type: TransformType) -> Self {
+        Self {
+            k_coeffs,
+            transform_type,
+            dct_planner_f32: DctPlanner::new(),
+        }
+    }
+    
+    /// S급 품질 (RMSE < 0.001): 819:1 압축률, 128x128 블록 권장
+    pub fn new_s_grade() -> Self {
+        Self::new(500, TransformType::Dwt)  // 웨이블릿으로 변경
+    }
+    
+    /// A급 품질 (RMSE < 0.01): 3276:1 압축률, 256x256 블록 권장  
+    pub fn new_a_grade() -> Self {
+        Self::new(300, TransformType::Dwt)  // 웨이블릿으로 변경
+    }
+    
+    /// B급 품질 (RMSE < 0.1): 3276:1 압축률, 256x256 블록 권장
+    pub fn new_b_grade() -> Self {
+        Self::new(200, TransformType::Dwt)  // 웨이블릿으로 변경
+    }
+    
+    /// 극한 압축 (RMSE ~0.09): 3276:1 압축률
+    pub fn new_extreme_compression() -> Self {
+        Self::new(50, TransformType::Dwt)   // 웨이블릿으로 변경
+    }
+
+    /// 단일 블록을 RBE+DCT/DWT로 압축 (기존 HybridEncoder::encode_block)
+    pub fn encode_block(&mut self, block_data: &[f32], rows: usize, cols: usize) -> HybridEncodedBlock {
+        // 입력 데이터 크기 검증
+        if block_data.len() != rows * cols {
+            panic!("block_data 길이({})가 rows * cols({})와 일치하지 않음", block_data.len(), rows * cols);
+        }
+        
+        let b_vector = DVector::from_row_slice(block_data);
+        
+        // A matrix 캐시 확인
+        let cache_key = (rows, cols);
+        let a_matrix = {
+            let cache = A_MATRIX_CACHE.read().unwrap();
+            if let Some(cached) = cache.get(&cache_key) {
+                Arc::clone(cached)
+            } else {
+                drop(cache); // 읽기 잠금 해제
+                
+                // A matrix 생성 (병렬 처리)
+                let a_matrix_rows: Vec<RowDVector<f32>> = (0..rows * cols).into_par_iter().map(|idx| {
+                    let r = idx / cols;
+                    let c = idx % cols;
+                    let x = if cols > 1 { (c as f32 / (cols - 1) as f32) * 2.0 - 1.0 } else { 0.0 };
+                    let y = if rows > 1 { (r as f32 / (rows - 1) as f32) * 2.0 - 1.0 } else { 0.0 };
+                    let d = (x * x + y * y).sqrt();
+                    let pi = std::f32::consts::PI;
+                    RowDVector::from_vec(vec![
+                        1.0, d, d * d, (pi * x).cos(), (pi * y).cos(),
+                        (2.0 * pi * x).cos(), (2.0 * pi * y).cos(),
+                        (pi * x).cos() * (pi * y).cos(),
+                    ])
+                }).collect();
+
+                let new_a_matrix = Arc::new(DMatrix::from_rows(&a_matrix_rows));
+                
+                // 캐시에 저장
+                let mut cache = A_MATRIX_CACHE.write().unwrap();
+                cache.insert(cache_key, Arc::clone(&new_a_matrix));
+                
+                new_a_matrix
+            }
+        };
+
+        // Pseudo-inverse via SVD with proper dimension handling
+        let svd = a_matrix.as_ref().clone().svd(true, true);
+        let singular_values = &svd.singular_values;
+        let mut sigma_inv = DMatrix::zeros(svd.v_t.as_ref().unwrap().nrows(), svd.u.as_ref().unwrap().ncols());
+        
+        let tolerance = 1e-10_f32;
+        for i in 0..singular_values.len().min(sigma_inv.nrows()).min(sigma_inv.ncols()) {
+            if singular_values[i].abs() > tolerance {
+                sigma_inv[(i, i)] = 1.0 / singular_values[i];
+            }
+        }
+        
+        let a_pseudo_inv = svd.v_t.as_ref().unwrap().transpose() * sigma_inv * svd.u.as_ref().unwrap().transpose();
+        
+        // RBE 파라미터 계산
+        let rbe_params_vec = a_pseudo_inv.clone() * b_vector.clone();
+        let mut rbe_params = [0.0f32; 8];
+        for i in 0..8.min(rbe_params_vec.len()) {
+            rbe_params[i] = rbe_params_vec[i];
+        }
+        
+        // 잔차 계산
+        let predicted_vector = a_matrix.as_ref() * rbe_params_vec;
+        let residual_vector = b_vector - predicted_vector;
+
+        self.encode_single_transform(rbe_params, &residual_vector, rows, cols, self.transform_type)
+    }
+
+    fn encode_single_transform(
+        &mut self,
+        rbe_params: [f32; 8],
+        residual_vector: &DVector<f32>,
+        rows: usize,
+        cols: usize,
+        transform_type: TransformType,
+    ) -> HybridEncodedBlock {
+        let mut residual_matrix = Array2::from_shape_vec((rows, cols), residual_vector.iter().cloned().collect()).unwrap();
+
+        match transform_type {
+            TransformType::Dct => {
+                let dct_row = self.dct_planner_f32.plan_dct2(cols);
+                let dct_col = self.dct_planner_f32.plan_dct2(rows);
+                
+                // --- 행별 DCT 병렬 처리 ---
+                residual_matrix.axis_iter_mut(ndarray::Axis(0)).into_par_iter().for_each(|mut row| {
+                    let mut row_vec = row.to_vec();
+                    dct_row.process_dct2(&mut row_vec);
+                    row.assign(&Array::from(row_vec));
+                });
+                
+                // --- 열별 DCT 병렬 처리 ---
+                let mut transposed = residual_matrix.t().to_owned();
+                transposed.axis_iter_mut(ndarray::Axis(0)).into_par_iter().for_each(|mut col| {
+                    let mut col_vec = col.to_vec();
+                    dct_col.process_dct2(&mut col_vec);
+                    col.assign(&Array::from(col_vec));
+                });
+                residual_matrix = transposed.t().to_owned();
+            },
+            TransformType::Dwt => {
+                let wavelet = w::BIOR_3_1;
+                let mut buffer = Array1::zeros(rows.max(cols) + wavelet.window_size() - 2);
+                completely_decompose_2d(residual_matrix.view_mut(), buffer.view_mut(), wavelet);
+            },
+            TransformType::Adaptive => unreachable!("Adaptive transform should be handled separately"),
+        }
+
+        let mut coeffs: Vec<ResidualCoefficient> = residual_matrix
+            .indexed_iter()
+            .map(|((r, c), &val)| ResidualCoefficient {
+                index: (r as u16, c as u16),
+                value: val,
+            })
+            .collect();
+        coeffs.sort_unstable_by(|a, b| b.value.abs().partial_cmp(&a.value.abs()).unwrap());
+        let top_k_coeffs = coeffs.into_iter().take(self.k_coeffs).collect();
+
+        HybridEncodedBlock {
+            rbe_params,
+            residuals: top_k_coeffs,
+            rows,
+            cols,
+            transform_type,
+        }
+    }
+
+    /// 비대칭 매트릭스 지원
     pub fn compress_with_profile(
         matrix_data: &[f32],
         height: usize,
@@ -120,7 +297,7 @@ impl AutoOptimizedEncoder {
         let encoded_blocks: Vec<HybridEncodedBlock> = (0..total_blocks)
             .into_par_iter()
             .map(|block_idx| {
-                let mut local_encoder = HybridEncoder::new(coefficients, transform_type);
+                let mut local_encoder = RBEEncoder::new(coefficients, transform_type);
                 let block_i = block_idx / blocks_per_width;
                 let block_j = block_idx % blocks_per_width;
                 let start_i = block_i * block_size;
@@ -320,14 +497,14 @@ impl AutoOptimizedEncoder {
         cols: usize,
         transform_type: TransformType,
         rmse_threshold: Option<f32>,
-    ) -> Result<HybridEncoder, String> {
+    ) -> Result<RBEEncoder, String> {
         let threshold = rmse_threshold.unwrap_or(0.000001);
         
         // 1. 개선된 공식으로 초기 예측
         let predicted_coeffs = Self::predict_coefficients_improved(rows);
         
         // 2. 예측값으로 빠른 검증
-        let mut test_encoder = HybridEncoder::new(predicted_coeffs, transform_type);
+        let mut test_encoder = RBEEncoder::new(predicted_coeffs, transform_type);
         let encoded_block = test_encoder.encode_block(data, rows, cols);
         let decoded_data = encoded_block.decode();
         
@@ -352,7 +529,7 @@ impl AutoOptimizedEncoder {
             while left <= right {
                 let mid = (left + right) / 2;
                 
-                let mut mid_encoder = HybridEncoder::new(mid, transform_type);
+                let mut mid_encoder = RBEEncoder::new(mid, transform_type);
                 let mid_encoded = mid_encoder.encode_block(data, rows, cols);
                 let mid_decoded = mid_encoded.decode();
                 
@@ -372,7 +549,7 @@ impl AutoOptimizedEncoder {
             result
         };
         
-        Ok(HybridEncoder::new(final_coeffs, transform_type))
+        Ok(RBEEncoder::new(final_coeffs, transform_type))
     }
 
     /// 품질 등급에 따른 encoder 생성 (기존 테스트용 - 단일 블록 압축)
@@ -382,7 +559,7 @@ impl AutoOptimizedEncoder {
         cols: usize,
         grade: QualityGrade,
         transform_type: TransformType,
-    ) -> Result<HybridEncoder, String> {
+    ) -> Result<RBEEncoder, String> {
         let rmse_threshold = match grade {
             QualityGrade::S => 0.000001, // 이분탐색에서는 엄격하게, 테스트에서 여유분 적용
             QualityGrade::A => 0.001,
@@ -392,7 +569,7 @@ impl AutoOptimizedEncoder {
         
         // 기존 방식: 단일 블록 이분탐색 (테스트 호환성)
         let critical_coeffs = Self::find_critical_coefficients_single_block(data, rows, cols, rmse_threshold, transform_type)?;
-        Ok(HybridEncoder::new(critical_coeffs, transform_type))
+        Ok(RBEEncoder::new(critical_coeffs, transform_type))
     }
 
     /// 단일 블록 이분탐색 (기존 테스트용)
@@ -412,7 +589,7 @@ impl AutoOptimizedEncoder {
         
         while left <= right {
             let mid = (left + right) / 2;
-            let mut encoder = HybridEncoder::new(mid, transform_type);
+            let mut encoder = RBEEncoder::new(mid, transform_type);
             
             // 단일 블록 압축 및 복원
             let encoded = encoder.encode_block(data, rows, cols);

@@ -1,7 +1,9 @@
 //! 변환 및 인코딩 관련 타입들
 
+use serde::{Serialize, Deserialize};
+
 /// 변환 타입 (DCT, Wavelet, Adaptive)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub enum TransformType {
     Dct,
     Dwt,
@@ -9,14 +11,14 @@ pub enum TransformType {
 }
 
 /// DCT/웨이블릿 잔차 계수
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct ResidualCoefficient {
     pub index: (u16, u16), // 블록 내 좌표 (최대 65535x65535)
     pub value: f32,
 }
 
 /// RBE 기본 패턴 + 잔차 계수를 포함하는 하이브리드 압축 블록
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct HybridEncodedBlock {
     /// RBE 기본 패턴을 생성하는 8개의 연속 파라미터
     pub rbe_params: RbeParameters,

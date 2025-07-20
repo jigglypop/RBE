@@ -1,274 +1,256 @@
+use clap::{Arg, Command};
+use anyhow::{Context, Result};
 use std::path::Path;
-use anyhow::Result;
-use indicatif::{ProgressBar, ProgressStyle};
-use rbe_llm::packed_params::{HybridEncodedBlock, TransformType};
-use rbe_llm::encoder::AutoOptimizedEncoder;
-use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use serde_json::{Value, Map};
+use std::io::Write;
+use std::time::Instant;
 
-/// numpy 파일 헤더 읽기
-fn read_npy_header(file: &mut File) -> Result<(Vec<usize>, usize)> {
-    let mut magic = [0u8; 6];
-    file.read_exact(&mut magic)?;
-    
-    if &magic != b"\x93NUMPY" {
-        return Err(anyhow::anyhow!("Invalid numpy file"));
+use rbe_llm::core::encoder::{RBEEncoder, WeightMapper, ModelLayout, WeightInfo};
+use rbe_llm::core::packed_params::{TransformType, HybridEncodedBlock};
+
+/// GPT-2 모델 압축용 설정
+struct CompressionSettings {
+    block_size: usize,
+    coefficients: usize,
+    transform_type: TransformType,
+}
+
+impl Default for CompressionSettings {
+    fn default() -> Self {
+        Self {
+            block_size: 64,
+            coefficients: 133,
+            transform_type: TransformType::Dwt,
+        }
     }
+}
+
+fn main() -> Result<()> {
+    let matches = Command::new("RBE Model Compressor")
+        .version("1.0")
+        .author("RBE Team")
+        .about("GPT-2 모델을 RBE로 압축합니다")
+        .arg(Arg::new("input")
+            .short('i')
+            .long("input")
+            .value_name("PATH")
+            .help("입력 모델 디렉토리 (extract_weights.py로 추출한 텐서들)")
+            .required(true))
+        .arg(Arg::new("output")
+            .short('o')
+            .long("output")
+            .value_name("PATH")
+            .help("출력 디렉토리")
+            .required(true))
+        .arg(Arg::new("block-size")
+            .short('b')
+            .long("block-size")
+            .value_name("SIZE")
+            .help("블록 크기 (기본값: 64)")
+            .default_value("64"))
+        .arg(Arg::new("coefficients")
+            .short('c')
+            .long("coefficients")
+            .value_name("NUM")
+            .help("유지할 계수 개수 (기본값: 133)")
+            .default_value("133"))
+        .arg(Arg::new("transform")
+            .short('t')
+            .long("transform")
+            .value_name("TYPE")
+            .help("변환 타입: dct, dwt (기본값: dwt)")
+            .default_value("dwt"))
+        .get_matches();
     
-    let mut version = [0u8; 2];
-    file.read_exact(&mut version)?;
-    
-    let header_len = if version[0] == 1 {
-        let mut len_bytes = [0u8; 2];
-        file.read_exact(&mut len_bytes)?;
-        u16::from_le_bytes(len_bytes) as usize
-    } else {
-        let mut len_bytes = [0u8; 4];
-        file.read_exact(&mut len_bytes)?;
-        u32::from_le_bytes(len_bytes) as usize
+    let input_dir = Path::new(matches.get_one::<String>("input").unwrap());
+    let output_dir = Path::new(matches.get_one::<String>("output").unwrap());
+    let block_size = matches.get_one::<String>("block-size").unwrap().parse()?;
+    let coefficients = matches.get_one::<String>("coefficients").unwrap().parse()?;
+    let transform_type = match matches.get_one::<String>("transform").unwrap().as_str() {
+        "dct" => TransformType::Dct,
+        "dwt" => TransformType::Dwt,
+        _ => TransformType::Dwt,
     };
     
-    let mut header = vec![0u8; header_len];
-    file.read_exact(&mut header)?;
-    let header_str = String::from_utf8_lossy(&header);
-    
-    // shape 추출
-    let shape_start = header_str.find("'shape': (").unwrap() + 10;
-    let shape_end = header_str[shape_start..].find(')').unwrap() + shape_start;
-    let shape_str = &header_str[shape_start..shape_end];
-    
-    let shape: Vec<usize> = shape_str.split(", ")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.trim_end_matches(',').parse().unwrap())
-        .collect();
-    
-    let total_size = shape.iter().product();
-    
-    Ok((shape, total_size))
-}
-
-/// numpy 파일에서 float32 데이터 읽기
-fn read_npy_data(path: &Path) -> Result<(Vec<f32>, Vec<usize>)> {
-    let mut file = File::open(path)?;
-    let (shape, total_size) = read_npy_header(&mut file)?;
-    
-    let mut buffer = vec![0u8; total_size * 4];
-    file.read_exact(&mut buffer)?;
-    
-    let data: Vec<f32> = buffer.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect();
-    
-    Ok((data, shape))
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    println!("🚀 KoGPT2 모델 압축 시작 (numpy 파일 사용)");
-    
-    let weights_dir = Path::new("models/skt-kogpt2-base-v2/weights");
-    let metadata_path = weights_dir.join("metadata.json");
-    
-    if !metadata_path.exists() {
-        println!("❌ 메타데이터 파일이 없습니다. extract_weights.py를 먼저 실행하세요.");
-        return Err(anyhow::anyhow!("Metadata file not found"));
-    }
-    
-    // 메타데이터 로드
-    let metadata_str = fs::read_to_string(&metadata_path)?;
-    let metadata: Map<String, Value> = serde_json::from_str(&metadata_str)?;
-    
-    println!("✅ 발견된 레이어: {} 개", metadata.len());
-    
-    // 압축 설정 - 빠른 1개만!
-    let configs = vec![
-        ("fast", 4, 64, TransformType::Dwt),     // 빠른 압축! 64²/4 = 1024x!
-    ];
-    
     // 출력 디렉토리 생성
-    fs::create_dir_all("models/compressed")?;
-    
-    for (name, coeffs, block_size, transform_type) in configs {
-        println!("\n🔧 압축 프로파일: {} (계수: {}, 블록: {}x{}, 변환: {:?})", 
-                 name, coeffs, block_size, block_size, transform_type);
-        
-        let mut compressed_weights = HashMap::new();
-        let mut total_original_size = 0u64;
-        let mut total_compressed_size = 0u64;
-        let mut total_rmse = 0.0;
-        let mut count = 0;
-        
-        // 프로그레스 바
-        let pb = ProgressBar::new(metadata.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("[{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                .unwrap()
-                .progress_chars("██░"),
-        );
-        
-        // AutoOptimizedEncoder의 compress_multi.rs 로직 사용
-        println!("📊 블록 크기 {}x{}, 계수: {}, 변환: {:?}", 
-                 block_size, block_size, coeffs, transform_type);
-        
-        // 각 레이어 압축
-        for (layer_idx, (layer_name, layer_info)) in metadata.iter().enumerate() {
-            println!("\n🔄 [{}/{}] 레이어 처리 중: {}", layer_idx + 1, metadata.len(), layer_name);
-            pb.set_message(format!("압축 중: {}", layer_name));
-            
-            if let Some(info_obj) = layer_info.as_object() {
-                if let (Some(_shape_val), Some(file_val)) = 
-                    (info_obj.get("shape"), info_obj.get("file")) {
-                    
-                    let file_name = file_val.as_str().unwrap();
-                    let npy_path = weights_dir.join(file_name);
-                    
-                    // numpy 파일 읽기
-                    match read_npy_data(&npy_path) {
-                        Ok((data, shape)) => {
-                            // 2D 가중치인 경우만 압축 (Linear layers)
-                            if shape.len() == 2 {
-                                let height = shape[0];
-                                let width = shape[1];
-                                
-                                // 격자 분할 방식으로 비대칭 매트릭스 압축
-                                let blocks_per_row = (height + block_size - 1) / block_size;
-                                let blocks_per_col = (width + block_size - 1) / block_size;
-                                let total_blocks = blocks_per_row * blocks_per_col;
-                                
-                                println!("  📐 매트릭스: {}x{} → {}x{} 격자 ({} 블록)", 
-                                        height, width, blocks_per_row, blocks_per_col, total_blocks);
-                                
-                                let mut encoded_blocks = Vec::new();
-                                let mut total_block_rmse = 0.0;
-                                let mut processed_blocks = 0;
-                                
-                                for block_row in 0..blocks_per_row {
-                                    for block_col in 0..blocks_per_col {
-                                        processed_blocks += 1;
-                                        let start_i = block_row * block_size;
-                                        let start_j = block_col * block_size;
-                                        let end_i = (start_i + block_size).min(height);
-                                        let end_j = (start_j + block_size).min(width);
-                                        
-                                        // 블록 데이터 추출 (패딩 포함)
-                                        let mut block_data = vec![0.0f32; block_size * block_size];
-                                        for i in 0..(end_i - start_i) {
-                                            for j in 0..(end_j - start_j) {
-                                                let src_idx = (start_i + i) * width + (start_j + j);
-                                                let dst_idx = i * block_size + j;
-                                                block_data[dst_idx] = data[src_idx];
-                                            }
-                                        }
-                                        
-                                        // 블록별 압축 (height, width, block_size, coeffs, transform_type)
-                                        match AutoOptimizedEncoder::compress_with_profile(
-                                            &block_data, 
-                                            block_size,  // height
-                                            block_size,  // width
-                                            block_size,  // block_size
-                                            coeffs, 
-                                            transform_type
-                                        ) {
-                                            Ok((mut block_compressed, _, _, block_rmse)) => {
-                                                total_block_rmse += block_rmse;
-                                                encoded_blocks.append(&mut block_compressed);
-                                            },
-                                            Err(e) => {
-                                                println!("  ❌ 블록 압축 실패: {}", e);
-                                            }
-                                        }
-                                        
-                                        // 진행률 표시 (1개마다)
-                                        let progress = (processed_blocks as f32 / total_blocks as f32) * 100.0;
-                                        print!("\r  🔄 블록 진행률: {}/{} ({:.1}%)", 
-                                               processed_blocks, total_blocks, progress);
-                                        use std::io::{self, Write};
-                                        io::stdout().flush().unwrap();
-                                    }
-                                }
-                                
-                                println!(); // 진행률 표시 줄바꿈
-                                
-                                let avg_rmse = total_block_rmse / total_blocks as f32;
-                                
-                                // 압축률 계산
-                                let original_size = data.len() * 4;
-                                let compressed_size = encoded_blocks.len() * std::mem::size_of::<HybridEncodedBlock>();
-                                let compression_ratio = original_size as f32 / compressed_size as f32;
-                                
-                                println!("  ✅ [{}] 레이어 완료:", layer_name);
-                                println!("     📊 압축률: {:.1}x ({} KB → {} KB)", 
-                                        compression_ratio, original_size / 1024, compressed_size / 1024);
-                                println!("     📈 RMSE: {:.6} (평균 {}개 블록)", avg_rmse, total_blocks);
-                                println!("     ⚡ 총 압축된 블록: {} 개", encoded_blocks.len());
-                                
-                                total_rmse += avg_rmse;
-                                count += 1;
-                                total_original_size += original_size as u64;
-                                total_compressed_size += compressed_size as u64;
-                                
-                                compressed_weights.insert(layer_name.clone(), encoded_blocks);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("❌ {} 읽기 실패: {}", layer_name, e);
-                        }
-                    }
-                }
-            }
-            
-            pb.inc(1);
+    fs::create_dir_all(output_dir)?;
+
+    // 압축 시작
+    compress_gpt2_with_layout(
+        input_dir,
+        output_dir,
+        CompressionSettings {
+            block_size,
+            coefficients,
+            transform_type,
         }
-        
-        pb.finish_with_message("압축 완료!");
-        
-        // 결과 출력
-        let compression_ratio = if total_compressed_size > 0 {
-            total_original_size as f32 / total_compressed_size as f32
-        } else {
-            0.0
-        };
-        let avg_rmse = if count > 0 { total_rmse / count as f32 } else { 0.0 };
-        
-        println!("✅ 압축 완료!");
-        println!("  - 원본: {:.2} MB", total_original_size as f32 / 1_048_576.0);
-        println!("  - 압축: {:.2} MB", total_compressed_size as f32 / 1_048_576.0);
-        println!("  - 압축률: {:.1}x", compression_ratio);
-        println!("  - 평균 RMSE: {:.6}", avg_rmse);
-        println!("  - 압축된 레이어: {}", count);
-        
-        // 압축된 모델 저장
-        let output_path = format!("models/compressed/kogpt2_{}.bin", name);
-        save_compressed_model(&compressed_weights, &output_path)?;
-        println!("💾 저장 완료: {}", output_path);
-    }
+    )?;
     
-    println!("\n✅ 모든 압축 프로파일 완료!");
     Ok(())
 }
 
-fn save_compressed_model(weights: &HashMap<String, Vec<HybridEncodedBlock>>, path: &str) -> Result<()> {
-    // 실제 압축 데이터를 JSON으로 저장
-    let compressed_model = serde_json::json!({
-        "metadata": {
-            "model_name": "kogpt2-insane",
-            "total_layers": weights.len(),
-            "total_blocks": weights.values().map(|v| v.len()).sum::<usize>(),
-            "compression_type": "RBE_DWT",
-            "block_size": 128,
-            "coefficients": 8,
-            "timestamp": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs()
-        },
-        "layers": weights
+/// GPT-2 모델을 메타데이터와 함께 압축
+fn compress_gpt2_with_layout(
+    input_dir: &Path,
+    output_dir: &Path,
+    settings: CompressionSettings,
+) -> Result<()> {
+    println!("🚀 GPT-2 모델 압축 시작");
+    println!("  입력: {}", input_dir.display());
+    println!("  출력: {}", output_dir.display());
+    println!("  설정: 블록={}, 계수={}, 변환={:?}", 
+        settings.block_size, settings.coefficients, settings.transform_type);
+    
+    let start_time = Instant::now();
+    
+    // 1. 가중치 매퍼 생성
+    let mut mapper = WeightMapper::new(
+        "gpt2",
+        settings.block_size,
+        settings.coefficients,
+        settings.transform_type,
+    );
+    
+    // 2. 압축된 블록들을 저장할 벡터
+    let mut all_compressed_blocks = Vec::new();
+    
+    // 3. 모든 텐서 파일 찾기 및 압축
+    let tensor_files = find_tensor_files(input_dir)?;
+    println!("\n📁 {} 개의 텐서 파일 발견", tensor_files.len());
+    
+    for (idx, tensor_path) in tensor_files.iter().enumerate() {
+        let weight_name = tensor_path.file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("잘못된 파일 이름"))?;
+        
+        println!("\n[{}/{}] 압축 중: {}", idx + 1, tensor_files.len(), weight_name);
+        
+        // 텐서 로드
+        let (data, shape) = load_tensor(&tensor_path)?;
+        println!("  Shape: {:?}, 크기: {:.2} MB", 
+            shape, data.len() as f64 * 4.0 / 1_048_576.0);
+        
+        // 압축
+        let blocks = mapper.compress_weight(weight_name, &data, &shape)?;
+        println!("  압축 완료: {} 블록", blocks.len());
+        
+        all_compressed_blocks.push(blocks);
+    }
+    
+    // 4. 모든 블록을 바이너리로 직렬화
+    let bin_path = output_dir.join("rbe_model.bin");
+    let bin_data = mapper.serialize_all_blocks(&all_compressed_blocks)?;
+    let mut bin_file = File::create(&bin_path)?;
+    bin_file.write_all(&bin_data)?;
+    println!("\n✅ 바이너리 파일 생성: {} ({:.2} MB)", 
+        bin_path.display(), bin_data.len() as f64 / 1_048_576.0);
+    
+    // 5. 레이아웃 파일 저장
+    let layout_path = output_dir.join("rbe_layout.json");
+    let layout_json = mapper.serialize_layout()?;
+    fs::write(&layout_path, layout_json)?;
+    println!("✅ 레이아웃 파일 생성: {}", layout_path.display());
+    
+    // 6. 압축 통계 출력
+    mapper.print_compression_stats();
+    
+    let elapsed = start_time.elapsed();
+    println!("\n⏱️  총 소요 시간: {:.2}초", elapsed.as_secs_f64());
+    
+    Ok(())
+}
+
+/// 텐서 파일들 찾기
+fn find_tensor_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.extension().and_then(|s| s.to_str()) == Some("pt") {
+            files.push(path);
+        }
+    }
+    
+    // GPT-2 레이어 순서대로 정렬
+    files.sort_by(|a, b| {
+        let a_name = a.file_stem().unwrap().to_str().unwrap();
+        let b_name = b.file_stem().unwrap().to_str().unwrap();
+        
+        // 레이어 번호 추출하여 정렬
+        let a_layer = extract_layer_number(a_name);
+        let b_layer = extract_layer_number(b_name);
+        
+        match (a_layer, b_layer) {
+            (Some(a_n), Some(b_n)) => a_n.cmp(&b_n),
+            _ => a_name.cmp(b_name),
+        }
     });
     
-    let json_string = serde_json::to_string(&compressed_model)?;
-    fs::write(path, json_string)?;
-    println!("📦 실제 압축 데이터 저장 완료: {} 레이어", weights.len());
-    Ok(())
+    Ok(files)
+}
+
+/// 레이어 번호 추출 (예: "transformer.h.0.attn" -> 0)
+fn extract_layer_number(name: &str) -> Option<usize> {
+    if name.contains(".h.") {
+        let parts: Vec<&str> = name.split('.').collect();
+        for (i, part) in parts.iter().enumerate() {
+            if *part == "h" && i + 1 < parts.len() {
+                return parts[i + 1].parse().ok();
+            }
+        }
+    }
+    None
+}
+
+/// PyTorch 텐서 파일 로드 (extract_weights.py 형식)
+fn load_tensor(path: &Path) -> Result<(Vec<f32>, Vec<usize>)> {
+    // 간단한 바이너리 형식 가정:
+    // [shape_len:u32][shape:u32*shape_len][data:f32*product(shape)]
+    
+    let data = fs::read(path)?;
+    let mut cursor = 0;
+    
+    // Shape 길이 읽기
+    let shape_len = u32::from_le_bytes([
+        data[cursor], data[cursor+1], data[cursor+2], data[cursor+3]
+    ]) as usize;
+    cursor += 4;
+    
+    // Shape 읽기
+    let mut shape = Vec::with_capacity(shape_len);
+    for _ in 0..shape_len {
+        let dim = u32::from_le_bytes([
+            data[cursor], data[cursor+1], data[cursor+2], data[cursor+3]
+        ]) as usize;
+        shape.push(dim);
+        cursor += 4;
+    }
+    
+    // 데이터 읽기
+    let total_elements: usize = shape.iter().product();
+    let mut tensor_data = Vec::with_capacity(total_elements);
+    
+    for _ in 0..total_elements {
+        let value = f32::from_le_bytes([
+            data[cursor], data[cursor+1], data[cursor+2], data[cursor+3]
+        ]);
+        tensor_data.push(value);
+        cursor += 4;
+    }
+    
+    Ok((tensor_data, shape))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_layer_number_extraction() {
+        assert_eq!(extract_layer_number("transformer.h.0.attn.c_attn.weight"), Some(0));
+        assert_eq!(extract_layer_number("transformer.h.11.mlp.c_fc.weight"), Some(11));
+        assert_eq!(extract_layer_number("transformer.wte.weight"), None);
+    }
 } 

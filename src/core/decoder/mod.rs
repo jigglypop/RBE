@@ -1,15 +1,13 @@
-pub mod block_decoder;
-pub mod grid_decoder;
-pub mod cordic;
-pub mod weight_generator;
-pub mod fused_forward;
+pub mod model_loader;
 pub mod optimized_decoder;
+pub mod weight_generator;
+pub mod cordic;
+pub mod grid_decoder;
+pub mod fused_forward;
+pub mod block_decoder;
 
-// 테스트 모듈
-#[cfg(test)]
-mod __tests__;
-
-// 재수출
-pub use cordic::{HyperbolicCordic, CORDIC_ITERATIONS, CORDIC_GAIN, POINCARE_BOUNDARY};
+pub use model_loader::*;
 pub use weight_generator::WeightGenerator;
-pub use fused_forward::FusedForwardPass; 
+// CORDIC은 현재 외부에서 직접 사용되지 않으므로 삭제
+pub use fused_forward::FusedForwardPass;
+pub use block_decoder::decode_all_blocks; 

@@ -1,4 +1,4 @@
-use rbe_llm::{HybridEncoder, HybridEncodedBlock, TransformType};
+use rbe_llm::{RBEEncoder, HybridEncodedBlock, TransformType};
 use std::time::Instant;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
@@ -26,7 +26,7 @@ fn compress_with_profile(
     );
     
     let start = Instant::now();
-    let mut encoder = HybridEncoder::new(profile.coefficients, TransformType::Dwt);
+    let mut encoder = RBEEncoder::new(profile.coefficients, TransformType::Dwt);
     
     // 블록 단위로 압축
     let blocks_per_dim = (matrix_size + profile.block_size - 1) / profile.block_size;

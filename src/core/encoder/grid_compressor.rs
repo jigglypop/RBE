@@ -1,7 +1,7 @@
 //! 그리드로 압축된 행렬 처리
 
 use crate::packed_params::{HybridEncodedBlock, TransformType};
-use super::hybrid_encoder::HybridEncoder;
+use super::encoder::RBEEncoder;
 use std::sync::Mutex;
 use rayon::prelude::*;
 
@@ -29,7 +29,7 @@ impl GridCompressedMatrix {
         let grid_cols = (cols + block_size - 1) / block_size;
         
         // 스레드별 인코더를 위한 Mutex
-        let encoder = Mutex::new(HybridEncoder::new(k_coeffs, transform_type));
+        let encoder = Mutex::new(RBEEncoder::new(k_coeffs, transform_type));
 
         let blocks: Vec<HybridEncodedBlock> = (0..grid_rows * grid_cols)
             .into_par_iter()
