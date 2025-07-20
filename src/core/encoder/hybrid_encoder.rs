@@ -358,4 +358,139 @@ impl HybridEncoder {
             _ => self.encode_single_transform(rbe_params, &residual_vector, rows, cols, self.transform_type),
         }
     }
+
+    /// 이분탐색으로 RMSE ≤ threshold를 만족하는 최소 계수 찾기
+    pub fn find_critical_coefficients(
+        data: &[f32],
+        rows: usize,
+        cols: usize,
+        rmse_threshold: f32,
+        transform_type: TransformType,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        if rows != cols {
+            return Err("정방형 블록만 지원됩니다".into());
+        }
+        
+        let block_size = rows;
+        let max_coeffs = (block_size * block_size) / 4; // 상한: 전체 픽셀의 1/4
+        let min_coeffs = 8; // 하한: 최소 8개
+        
+        let mut left = min_coeffs;
+        let mut right = max_coeffs;
+        let mut critical_coeffs = max_coeffs;
+        
+        while left <= right {
+            let mid = (left + right) / 2;
+            
+            // 임시 encoder로 테스트
+            let mut test_encoder = HybridEncoder::new(mid, transform_type);
+            let encoded_block = test_encoder.encode_block(data, rows, cols);
+            let decoded_data = encoded_block.decode();
+            
+            // RMSE 계산
+            let mse: f32 = data.iter()
+                .zip(decoded_data.iter())
+                .map(|(orig, recon)| (orig - recon).powi(2))
+                .sum::<f32>() / (rows * cols) as f32;
+            let rmse = mse.sqrt();
+            
+            if rmse <= rmse_threshold {
+                // 성공: 더 적은 계수로 시도
+                critical_coeffs = mid;
+                right = mid - 1;
+            } else {
+                // 실패: 더 많은 계수 필요
+                left = mid + 1;
+            }
+        }
+        
+        Ok(critical_coeffs)
+    }
+    
+    /// 블록 크기에 따른 수학적 공식으로 계수 예측
+    pub fn predict_coefficients_formula(block_size: usize) -> usize {
+        let log_factor = if block_size >= 32 {
+            (block_size as f32 / 32.0).log2().max(0.0) as usize
+        } else {
+            0
+        };
+        
+        let r_value = 32_usize.saturating_sub(log_factor).max(25);
+        (block_size * block_size + r_value - 1) / r_value // 올림 처리
+    }
+    
+    /// 자동 최적화: 블록 크기에 따라 최적 계수를 자동으로 찾아서 생성
+    pub fn new_auto_optimized(
+        data: &[f32],
+        rows: usize,
+        cols: usize,
+        transform_type: TransformType,
+        rmse_threshold: Option<f32>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let threshold = rmse_threshold.unwrap_or(0.000001);
+        
+        // 1. 수학적 공식으로 초기 예측
+        let predicted_coeffs = Self::predict_coefficients_formula(rows);
+        
+        // 2. 예측값 근처에서 빠른 검증
+        let mut test_encoder = HybridEncoder::new(predicted_coeffs, transform_type);
+        let encoded_block = test_encoder.encode_block(data, rows, cols);
+        let decoded_data = encoded_block.decode();
+        
+        let mse: f32 = data.iter()
+            .zip(decoded_data.iter())
+            .map(|(orig, recon)| (orig - recon).powi(2))
+            .sum::<f32>() / (rows * cols) as f32;
+        let predicted_rmse = mse.sqrt();
+        
+        let final_coeffs = if predicted_rmse <= threshold {
+            // 예측이 정확하면 더 적은 계수 시도 (10% 감소)
+            let reduced_coeffs = (predicted_coeffs * 9 / 10).max(8);
+            let mut reduced_encoder = HybridEncoder::new(reduced_coeffs, transform_type);
+            let reduced_encoded = reduced_encoder.encode_block(data, rows, cols);
+            let reduced_decoded = reduced_encoded.decode();
+            
+            let reduced_mse: f32 = data.iter()
+                .zip(reduced_decoded.iter())
+                .map(|(orig, recon)| (orig - recon).powi(2))
+                .sum::<f32>() / (rows * cols) as f32;
+            
+            if reduced_mse.sqrt() <= threshold {
+                reduced_coeffs
+            } else {
+                predicted_coeffs
+            }
+        } else {
+            // 예측이 부족하면 이분탐색으로 정확한 값 찾기
+            Self::find_critical_coefficients(data, rows, cols, threshold, transform_type)?
+        };
+        
+        Ok(HybridEncoder::new(final_coeffs, transform_type))
+    }
+    
+    /// 품질 등급별 자동 생성 (RMSE 임계값 기반)
+    pub fn new_quality_grade(
+        data: &[f32],
+        rows: usize,
+        cols: usize,
+        grade: QualityGrade,
+        transform_type: TransformType,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let threshold = match grade {
+            QualityGrade::S => 0.000001,  // 거의 완벽
+            QualityGrade::A => 0.001,     // 매우 좋음
+            QualityGrade::B => 0.01,      // 좋음
+            QualityGrade::C => 0.1,       // 보통
+        };
+        
+        Self::new_auto_optimized(data, rows, cols, transform_type, Some(threshold))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum QualityGrade {
+    S,  // RMSE ≤ 0.000001
+    A,  // RMSE ≤ 0.001
+    B,  // RMSE ≤ 0.01
+    C,  // RMSE ≤ 0.1
 } 
