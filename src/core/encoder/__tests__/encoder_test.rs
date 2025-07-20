@@ -386,7 +386,7 @@ fn A_matrix_캐싱_벤치마크() {
     
     // 테스트 데이터 생성
     let matrix_size = 512;
-    let data = generate_complex_test_data(matrix_size, matrix_size);
+    let data = generate_test_data(matrix_size * matrix_size);
     
     // 첫 번째 실행 (캐시 없음)
     println!("\n📊 첫 번째 실행 (캐시 비어있음)");
