@@ -1,11 +1,11 @@
 use std::path::Path;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
-use RBE_LLM::packed_params::{HybridEncodedBlock, TransformType};
-use RBE_LLM::encoder::HybridEncoder;
+use rbe_llm::packed_params::{HybridEncodedBlock, TransformType};
+use rbe_llm::encoder::{HybridEncoder, AutoOptimizedEncoder};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{self, Read, Write};
 use serde_json::{Value, Map};
 
 /// numpy 파일 헤더 읽기
@@ -84,8 +84,8 @@ async fn main() -> Result<()> {
     
     // 압축 설정들
     let configs = vec![
-        ("extreme", 50, 32, TransformType::Dct),    // 극도 압축
-        ("high", 200, 32, TransformType::Dct),      // 고압축
+        ("extreme", 50, 32, TransformType::Dwt),    // 극도 압축 (DWT 고성능!)
+        ("high", 200, 32, TransformType::Dwt),      // 고압축 (DWT 고성능!)
         ("balanced", 500, 32, TransformType::Dwt),  // 균형
         ("quality", 1000, 64, TransformType::Dwt),  // 고품질
         ("lossless", 2000, 64, TransformType::Adaptive), // 거의 무손실
@@ -113,15 +113,21 @@ async fn main() -> Result<()> {
                 .progress_chars("██░"),
         );
         
-        // 인코더 생성
-        let mut encoder = HybridEncoder::new(coeffs, transform_type);
+        // 자동 최적화된 계수 예측 (블록 크기 기반)
+        let optimized_coeffs = AutoOptimizedEncoder::predict_coefficients_improved(block_size);
+        println!("📊 블록 크기 {}x{} → 최적화 계수: {} (기존: {})", 
+                 block_size, block_size, optimized_coeffs, coeffs);
+        
+        // 최적화된 인코더 생성  
+        let mut encoder = HybridEncoder::new(optimized_coeffs, transform_type);
         
         // 각 레이어 압축
-        for (layer_name, layer_info) in metadata.iter() {
+        for (layer_idx, (layer_name, layer_info)) in metadata.iter().enumerate() {
+            println!("\n🔄 [{}/{}] 레이어 처리 중: {}", layer_idx + 1, metadata.len(), layer_name);
             pb.set_message(format!("압축 중: {}", layer_name));
             
             if let Some(info_obj) = layer_info.as_object() {
-                if let (Some(shape_val), Some(file_val)) = 
+                if let (Some(_shape_val), Some(file_val)) = 
                     (info_obj.get("shape"), info_obj.get("file")) {
                     
                     let file_name = file_val.as_str().unwrap();
@@ -134,6 +140,11 @@ async fn main() -> Result<()> {
                             if shape.len() == 2 {
                                 let height = shape[0];
                                 let width = shape[1];
+                                let total_blocks = ((height + block_size - 1) / block_size) * 
+                                                  ((width + block_size - 1) / block_size);
+                                
+                                println!("  📐 매트릭스: {}x{}, 총 {}개 블록 ({})x{} 압축 시작", 
+                                        height, width, total_blocks, block_size, block_size);
                                 
                                 // 블록 단위로 압축
                                 let mut blocks = Vec::new();
@@ -156,6 +167,12 @@ async fn main() -> Result<()> {
                                             }
                                         }
                                         
+                                        // 10블록마다 진행 상황 출력
+                                        if block_count % 10 == 0 {
+                                            print!("    📦 블록 {}/{} 압축 중...\r", block_count + 1, total_blocks);
+                                            io::stdout().flush().unwrap();
+                                        }
+                                        
                                         // 블록 압축
                                         let compressed_block = encoder.encode_block(&block_data, block_h, block_w);
                                         
@@ -174,6 +191,9 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 
+                                // 블록 압축 완료 표시
+                                println!("    ✅ {} 블록 압축 완료!                    ", total_blocks);
+                                
                                 // 레이어 통계
                                 let layer_rmse = if block_count > 0 { 
                                     block_rmse_sum / block_count as f32 
@@ -186,10 +206,15 @@ async fn main() -> Result<()> {
                                 
                                 // 크기 계산
                                 let original_size = data.len() * 4; // f32 = 4 bytes
-                                let compressed_size = blocks.len() * (8 * 4 + coeffs * 8); // 대략적인 추정
+                                let compressed_size = blocks.len() * (8 * 4 + optimized_coeffs * 8); // 최적화된 계수 사용
+                                let compression_ratio = original_size as f32 / compressed_size as f32;
                                 
                                 total_original_size += original_size as u64;
                                 total_compressed_size += compressed_size as u64;
+                                
+                                println!("  📊 레이어 결과: RMSE {:.6}, 압축률 {:.1}x ({} KB → {} KB)", 
+                                        layer_rmse, compression_ratio,
+                                        original_size / 1024, compressed_size / 1024);
                                 
                                 compressed_weights.insert(layer_name.clone(), blocks);
                             }
