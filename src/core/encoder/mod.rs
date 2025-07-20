@@ -5,7 +5,7 @@ pub mod weight_mapper;
 
 // 테스트 모듈
 #[cfg(test)]
-mod __tests__;
+pub mod __tests__;
 
 // 재수출
 pub use encoder::{RBEEncoder, AutoOptimizedEncoder, QualityGrade, CompressionConfig, CompressionProfile};

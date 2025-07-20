@@ -9,6 +9,7 @@ use crate::packed_params::{
 use nalgebra::{DMatrix, DVector};
 use std::ops::AddAssign;
 
+#[derive(Debug)]
 pub struct EncodedLayer {
     pub blocks: Vec<Vec<HybridEncodedBlock>>,
     pub block_rows: usize,

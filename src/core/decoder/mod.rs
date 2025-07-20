@@ -11,3 +11,6 @@ pub use weight_generator::WeightGenerator;
 // CORDIC은 현재 외부에서 직접 사용되지 않으므로 삭제
 pub use fused_forward::FusedForwardPass;
 pub use block_decoder::decode_all_blocks; 
+
+#[cfg(test)]
+pub mod __tests__; 
