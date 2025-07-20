@@ -1,4 +1,3 @@
-use rbe_llm::packed_params::HybridEncodedBlock;
 use tokenizers::Tokenizer;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -9,12 +8,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// 하이브리드 방식으로 압축+원본을 조합한 정확한 GPT-2 모델
-struct HybridGPT2Model {
+/// 원본 GPT-2 모델 (numpy 파일 직접 로드)
+struct OriginalGPT2Model {
     tokenizer: Tokenizer,
     config: GPT2Config,
     
-    // 임베딩 레이어들 (압축 복원)
+    // 임베딩 레이어들
     token_embeddings: DMatrix<f32>,      // wte: 51200 x 768
     position_embeddings: DMatrix<f32>,   // wpe: 1024 x 768
     
@@ -38,29 +37,28 @@ struct GPT2Config {
 
 #[derive(Debug)]
 struct TransformerLayer {
-    // Pre-attention LayerNorm (원본에서 로드)
+    // Pre-attention LayerNorm
     ln_1_weight: Vec<f32>,
     ln_1_bias: Vec<f32>,
     
-    // Multi-head Self-Attention (압축 복원)
+    // Multi-head Self-Attention
     attn_c_attn: DMatrix<f32>,     // QKV combined: 768 x 2304
     attn_c_proj: DMatrix<f32>,     // Output projection: 768 x 768
     
-    // Pre-FFN LayerNorm (원본에서 로드)
+    // Pre-FFN LayerNorm
     ln_2_weight: Vec<f32>,
     ln_2_bias: Vec<f32>,
     
-    // Feed-Forward Network (압축 복원)
+    // Feed-Forward Network
     mlp_c_fc: DMatrix<f32>,        // Up projection: 768 x 3072
     mlp_c_proj: DMatrix<f32>,      // Down projection: 3072 x 768
 }
 
-impl HybridGPT2Model {
-    /// 하이브리드 방식: 압축된 파일 + 원본 numpy 파일 조합 로드
-    fn load_hybrid(compressed_path: &str, original_weights_dir: &str, tokenizer_path: &str) -> Result<Self> {
-        println!("🔄 하이브리드 GPT-2 로딩: 압축 복원 + 원본 보완");
-        println!("   - 압축 파일: {}", compressed_path);
-        println!("   - 원본 가중치: {}", original_weights_dir);
+impl OriginalGPT2Model {
+    /// 원본 numpy 파일들로부터 완전 무손실 로드
+    fn load_from_numpy(weights_dir: &str, tokenizer_path: &str) -> Result<Self> {
+        println!("🚀 원본 GPT-2 모델 로딩 (numpy 직접 로드)");
+        println!("   - 원본 가중치: {}", weights_dir);
         println!("   - 토크나이저: {}", tokenizer_path);
         
         // 1. 토크나이저 로드
@@ -77,65 +75,55 @@ impl HybridGPT2Model {
             n_positions: 1024,
         };
         
-        // 3. 압축된 데이터 로드
-        let compressed_content = fs::read_to_string(compressed_path)?;
-        let compressed_data: Value = serde_json::from_str(&compressed_content)?;
-        let compressed_layers = compressed_data.get("layers")
-            .ok_or_else(|| anyhow::anyhow!("압축 파일에서 layers 키를 찾을 수 없습니다"))?
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("layers가 객체가 아닙니다"))?;
-        
-        // 4. 원본 numpy 메타데이터 로드
-        let original_weights_path = Path::new(original_weights_dir);
-        let metadata_path = original_weights_path.join("metadata.json");
+        // 3. 원본 numpy 메타데이터 로드
+        let weights_path = Path::new(weights_dir);
+        let metadata_path = weights_path.join("metadata.json");
         let metadata_str = fs::read_to_string(&metadata_path)?;
         let metadata: HashMap<String, Value> = serde_json::from_str(&metadata_str)?;
         
-        println!("✅ 데이터 로드 완료:");
-        println!("   - 압축 레이어: {} 개", compressed_layers.len());
-        println!("   - 원본 메타데이터: {} 개", metadata.len());
+        println!("✅ 원본 메타데이터 로드 완료: {} 개", metadata.len());
         
-        // 5. 임베딩 레이어 복원 (압축된 것)
-        println!("🔗 임베딩 레이어 복원 중...");
-        let token_embeddings = Self::restore_compressed_matrix(
-            compressed_layers, "transformer.wte.weight", 51200, 768)?;
-        let position_embeddings = Self::restore_compressed_matrix(
-            compressed_layers, "transformer.wpe.weight", 1024, 768)?;
+        // 4. 임베딩 레이어 로드
+        println!("🔗 임베딩 레이어 로드 중...");
+        let token_embeddings = Self::load_original_matrix(
+            &metadata, weights_path, "transformer.wte.weight", 51200, 768)?;
+        let position_embeddings = Self::load_original_matrix(
+            &metadata, weights_path, "transformer.wpe.weight", 1024, 768)?;
         
-        println!("✅ 임베딩 복원 완료");
+        println!("✅ 임베딩 로드 완료");
         println!("   - 토큰 임베딩: {} x {}", token_embeddings.nrows(), token_embeddings.ncols());
         println!("   - 위치 임베딩: {} x {}", position_embeddings.nrows(), position_embeddings.ncols());
         
-        // 6. 트랜스포머 레이어들 하이브리드 로딩
-        println!("🔄 12개 트랜스포머 레이어 하이브리드 로딩 중...");
+        // 5. 트랜스포머 레이어들 로드
+        println!("🔄 12개 트랜스포머 레이어 로드 중...");
         let mut transformer_layers = Vec::new();
         
         for layer_idx in 0..config.n_layer {
-            println!("  📋 레이어 {} 하이브리드 로딩 중...", layer_idx);
+            println!("  📋 레이어 {} 로드 중...", layer_idx);
             
             let layer_prefix = format!("transformer.h.{}", layer_idx);
             
-            // LayerNorm 파라미터들 (원본에서 로드)
-            let ln_1_weight = Self::load_original_1d_vector(
-                &metadata, original_weights_path, &format!("{}.ln_1.weight", layer_prefix), 768)?;
-            let ln_1_bias = Self::load_original_1d_vector(
-                &metadata, original_weights_path, &format!("{}.ln_1.bias", layer_prefix), 768)?;
-            let ln_2_weight = Self::load_original_1d_vector(
-                &metadata, original_weights_path, &format!("{}.ln_2.weight", layer_prefix), 768)?;
-            let ln_2_bias = Self::load_original_1d_vector(
-                &metadata, original_weights_path, &format!("{}.ln_2.bias", layer_prefix), 768)?;
+            // LayerNorm 파라미터들
+            let ln_1_weight = Self::load_original_vector(
+                &metadata, weights_path, &format!("{}.ln_1.weight", layer_prefix), 768)?;
+            let ln_1_bias = Self::load_original_vector(
+                &metadata, weights_path, &format!("{}.ln_1.bias", layer_prefix), 768)?;
+            let ln_2_weight = Self::load_original_vector(
+                &metadata, weights_path, &format!("{}.ln_2.weight", layer_prefix), 768)?;
+            let ln_2_bias = Self::load_original_vector(
+                &metadata, weights_path, &format!("{}.ln_2.bias", layer_prefix), 768)?;
             
-            // Attention 가중치들 (압축 복원)
-            let attn_c_attn = Self::restore_compressed_matrix(
-                compressed_layers, &format!("{}.attn.c_attn.weight", layer_prefix), 768, 2304)?;
-            let attn_c_proj = Self::restore_compressed_matrix(
-                compressed_layers, &format!("{}.attn.c_proj.weight", layer_prefix), 768, 768)?;
+            // Attention 가중치들
+            let attn_c_attn = Self::load_original_matrix(
+                &metadata, weights_path, &format!("{}.attn.c_attn.weight", layer_prefix), 768, 2304)?;
+            let attn_c_proj = Self::load_original_matrix(
+                &metadata, weights_path, &format!("{}.attn.c_proj.weight", layer_prefix), 768, 768)?;
             
-            // FFN 가중치들 (압축 복원)
-            let mlp_c_fc = Self::restore_compressed_matrix(
-                compressed_layers, &format!("{}.mlp.c_fc.weight", layer_prefix), 768, 3072)?;
-            let mlp_c_proj = Self::restore_compressed_matrix(
-                compressed_layers, &format!("{}.mlp.c_proj.weight", layer_prefix), 3072, 768)?;
+            // FFN 가중치들
+            let mlp_c_fc = Self::load_original_matrix(
+                &metadata, weights_path, &format!("{}.mlp.c_fc.weight", layer_prefix), 768, 3072)?;
+            let mlp_c_proj = Self::load_original_matrix(
+                &metadata, weights_path, &format!("{}.mlp.c_proj.weight", layer_prefix), 3072, 768)?;
             
             transformer_layers.push(TransformerLayer {
                 ln_1_weight,
@@ -151,20 +139,19 @@ impl HybridGPT2Model {
             println!("  ✅ 레이어 {} 완료", layer_idx);
         }
         
-        // 7. 최종 레이어들 하이브리드 로딩
-        println!("🎯 최종 레이어들 하이브리드 로딩 중...");
-        let final_ln_weight = Self::load_original_1d_vector(
-            &metadata, original_weights_path, "transformer.ln_f.weight", 768)?;
-        let final_ln_bias = Self::load_original_1d_vector(
-            &metadata, original_weights_path, "transformer.ln_f.bias", 768)?;
-        let lm_head = Self::restore_compressed_matrix(
-            compressed_layers, "lm_head.weight", 768, 51200)?;
+        // 6. 최종 레이어들 로드
+        println!("🎯 최종 레이어들 로드 중...");
+        let final_ln_weight = Self::load_original_vector(
+            &metadata, weights_path, "transformer.ln_f.weight", 768)?;
+        let final_ln_bias = Self::load_original_vector(
+            &metadata, weights_path, "transformer.ln_f.bias", 768)?;
+        let lm_head = Self::load_original_matrix(
+            &metadata, weights_path, "lm_head.weight", 768, 51200)?;
         
-        println!("✅ 하이브리드 GPT-2 모델 로딩 완료!");
+        println!("✅ 원본 GPT-2 모델 로딩 완료!");
         println!("   - 트랜스포머 레이어: {} 개", transformer_layers.len());
         println!("   - LM Head: {} x {}", lm_head.nrows(), lm_head.ncols());
-        println!("   - 압축된 가중치: 정밀 복원 완료");
-        println!("   - 원본 파라미터: 무손실 로드 완료");
+        println!("   - 🎯 100% 원본 무손실");
         
         Ok(Self {
             tokenizer,
@@ -178,74 +165,57 @@ impl HybridGPT2Model {
         })
     }
     
-    /// 압축된 블록들로부터 정밀한 매트릭스 복원
-    fn restore_compressed_matrix(
-        compressed_layers: &serde_json::Map<String, Value>,
+    /// 원본 numpy 파일에서 매트릭스 로드 (완전 무손실)
+    fn load_original_matrix(
+        metadata: &HashMap<String, Value>,
+        weights_dir: &Path,
         layer_name: &str,
         expected_rows: usize,
         expected_cols: usize,
     ) -> Result<DMatrix<f32>> {
         
-        let blocks_data = compressed_layers.get(layer_name)
-            .ok_or_else(|| anyhow::anyhow!("압축 레이어 {}를 찾을 수 없습니다", layer_name))?;
-        
-        let compressed_blocks: Vec<HybridEncodedBlock> = 
-            serde_json::from_value(blocks_data.clone())?;
-        
-        if compressed_blocks.is_empty() {
-            return Err(anyhow::anyhow!("레이어 {}에 압축 블록이 없습니다", layer_name));
-        }
-        
-        // 정확한 블록 크기와 격자 구조 (압축할 때와 동일)
-        let block_size = 64; // compress_model.rs에서 사용한 크기
-        let blocks_per_row = (expected_rows + block_size - 1) / block_size;
-        let blocks_per_col = (expected_cols + block_size - 1) / block_size;
-        let expected_total_blocks = blocks_per_row * blocks_per_col;
-        
-        println!("    📐 정밀 복원: {}×{} ← {}×{} 격자 ({} 블록 → {} 예상)", 
-                expected_rows, expected_cols, blocks_per_row, blocks_per_col, 
-                compressed_blocks.len(), expected_total_blocks);
-        
-        let mut restored_matrix = DMatrix::zeros(expected_rows, expected_cols);
-        
-        // 각 블록을 정확한 위치에 배치 (압축 순서와 동일)
-        for (block_idx, block) in compressed_blocks.iter().enumerate() {
-            if block_idx >= expected_total_blocks {
-                println!("    ⚠️ 예상보다 많은 블록: {} > {}", block_idx, expected_total_blocks);
-                break;
-            }
-            
-            let block_row = block_idx / blocks_per_col;
-            let block_col = block_idx % blocks_per_col;
-            
-            // 블록 복원
-            let decoded_data = block.decode();
-            
-            // 정확한 위치에 데이터 배치 (패딩 고려)
-            let start_row = block_row * block_size;
-            let start_col = block_col * block_size;
-            let end_row = (start_row + block_size).min(expected_rows);
-            let end_col = (start_col + block_size).min(expected_cols);
-            
-            for i in 0..(end_row - start_row) {
-                for j in 0..(end_col - start_col) {
-                    let row = start_row + i;
-                    let col = start_col + j;
-                    let data_idx = i * block_size + j;
+        if let Some(layer_info) = metadata.get(layer_name) {
+            if let Some(info_obj) = layer_info.as_object() {
+                if let (Some(shape_val), Some(file_val)) = 
+                    (info_obj.get("shape"), info_obj.get("file")) {
                     
-                    if data_idx < decoded_data.len() {
-                        restored_matrix[(row, col)] = decoded_data[data_idx];
+                    let file_name = file_val.as_str().unwrap();
+                    let npy_path = weights_dir.join(file_name);
+                    
+                    // shape 정보 확인
+                    let shape = shape_val.as_array().unwrap();
+                    let actual_rows = shape[0].as_u64().unwrap() as usize;
+                    let actual_cols = shape[1].as_u64().unwrap() as usize;
+                    
+                    println!("    📁 로드: {} → {}×{}", layer_name, actual_rows, actual_cols);
+                    
+                    // numpy 파일 읽기
+                    let (data, _) = Self::read_npy_data(&npy_path)?;
+                    
+                    // 매트릭스 생성 (row-major)
+                    let mut matrix = DMatrix::from_row_slice(actual_rows, actual_cols, &data);
+                    
+                    // PyTorch 가중치는 전치된 형태로 저장됨 -> 필요 시 전치
+                    if actual_rows != expected_rows || actual_cols != expected_cols {
+                        if actual_rows == expected_cols && actual_cols == expected_rows {
+                            println!("    🔄 전치 적용: {}×{} → {}×{}", actual_rows, actual_cols, expected_rows, expected_cols);
+                            matrix = matrix.transpose();
+                        } else {
+                            println!("    ⚠️ 크기 불일치: 예상 {}×{}, 실제 {}×{}", 
+                                    expected_rows, expected_cols, actual_rows, actual_cols);
+                        }
                     }
+                    
+                    return Ok(matrix);
                 }
             }
         }
         
-        println!("    ✅ 복원 완료: {}×{}", restored_matrix.nrows(), restored_matrix.ncols());
-        Ok(restored_matrix)
+        Err(anyhow::anyhow!("레이어 {}를 찾을 수 없습니다", layer_name))
     }
     
-    /// 원본 numpy 파일에서 1D 벡터 로드 (무손실)
-    fn load_original_1d_vector(
+    /// 원본 numpy 파일에서 1D 벡터 로드 (완전 무손실)
+    fn load_original_vector(
         metadata: &HashMap<String, Value>,
         weights_dir: &Path,
         layer_name: &str,
@@ -258,51 +228,82 @@ impl HybridGPT2Model {
                     let file_name = file_val.as_str().unwrap();
                     let npy_path = weights_dir.join(file_name);
                     
-                    // numpy 파일 직접 읽기
-                    match Self::read_npy_1d(&npy_path, expected_size) {
-                        Ok(data) => {
-                            println!("    📁 원본 로드: {} ({} 개)", layer_name, data.len());
-                            return Ok(data);
-                        }
-                        Err(e) => {
-                            println!("    ❌ {} 읽기 실패: {}", layer_name, e);
-                        }
+                    println!("    📁 로드: {} ({} 개)", layer_name, expected_size);
+                    
+                    // numpy 파일 읽기
+                    let (data, _) = Self::read_npy_data(&npy_path)?;
+                    
+                    // 크기 검증
+                    if data.len() != expected_size {
+                        println!("    ⚠️ 크기 불일치: 예상 {}, 실제 {}", expected_size, data.len());
                     }
+                    
+                    return Ok(data);
                 }
             }
         }
         
-        // 기본값으로 폴백
-        println!("    ⚠️ {} 기본값 사용 (크기: {})", layer_name, expected_size);
-        let default_value = if layer_name.contains("weight") { 1.0 } else { 0.0 };
-        Ok(vec![default_value; expected_size])
+        Err(anyhow::anyhow!("레이어 {}를 찾을 수 없습니다", layer_name))
     }
     
-    /// numpy 파일에서 1D 벡터 읽기
-    fn read_npy_1d(path: &Path, expected_size: usize) -> Result<Vec<f32>> {
+    /// numpy 파일 읽기 (정확한 헤더 파싱)
+    fn read_npy_data(path: &Path) -> Result<(Vec<f32>, Vec<usize>)> {
         use std::fs::File;
-        use std::io::Read;
+        use std::io::{Read, Seek, SeekFrom};
         
         let mut file = File::open(path)?;
         
-        // 간단한 numpy 헤더 스킵 (실제로는 더 복잡하지만 우리 파일은 단순함)
-        let mut header_buf = vec![0u8; 128];
-        file.read_exact(&mut header_buf)?;
+        // numpy 헤더 읽기
+        let mut magic = [0u8; 6];
+        file.read_exact(&mut magic)?;
+        
+        if &magic != b"\x93NUMPY" {
+            return Err(anyhow::anyhow!("올바른 numpy 파일이 아닙니다"));
+        }
+        
+        // 버전 정보
+        let mut version = [0u8; 2];
+        file.read_exact(&mut version)?;
+        
+        // 헤더 길이
+        let mut header_len_bytes = [0u8; 2];
+        file.read_exact(&mut header_len_bytes)?;
+        let header_len = u16::from_le_bytes(header_len_bytes) as usize;
+        
+        // 헤더 내용 읽기
+        let mut header_bytes = vec![0u8; header_len];
+        file.read_exact(&mut header_bytes)?;
+        let header_str = String::from_utf8_lossy(&header_bytes);
+        
+        // shape와 dtype 파싱 (간단 버전)
+        let shape: Vec<usize> = if header_str.contains("(") {
+            header_str.split("(").nth(1).unwrap()
+                .split(")").next().unwrap()
+                .split(",")
+                .filter_map(|s| s.trim().parse().ok())
+                .collect()
+        } else {
+            vec![]
+        };
+        
+        let total_elements: usize = shape.iter().product();
         
         // float32 데이터 읽기
-        let mut data_buf = vec![0u8; expected_size * 4];
-        file.read_exact(&mut data_buf)?;
+        let mut data_bytes = vec![0u8; total_elements * 4];
+        file.read_exact(&mut data_bytes)?;
         
-        let data: Vec<f32> = data_buf.chunks_exact(4)
+        let data: Vec<f32> = data_bytes.chunks_exact(4)
             .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
         
-        Ok(data)
+        println!("    ✅ numpy 로드: {} 요소, shape: {:?}", data.len(), shape);
+        
+        Ok((data, shape))
     }
 
-    /// 정확한 GPT-2 Forward Pass
+    /// 원본 GPT-2 Forward Pass
     fn generate_text(&self, prompt: &str, max_tokens: usize) -> Result<String> {
-        println!("\n💭 하이브리드 GPT-2로 텍스트 생성: '{}'", prompt);
+        println!("\n💭 원본 GPT-2로 텍스트 생성: '{}'", prompt);
         
         // 1. 토크나이징
         let encoding = self.tokenizer.encode(prompt, false)
@@ -337,7 +338,7 @@ impl HybridGPT2Model {
         Ok(result)
     }
     
-    /// 정확한 GPT-2 Forward Pass
+    /// 원본 GPT-2 Forward Pass
     fn forward_pass(&self, token_ids: &[u32]) -> Result<u32> {
         let seq_len = token_ids.len().min(self.config.n_positions);
         let recent_tokens = &token_ids[token_ids.len().saturating_sub(seq_len)..];
@@ -577,52 +578,44 @@ impl HybridGPT2Model {
     
     /// 모델 정보 출력
     fn print_model_info(&self) {
-        println!("\n📊 하이브리드 GPT-2 모델 정보:");
+        println!("\n📊 원본 GPT-2 모델 정보:");
         println!("  🔤 어휘 크기: {}", self.config.vocab_size);
         println!("  🧠 은닉층 크기: {}", self.config.n_embd);
         println!("  📚 레이어 수: {}", self.config.n_layer);
         println!("  👥 어텐션 헤드: {}", self.config.n_head);
         println!("  📏 최대 위치: {}", self.config.n_positions);
-        println!("  ✅ 압축 복원 + 원본 조합 완료");
-        println!("  🎯 최대한 무손실 복원 달성");
+        println!("  ✅ 100% 원본 무손실 로드");
+        println!("  🎯 압축 없는 순수 모델");
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("🇰🇷 === 하이브리드 GPT-2: 최대한 무손실 복원 ===");
-    println!("압축된 가중치 정밀 복원 + 원본 파라미터 조합\n");
-    
-    let args: Vec<String> = std::env::args().collect();
-    let compressed_model_path = if args.len() > 1 {
-        &args[1]
-    } else {
-        "./models/compressed/kogpt2_fast.bin"
-    };
+    println!("🇰🇷 === 원본 GPT-2 모델 테스트 ===");
+    println!("압축 없는 순수 원본 모델 동작 확인\n");
     
     let original_weights_dir = "./models/skt-kogpt2-base-v2/weights";
     let tokenizer_path = "./models/skt-kogpt2-base-v2/tokenizer.json";
     
-    // 파일 크기 확인
-    let compressed_size = fs::metadata(compressed_model_path)
-        .map(|m| m.len() / 1024)
-        .unwrap_or(0);
-    let original_dir_exists = Path::new(original_weights_dir).exists();
+    // 원본 파일 존재 확인
+    let weights_dir_exists = Path::new(original_weights_dir).exists();
+    let tokenizer_exists = Path::new(tokenizer_path).exists();
     
-    println!("📋 하이브리드 로딩 설정:");
-    println!("   - 압축 파일: {} ({} KB)", compressed_model_path, compressed_size);
+    println!("📋 원본 모델 파일 확인:");
     println!("   - 원본 가중치: {} ({})", original_weights_dir, 
-             if original_dir_exists { "존재" } else { "❌ 없음" });
+             if weights_dir_exists { "존재" } else { "❌ 없음" });
+    println!("   - 토크나이저: {} ({})", tokenizer_path, 
+             if tokenizer_exists { "존재" } else { "❌ 없음" });
     
-    if !original_dir_exists {
-        return Err(anyhow::anyhow!("원본 가중치 디렉토리가 없습니다. extract_weights.py를 먼저 실행하세요."));
+    if !weights_dir_exists || !tokenizer_exists {
+        return Err(anyhow::anyhow!("원본 모델 파일이 없습니다. extract_weights.py를 먼저 실행하세요."));
     }
     
-    // 하이브리드 GPT-2 모델 로드
-    let model = HybridGPT2Model::load_hybrid(compressed_model_path, original_weights_dir, tokenizer_path)?;
+    // 원본 GPT-2 모델 로드
+    let model = OriginalGPT2Model::load_from_numpy(original_weights_dir, tokenizer_path)?;
     model.print_model_info();
     
-    println!("\n💬 하이브리드 GPT-2로 한국어 대화 시작! (종료: 'exit')");
+    println!("\n💬 원본 GPT-2로 한국어 대화 시작! (종료: 'exit')");
 
     let stdin = io::stdin();
     loop {
@@ -634,7 +627,7 @@ async fn main() -> Result<()> {
         let input = input.trim();
         
         if input == "exit" || input == "quit" || input == "종료" {
-            println!("👋 하이브리드 GPT-2 엔진을 종료합니다.");
+            println!("👋 원본 GPT-2 엔진을 종료합니다.");
             break;
         }
         
@@ -655,13 +648,13 @@ async fn main() -> Result<()> {
                 };
                 
                 if !generated_part.is_empty() {
-                    println!("🎯 하이브리드 GPT-2 답변: {}", generated_part);
+                    println!("🎯 원본 GPT-2 답변: {}", generated_part);
                 } else {
-                    println!("🎯 하이브리드 GPT-2 답변: {}", response);
+                    println!("🎯 원본 GPT-2 답변: {}", response);
                 }
                 
                 println!("⏱️ 생성 시간: {:.2}초", duration.as_secs_f32());
-                println!("✨ 압축 복원 + 원본 조합으로 최대한 무손실");
+                println!("✨ 100% 원본 모델, 압축 없음");
             }
             Err(e) => {
                 println!("❌ 오류: {}", e);
@@ -670,4 +663,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
+} 

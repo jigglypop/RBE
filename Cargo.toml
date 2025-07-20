@@ -86,6 +86,9 @@ numpy = { version = "0.21", optional = true }
 
 # 토크나이저
 tokenizers = "0.21"
+candle-core = "0.9.1"
+candle-nn = "0.9.1"
+candle-transformers = "0.9.1"
 
 [dependencies.tch]
 version = "0.16"
