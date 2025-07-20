@@ -1,16 +1,16 @@
-pub mod hybrid_encoder;
 pub mod grid_compressor;
 pub mod analysis_results;
-pub mod poincare_encoder;
 pub mod encoder;
+pub mod weight_mapper;
 
 // 테스트 모듈
 #[cfg(test)]
 mod __tests__;
 
 // 재수출
-pub use hybrid_encoder::HybridEncoder;
-pub use encoder::{AutoOptimizedEncoder, QualityGrade};
+pub use encoder::{RBEEncoder, AutoOptimizedEncoder, QualityGrade, CompressionConfig, CompressionProfile};
+// HybridEncoder는 RBEEncoder의 별칭으로 호환성 유지
+pub use encoder::RBEEncoder as HybridEncoder;
 pub use grid_compressor::GridCompressedMatrix;
 pub use analysis_results::{FrequencyAnalysisResult, FrequencyType, ContinuousOptimizationResult, ResidualCompressionResult};
-pub use poincare_encoder::PoincareEncoder; 
+pub use weight_mapper::{WeightInfo, ModelLayout, WeightMapper}; 

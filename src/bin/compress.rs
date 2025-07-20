@@ -1,4 +1,4 @@
-use rbe_llm::encoder::HybridEncoder;
+use rbe_llm::encoder::RBEEncoder;
 use rbe_llm::sllm::model_downloader::ModelDownloader;
 use rbe_llm::packed_params::{HybridEncodedBlock, TransformType};
 use std::fs;
@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     
     // 압축 시작
     let start = Instant::now();
-    let mut encoder = HybridEncoder::new(coefficients, TransformType::Dwt);
+    let mut encoder = RBEEncoder::new(coefficients, TransformType::Dwt);
     
     // 블록 단위로 압축
     let blocks_per_dim = (matrix_size + block_size - 1) / block_size;

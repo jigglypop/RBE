@@ -1,6 +1,6 @@
-use crate::packed_params::{HybridEncodedBlock, TransformType, ResidualCoefficient};
-use crate::encoder::HybridEncoder;
-use crate::decoder::optimized_decoder::{get_cache_stats, clear_caches, decode_blocks_parallel, decode_blocks_chunked_parallel, simd_add_vectors};
+use crate::core::packed_params::{TransformType, HybridEncodedBlock};
+use crate::core::encoder::RBEEncoder;
+use crate::core::decoder::optimized_decoder::OptimizedDecoder;
 use std::time::Instant;
 
 fn create_test_block(rows: usize, cols: usize, coeffs: usize, transform_type: TransformType) -> HybridEncodedBlock {
@@ -15,7 +15,7 @@ fn create_test_block(rows: usize, cols: usize, coeffs: usize, transform_type: Tr
     }
     
     // 인코딩해서 테스트 블록 생성
-    let mut encoder = HybridEncoder::new(coeffs, transform_type);
+    let mut encoder = RBEEncoder::new(coeffs, transform_type);
     encoder.encode_block(&test_data, rows, cols)
 }
 
@@ -77,7 +77,7 @@ fn 성능_비교_테스트() {
     }
     
     // 캐시 통계 확인
-    let (a_cache_size, dct_cache_size) = get_cache_stats();
+    let (a_cache_size, dct_cache_size) = OptimizedDecoder::get_cache_stats();
     println!("\n📈 캐시 통계:");
     println!("  🔸 A 매트릭스 캐시: {} 개", a_cache_size);
     println!("  🔸 DCT 플래너 캐시: {} 개", dct_cache_size);
@@ -90,7 +90,7 @@ fn 캐시_효과_테스트() {
     println!("🧪 캐시 효과 테스트");
     
     // 캐시 클리어
-    clear_caches();
+    OptimizedDecoder::clear_caches();
     
     let rows = 128;
     let cols = 128; 
@@ -123,7 +123,7 @@ fn 캐시_효과_테스트() {
     assert!(cache_speedup > 1.5, "캐시 효과가 부족: {:.2}x", cache_speedup);
     
     // 캐시 통계 확인
-    let (a_cache_size, dct_cache_size) = get_cache_stats();
+    let (a_cache_size, dct_cache_size) = OptimizedDecoder::get_cache_stats();
     assert_eq!(a_cache_size, 1, "A 매트릭스 캐시 크기가 예상과 다름");
     assert_eq!(dct_cache_size, 1, "DCT 플래너 캐시 크기가 예상과 다름");
     
@@ -163,7 +163,7 @@ fn 다양한_블록_크기_테스트() {
     }
     
     // 최종 캐시 통계
-    let (a_cache_size, dct_cache_size) = get_cache_stats();
+    let (a_cache_size, dct_cache_size) = OptimizedDecoder::get_cache_stats();
     println!("\n📈 최종 캐시 통계:");
     println!("  🔸 A 매트릭스 캐시: {} 개", a_cache_size);
     println!("  🔸 DCT 플래너 캐시: {} 개", dct_cache_size);
@@ -197,12 +197,12 @@ fn 병렬_블록_처리_테스트() {
     
     // 병렬 처리 성능 (기본)
     let start = Instant::now();
-    let parallel_results = decode_blocks_parallel(&blocks);
+    let parallel_results = OptimizedDecoder::decode_blocks_parallel(&blocks);
     let parallel_time = start.elapsed().as_millis();
     
     // 병렬 처리 성능 (청크)
     let start = Instant::now();
-    let chunked_results = decode_blocks_chunked_parallel(&blocks, 8);
+    let chunked_results = OptimizedDecoder::decode_blocks_chunked_parallel(&blocks, 8);
     let chunked_time = start.elapsed().as_millis();
     
     // 결과 검증
@@ -251,7 +251,7 @@ fn simd_벡터_덧셈_테스트() {
         
         // SIMD 덧셈
         let start = Instant::now();
-        let simd_result = simd_add_vectors(&a, &b);
+        let simd_result = OptimizedDecoder::simd_add_vectors(&a, &b);
         let simd_time = start.elapsed().as_micros();
         
         // 일반 덧셈
@@ -366,7 +366,7 @@ fn dwt_압축_정확도_상세_분석_테스트() {
     
     // 순차 vs 병렬 처리 정확도 비교
     let sequential_results: Vec<_> = blocks.iter().map(|b| b.decode_optimized()).collect();
-    let parallel_results = decode_blocks_parallel(&blocks);
+    let parallel_results = OptimizedDecoder::decode_blocks_parallel(&blocks);
     
     let mut cumulative_error = 0.0f32;
     for (seq, par) in sequential_results.iter().zip(parallel_results.iter()) {
@@ -475,7 +475,7 @@ fn create_random_weights(rows: usize, cols: usize) -> Vec<f32> {
 }
 
 fn create_test_block_from_data(data: &[f32], rows: usize, cols: usize, coeffs: usize, transform_type: TransformType) -> HybridEncodedBlock {
-    let mut encoder = HybridEncoder::new(coeffs, transform_type);
+    let mut encoder = RBEEncoder::new(coeffs, transform_type);
     encoder.encode_block(data, rows, cols)
 }
 
@@ -590,7 +590,7 @@ fn 전체_최적화_종합_성능_테스트() {
     println!("  🔸 64x64: 20개, 128x128: 30개, 256x256: 10개");
     
     // === 1. 기존 디코더 (순차) ===
-    clear_caches(); // 캐시 클리어
+    OptimizedDecoder::clear_caches(); // 캐시 클리어
     println!("\n🔹 기존 디코더 (순차 처리)");
     let start = std::time::Instant::now();
     
@@ -602,7 +602,7 @@ fn 전체_최적화_종합_성능_테스트() {
     println!("  ⏱️  시간: {:.3}초", original_time.as_secs_f32());
     
     // === 2. 최적화 디코더 (순차 + 캐싱 + SIMD) ===
-    clear_caches(); // 캐시 클리어
+    OptimizedDecoder::clear_caches(); // 캐시 클리어
     println!("\n🔹 최적화 디코더 (순차 + 캐싱 + SIMD)");
     let start = std::time::Instant::now();
     
@@ -614,21 +614,21 @@ fn 전체_최적화_종합_성능_테스트() {
     println!("  ⏱️  시간: {:.3}초", optimized_sequential_time.as_secs_f32());
     
     // === 3. 최적화 디코더 (병렬 + 캐싱 + SIMD) ===
-    clear_caches(); // 캐시 클리어  
+    OptimizedDecoder::clear_caches(); // 캐시 클리어  
     println!("\n🔹 최적화 디코더 (병렬 + 캐싱 + SIMD)");
     let start = std::time::Instant::now();
     
-    let optimized_parallel_results = decode_blocks_parallel(&blocks);
+    let optimized_parallel_results = OptimizedDecoder::decode_blocks_parallel(&blocks);
     
     let optimized_parallel_time = start.elapsed();
     println!("  ⏱️  시간: {:.3}초", optimized_parallel_time.as_secs_f32());
     
     // === 4. 최적화 디코더 (청크 병렬 + 캐싱 + SIMD) ===
-    clear_caches(); // 캐시 클리어
+    OptimizedDecoder::clear_caches(); // 캐시 클리어
     println!("\n🔹 최적화 디코더 (청크 병렬 + 캐싱 + SIMD)");
     let start = std::time::Instant::now();
     
-    let optimized_chunked_results = decode_blocks_chunked_parallel(&blocks, 16);
+    let optimized_chunked_results = OptimizedDecoder::decode_blocks_chunked_parallel(&blocks, 16);
     
     let optimized_chunked_time = start.elapsed();
     println!("  ⏱️  시간: {:.3}초", optimized_chunked_time.as_secs_f32());
@@ -692,7 +692,7 @@ fn 전체_최적화_종합_성능_테스트() {
     assert!(parallel_speedup > 2.0, "병렬 최적화 성능 부족: {:.2}x", parallel_speedup);
     
     // 캐시 통계 출력
-    let (a_cache_size, _) = get_cache_stats();
+    let (a_cache_size, _) = OptimizedDecoder::get_cache_stats();
     println!("  📊 A매트릭스 캐시: {} 개 크기 저장됨", a_cache_size);
     
     println!("\n✅ 전체 최적화 종합 테스트 완료!");

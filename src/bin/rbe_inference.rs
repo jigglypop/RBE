@@ -1,588 +1,534 @@
-use rbe_llm::packed_params::HybridEncodedBlock;
-use rbe_llm::encoder::HybridEncoder;
-use rbe_llm::decoder::FusedForwardPass;
-// use rbe_llm::math::poincare::PoincareOperations;
-use std::fs;
-use std::io::{self, Write};
 use anyhow::Result;
-use nalgebra::{DMatrix, DVector};
-use std::time::Instant;
+use clap::Parser;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use candle_core::{Device, Tensor, DType, IndexOp};
+use candle_nn::{Module, LayerNorm, Linear, Dropout, Embedding};
 use tokenizers::Tokenizer;
+use rand::thread_rng;
+use rand::distributions::{Distribution, WeightedIndex};
 
-/// 실제 트랜스포머 레이어 구조체
-struct TransformerLayer {
-    /// Self-Attention 가중치 (압축됨)
-    attn_weights: Vec<HybridEncodedBlock>,
-    attn_shape: (usize, usize),
+use rbe_llm::core::decoder::model_loader::RBEModelLoader;
+
+/// GPT-2 추론을 위한 CLI 인자
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// RBE 압축 모델 디렉토리 경로
+    #[arg(short, long, default_value = "models/rbe_compressed")]
+    model_dir: PathBuf,
     
-    /// Feed-Forward 가중치 (압축됨)  
-    mlp_weights: Vec<HybridEncodedBlock>,
-    mlp_shape: (usize, usize),
+    /// 토크나이저 파일 경로  
+    #[arg(short, long, default_value = "models/tokenizer.json")]
+    tokenizer_path: PathBuf,
     
-    /// Layer Norm 파라미터
-    ln1_weight: Vec<f32>,
-    ln1_bias: Vec<f32>,
-    ln2_weight: Vec<f32>,
-    ln2_bias: Vec<f32>,
+    /// 생성할 텍스트 프롬프트
+    #[arg(short, long, default_value = "Once upon a time")]
+    prompt: String,
+    
+    /// 생성할 최대 토큰 수
+    #[arg(short = 'n', long, default_value = "100")]
+    max_tokens: usize,
+    
+    /// 온도 (0.0 = deterministic, 1.0 = creative)
+    #[arg(short = 'T', long, default_value = "0.8")]
+    temperature: f32,
+    
+    /// Top-p (nucleus) 샘플링
+    #[arg(long, default_value = "0.9")]
+    top_p: f32,
+    
+    /// 반복 페널티
+    #[arg(long, default_value = "1.0")]
+    repetition_penalty: f32,
+    
+    /// Random seed (재현 가능한 생성)
+    #[arg(long)]
+    seed: Option<u64>,
 }
 
-/// RBE 트랜스포머 모델
-struct RBETransformer {
-    /// 토큰 임베딩
-    token_embeddings: DMatrix<f32>,
-    /// 위치 임베딩
-    position_embeddings: DMatrix<f32>,
-    /// 트랜스포머 레이어들
-    layers: Vec<TransformerLayer>,
-    /// 최종 레이어 노름
-    ln_f_weight: Vec<f32>,
-    ln_f_bias: Vec<f32>,
-    /// 언어 모델 헤드
-    lm_head: DMatrix<f32>,
-    /// 설정
-    config: ModelConfig,
-    /// 융합 순전파 엔진
-    fused_forward: FusedForwardPass,
-    // /// 푸앵카레 연산
-    // poincare_ops: PoincareOperations,
+/// RBE 압축된 가중치를 Tensor로 로드
+fn load_rbe_weight_as_tensor(
+    loader: &mut RBEModelLoader, 
+    name: &str,
+    device: &Device
+) -> Result<Tensor> {
+    // 가중치 정보 먼저 가져오기
+    let weight_info = loader.get_weight_info(name)?;
+    let shape = weight_info.original_shape.clone();
+    
+    // 로드 및 디코딩
+    loader.load(name)?;
+    let decoded = loader.decode_weight(name)?;
+    
+    // Box::leak를 사용하여 'static lifetime 생성
+    let leaked_data: &'static [f32] = Box::leak(decoded.into_boxed_slice());
+    
+    // Tensor 생성
+    Ok(Tensor::from_slice(leaked_data, shape.as_slice(), device)?)
 }
 
-#[derive(Debug)]
-struct ModelConfig {
+/// RBE VarBuilder - candle의 VarBuilder 인터페이스 구현
+struct RBEVarBuilder {
+    loader: std::cell::RefCell<RBEModelLoader>,
+    device: Device,
+}
+
+impl RBEVarBuilder {
+    fn new(model_dir: &Path) -> Result<Self> {
+        let loader = RBEModelLoader::new(model_dir)?;
+        let device = Device::cuda_if_available(0)?;
+        
+        Ok(Self { 
+            loader: std::cell::RefCell::new(loader), 
+            device 
+        })
+    }
+    
+    fn get_tensor(&self, name: &str) -> Result<Tensor> {
+        load_rbe_weight_as_tensor(&mut *self.loader.borrow_mut(), name, &self.device)
+    }
+}
+
+/// GPT-2 설정
+#[derive(Debug, Clone)]
+struct Config {
     vocab_size: usize,
-    hidden_size: usize,
-    num_layers: usize,
-    num_heads: usize,
-    max_length: usize,
+    n_positions: usize,
+    n_embd: usize,
+    n_layer: usize,
+    n_head: usize,
+    n_inner: Option<usize>,
+    activation_function: String,
+    resid_pdrop: f64,
+    embd_pdrop: f64,
+    attn_pdrop: f64,
+    layer_norm_epsilon: f64,
 }
 
-impl RBETransformer {
-    /// 압축된 모델 로드
-    fn load_from_compressed(
-        compressed_dir: &str,
-        weights_dir: &str,
-    ) -> Result<Self> {
-        println!("🔄 RBE 트랜스포머 로딩 중...");
-        
-        // 1. 설정 로드
-        let config = Self::load_config(weights_dir)?;
-        println!("📋 모델 설정: {:?}", config);
-        
-        // 2. 임베딩 로드 (압축되지 않은 상태)
-        let token_embeddings = Self::load_embeddings(weights_dir, "transformer_wte_weight.npy")?;
-        let position_embeddings = Self::load_embeddings(weights_dir, "transformer_wpe_weight.npy")?;
-        
-        println!("✅ 임베딩 로드 완료: {}×{}", token_embeddings.nrows(), token_embeddings.ncols());
-        
-        // 3. 압축된 레이어들 로드
-        let mut layers = Vec::new();
-        for layer_idx in 0..config.num_layers {
-            let layer = Self::load_compressed_layer(compressed_dir, weights_dir, layer_idx)?;
-            layers.push(layer);
-            println!("✅ 레이어 {} 로드 완료", layer_idx);
+impl Default for Config {
+    fn default() -> Self {
+        // GPT-2 117M 기본 설정
+        Self {
+            vocab_size: 50257,
+            n_positions: 1024,
+            n_embd: 768,
+            n_layer: 12,
+            n_head: 12,
+            n_inner: None,
+            activation_function: "gelu".to_string(),
+            resid_pdrop: 0.1,
+            embd_pdrop: 0.1,
+            attn_pdrop: 0.1,
+            layer_norm_epsilon: 1e-5,
         }
+    }
+}
+
+/// Multi-head Self Attention
+struct MultiHeadSelfAttention {
+    c_attn: Linear,
+    c_proj: Linear,
+    attn_dropout: Dropout,
+    resid_dropout: Dropout,
+    n_head: usize,
+    n_embd: usize,
+}
+
+impl MultiHeadSelfAttention {
+    fn new(config: &Config, vb: &RBEVarBuilder, layer_idx: usize) -> Result<Self> {
+        let n_embd = config.n_embd;
+        let n_head = config.n_head;
         
-        // 4. 최종 레이어 노름 로드
-        let ln_f_weight = Self::load_numpy_1d(weights_dir, "transformer_ln_f_weight.npy")?;
-        let ln_f_bias = Self::load_numpy_1d(weights_dir, "transformer_ln_f_bias.npy")?;
+        let c_attn_weight = vb.get_tensor(&format!("h.{}.attn.c_attn.weight", layer_idx))?;
+        let c_attn_bias = vb.get_tensor(&format!("h.{}.attn.c_attn.bias", layer_idx))?;
+        let c_attn = Linear::new(c_attn_weight, Some(c_attn_bias));
         
-        // 5. LM 헤드 로드
-        let lm_head = Self::load_embeddings(weights_dir, "lm_head_weight.npy")?;
-        
-        // 6. 엔진 초기화
-        let fused_forward = FusedForwardPass::new();
-        // let poincare_ops = PoincareOperations::new();
-        
-        println!("🚀 RBE 트랜스포머 로딩 완료!");
+        let c_proj_weight = vb.get_tensor(&format!("h.{}.attn.c_proj.weight", layer_idx))?;
+        let c_proj_bias = vb.get_tensor(&format!("h.{}.attn.c_proj.bias", layer_idx))?;
+        let c_proj = Linear::new(c_proj_weight, Some(c_proj_bias));
         
         Ok(Self {
-            token_embeddings,
-            position_embeddings,
-            layers,
-            ln_f_weight,
-            ln_f_bias,
-            lm_head,
-            config,
-            fused_forward,
-            // poincare_ops,
+            c_attn,
+            c_proj,
+            attn_dropout: Dropout::new(config.attn_pdrop as f32),
+            resid_dropout: Dropout::new(config.resid_pdrop as f32),
+            n_head,
+            n_embd,
         })
     }
     
-    /// 설정 로드
-    fn load_config(weights_dir: &str) -> Result<ModelConfig> {
-        let metadata_path = format!("{}/metadata.json", weights_dir);
-        let metadata_str = fs::read_to_string(metadata_path)?;
-        let metadata: serde_json::Value = serde_json::from_str(&metadata_str)?;
+    fn forward(&self, x: &Tensor, layer_past: Option<&(Tensor, Tensor)>) -> Result<(Tensor, (Tensor, Tensor))> {
+        let (batch_size, seq_len, _) = x.dims3()?;
         
-        // metadata에서 설정 추출 (기본값 사용)
-        Ok(ModelConfig {
-            vocab_size: 51200, // KoGPT-2
-            hidden_size: 768,
-            num_layers: 12,
-            num_heads: 12,
-            max_length: 1024,
-        })
-    }
-    
-    /// 압축된 레이어 로드
-    fn load_compressed_layer(
-        compressed_dir: &str,
-        weights_dir: &str,
-        layer_idx: usize,
-    ) -> Result<TransformerLayer> {
-        // Attention 가중치 (압축됨)
-        let attn_file = format!("{}/layer_{}_attn.rbe", compressed_dir, layer_idx);
-        let (attn_weights, attn_shape) = if std::path::Path::new(&attn_file).exists() {
-            Self::load_compressed_weights(&attn_file)?
+        // QKV projection
+        let qkv = self.c_attn.forward(x)?;
+        let qkv = qkv.reshape((batch_size, seq_len, 3, self.n_head, self.n_embd / self.n_head))?;
+        
+        let q = qkv.i((.., .., 0, .., ..))?.transpose(1, 2)?;
+        let k = qkv.i((.., .., 1, .., ..))?.transpose(1, 2)?;
+        let v = qkv.i((.., .., 2, .., ..))?.transpose(1, 2)?;
+        
+        // Past key-values 처리
+        let (k, v) = if let Some((past_k, past_v)) = layer_past {
+            let k = Tensor::cat(&[past_k, &k], 2)?;
+            let v = Tensor::cat(&[past_v, &v], 2)?;
+            (k, v)
         } else {
-            // 대체: 실제 numpy 파일에서 압축
-            let attn_numpy = format!("{}/transformer_h_{}_attn_c_attn_weight.npy", weights_dir, layer_idx);
-            Self::compress_on_the_fly(&attn_numpy)?
+            (k, v)
         };
         
-        // MLP 가중치 (압축됨)
-        let mlp_file = format!("{}/layer_{}_mlp.rbe", compressed_dir, layer_idx);
-        let (mlp_weights, mlp_shape) = if std::path::Path::new(&mlp_file).exists() {
-            Self::load_compressed_weights(&mlp_file)?
-        } else {
-            // 대체: 실제 numpy 파일에서 압축
-            let mlp_numpy = format!("{}/transformer_h_{}_mlp_c_fc_weight.npy", weights_dir, layer_idx);
-            Self::compress_on_the_fly(&mlp_numpy)?
-        };
+        let present = (k.clone(), v.clone());
         
-        // Layer Norm 파라미터들 (압축되지 않음)
-        let ln1_weight = Self::load_numpy_1d(weights_dir, &format!("transformer_h_{}_ln_1_weight.npy", layer_idx))?;
-        let ln1_bias = Self::load_numpy_1d(weights_dir, &format!("transformer_h_{}_ln_1_bias.npy", layer_idx))?;
-        let ln2_weight = Self::load_numpy_1d(weights_dir, &format!("transformer_h_{}_ln_2_weight.npy", layer_idx))?;
-        let ln2_bias = Self::load_numpy_1d(weights_dir, &format!("transformer_h_{}_ln_2_bias.npy", layer_idx))?;
+        // Attention scores
+        let head_dim = self.n_embd / self.n_head;
+        let mut scores = q.matmul(&k.transpose(2, 3)?)? / (head_dim as f64).sqrt();
         
-        Ok(TransformerLayer {
-            attn_weights,
-            attn_shape,
-            mlp_weights,
-            mlp_shape,
-            ln1_weight,
-            ln1_bias,
-            ln2_weight,
-            ln2_bias,
+        // Causal mask
+        let seq_len_k = k.dims()[2];
+        if seq_len > 1 {
+            let mask = Tensor::triu2(seq_len, DType::F32, &scores.device())?
+                .broadcast_as(scores.shape())?
+                .to_dtype(scores.dtype())?;
+            scores = scores.broadcast_sub(&(&mask * 1e10)?)?;
+        }
+        
+        // Softmax
+        let probs = candle_nn::ops::softmax(&scores, 3)?;
+        let probs = self.attn_dropout.forward(&probs, false)?;
+        
+        // Attention output
+        let attn_output = probs.matmul(&v)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((batch_size, seq_len, self.n_embd))?;
+        
+        let attn_output = self.c_proj.forward(&attn_output)?;
+        let attn_output = self.resid_dropout.forward(&attn_output, false)?;
+        
+        Ok((attn_output, present))
+    }
+}
+
+/// Feed-forward MLP
+struct MLP {
+    c_fc: Linear,
+    c_proj: Linear,
+    dropout: Dropout,
+}
+
+impl MLP {
+    fn new(config: &Config, vb: &RBEVarBuilder, layer_idx: usize) -> Result<Self> {
+        let n_inner = config.n_inner.unwrap_or(4 * config.n_embd);
+        
+        let c_fc_weight = vb.get_tensor(&format!("h.{}.mlp.c_fc.weight", layer_idx))?;
+        let c_fc_bias = vb.get_tensor(&format!("h.{}.mlp.c_fc.bias", layer_idx))?;
+        let c_fc = Linear::new(c_fc_weight, Some(c_fc_bias));
+        
+        let c_proj_weight = vb.get_tensor(&format!("h.{}.mlp.c_proj.weight", layer_idx))?;
+        let c_proj_bias = vb.get_tensor(&format!("h.{}.mlp.c_proj.bias", layer_idx))?;
+        let c_proj = Linear::new(c_proj_weight, Some(c_proj_bias));
+        
+        Ok(Self {
+            c_fc,
+            c_proj,
+            dropout: Dropout::new(config.resid_pdrop as f32),
         })
     }
     
-    /// 즉석 압축 (기존 numpy 파일을)
-    fn compress_on_the_fly(numpy_path: &str) -> Result<(Vec<HybridEncodedBlock>, (usize, usize))> {
-        if !std::path::Path::new(numpy_path).exists() {
-            return Ok((Vec::new(), (0, 0)));
-        }
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let h = self.c_fc.forward(x)?;
+        let h = h.gelu()?;
+        let h = self.c_proj.forward(&h)?;
+        Ok(self.dropout.forward(&h, false)?)
+    }
+}
+
+/// GPT-2 Block (Transformer layer)
+struct Block {
+    ln_1: LayerNorm,
+    attn: MultiHeadSelfAttention,
+    ln_2: LayerNorm,
+    mlp: MLP,
+}
+
+impl Block {
+    fn new(config: &Config, vb: &RBEVarBuilder, layer_idx: usize) -> Result<Self> {
+        let n_embd = config.n_embd;
+        let eps = config.layer_norm_epsilon;
         
-        let (data, shape) = Self::load_numpy_2d(numpy_path)?;
-        if shape.len() != 2 {
-            return Ok((Vec::new(), (0, 0)));
-        }
+        let ln_1_weight = vb.get_tensor(&format!("h.{}.ln_1.weight", layer_idx))?;
+        let ln_1_bias = vb.get_tensor(&format!("h.{}.ln_1.bias", layer_idx))?;
+        let ln_1 = LayerNorm::new(ln_1_weight, ln_1_bias, eps);
         
-        let rows = shape[0];
-        let cols = shape[1];
-        let block_size = 32; // 작은 블록으로 압축
+        let ln_2_weight = vb.get_tensor(&format!("h.{}.ln_2.weight", layer_idx))?;
+        let ln_2_bias = vb.get_tensor(&format!("h.{}.ln_2.bias", layer_idx))?;
+        let ln_2 = LayerNorm::new(ln_2_weight, ln_2_bias, eps);
         
-        let mut compressed_blocks = Vec::new();
-        let mut encoder = HybridEncoder::new(100, rbe_llm::packed_params::TransformType::Dwt);
-        
-        // 블록 단위로 압축
-        for block_row in (0..rows).step_by(block_size) {
-            for block_col in (0..cols).step_by(block_size) {
-                let end_row = (block_row + block_size).min(rows);
-                let end_col = (block_col + block_size).min(cols);
-                let block_height = end_row - block_row;
-                let block_width = end_col - block_col;
-                
-                // 블록 데이터 추출
-                let mut block_data = Vec::with_capacity(block_height * block_width);
-                for r in block_row..end_row {
-                    for c in block_col..end_col {
-                        block_data.push(data[r * cols + c]);
-                    }
-                }
-                
-                // 압축
-                let compressed_block = encoder.encode_block(&block_data, block_height, block_width);
-                compressed_blocks.push(compressed_block);
-            }
-        }
-        
-        Ok((compressed_blocks, (rows, cols)))
+        Ok(Self {
+            ln_1,
+            attn: MultiHeadSelfAttention::new(config, vb, layer_idx)?,
+            ln_2,
+            mlp: MLP::new(config, vb, layer_idx)?,
+        })
     }
     
-    /// 텍스트 생성
-    fn generate_text(&self, prompt: &str, max_tokens: usize, temperature: f32) -> Result<String> {
-        println!("💭 텍스트 생성: '{}'", prompt);
+    fn forward(&self, x: &Tensor, layer_past: Option<&(Tensor, Tensor)>) -> Result<(Tensor, (Tensor, Tensor))> {
+        let residual = x;
+        let x = self.ln_1.forward(x)?;
+        let (attn_output, present) = self.attn.forward(&x, layer_past)?;
+        let x = (residual + attn_output)?;
         
-        // 1. 토크나이징
-        let tokenizer = Tokenizer::from_file("./models/skt-kogpt2-base-v2/tokenizer.json")?;
-        let encoding = tokenizer.encode(prompt, false).map_err(|e| anyhow::anyhow!("토크나이징 실패: {:?}", e))?;
-        let mut token_ids: Vec<u32> = encoding.get_ids().to_vec();
+        let residual = &x;
+        let x = self.ln_2.forward(&x)?;
+        let mlp_output = self.mlp.forward(&x)?;
+        let x = (residual + mlp_output)?;
         
-        println!("🔤 초기 토큰: {:?}", token_ids);
+        Ok((x, present))
+    }
+}
+
+/// GPT-2 모델
+struct GPT2 {
+    wte: Embedding,
+    wpe: Embedding,
+    drop: Dropout,
+    h: Vec<Block>,
+    ln_f: LayerNorm,
+}
+
+impl GPT2 {
+    fn new(config: &Config, vb: &RBEVarBuilder) -> Result<Self> {
+        let wte = Embedding::new(
+            vb.get_tensor("wte.weight")?,
+            config.n_embd
+        );
         
-        // 2. 생성 루프
-        for step in 0..max_tokens {
-            if step % 5 == 0 {
-                println!("📝 생성 단계: {}/{}", step, max_tokens);
-            }
-            
-            // 다음 토큰 예측
-            let next_token = self.predict_next_token(&token_ids, temperature)?;
-            token_ids.push(next_token);
-            
-            // EOS 체크
-            if next_token == 50256 { // GPT-2 EOS
-                break;
-            }
+        let wpe = Embedding::new(
+            vb.get_tensor("wpe.weight")?,
+            config.n_embd
+        );
+        
+        let ln_f_weight = vb.get_tensor("ln_f.weight")?;
+        let ln_f_bias = vb.get_tensor("ln_f.bias")?;
+        let ln_f = LayerNorm::new(ln_f_weight, ln_f_bias, config.layer_norm_epsilon);
+        
+        let mut h = Vec::new();
+        for i in 0..config.n_layer {
+            h.push(Block::new(config, vb, i)?);
         }
         
-        // 3. 디코딩
-        let generated_text = tokenizer.decode(&token_ids, true)
-            .map_err(|e| anyhow::anyhow!("디코딩 실패: {:?}", e))?;
-        
-        Ok(generated_text)
+        Ok(Self {
+            wte,
+            wpe,
+            drop: Dropout::new(config.embd_pdrop as f32),
+            h,
+            ln_f,
+        })
     }
     
-    /// 다음 토큰 예측
-    fn predict_next_token(&self, token_ids: &[u32], temperature: f32) -> Result<u32> {
-        let seq_len = token_ids.len();
+    fn forward(&self, input_ids: &Tensor, past: Option<Vec<(Tensor, Tensor)>>) -> Result<(Tensor, Vec<(Tensor, Tensor)>)> {
+        let (_batch_size, seq_len) = input_ids.dims2()?;
+        let past_len = past.as_ref().map(|p| p[0].0.dims()[2]).unwrap_or(0);
         
-        // 1. 임베딩
-        let mut hidden_states = DMatrix::zeros(seq_len, self.config.hidden_size);
+        // Position ids
+        let position_ids = Tensor::arange(past_len as u32, (past_len + seq_len) as u32, input_ids.device())?
+            .unsqueeze(0)?;
         
-        for (i, &token_id) in token_ids.iter().enumerate() {
-            // 토큰 임베딩 + 위치 임베딩
-            let token_emb = self.token_embeddings.row(token_id as usize % self.token_embeddings.nrows());
-            let pos_emb = self.position_embeddings.row(i % self.position_embeddings.nrows());
-            
-            for j in 0..self.config.hidden_size {
-                hidden_states[(i, j)] = token_emb[j] + pos_emb[j];
-            }
+        // Embeddings
+        let inputs_embeds = self.wte.forward(input_ids)?;
+        let position_embeds = self.wpe.forward(&position_ids)?;
+        let hidden_states = self.drop.forward(&(inputs_embeds + position_embeds)?, false)?;
+        
+        // Transformer blocks
+        let mut hidden_states = hidden_states;
+        let mut presents = Vec::new();
+        
+        for (i, block) in self.h.iter().enumerate() {
+            let layer_past = past.as_ref().map(|p| &p[i]);
+            let (new_hidden_states, present) = block.forward(&hidden_states, layer_past)?;
+            hidden_states = new_hidden_states;
+            presents.push(present);
         }
         
-        // 2. 트랜스포머 레이어들 적용
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            hidden_states = self.apply_transformer_layer(&hidden_states, layer, layer_idx)?;
-        }
+        let hidden_states = self.ln_f.forward(&hidden_states)?;
         
-        // 3. 최종 Layer Norm
-        self.apply_layer_norm_inplace(&mut hidden_states, &self.ln_f_weight, &self.ln_f_bias);
-        
-        // 4. LM Head 적용
-        let last_hidden = hidden_states.row(seq_len - 1);
-        let mut logits = vec![0.0f32; self.config.vocab_size];
-        
-        for i in 0..self.config.vocab_size.min(self.lm_head.nrows()) {
-            let lm_row = self.lm_head.row(i);
-            logits[i] = last_hidden.dot(&lm_row);
-        }
-        
-        // 5. 샘플링
-        let next_token = self.sample_with_temperature(&logits, temperature)?;
-        
-        Ok(next_token)
+        Ok((hidden_states, presents))
     }
+}
+
+/// 텍스트 생성 함수
+fn generate(
+    model: &GPT2,
+    tokenizer: &Tokenizer,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    repetition_penalty: f32,
+    device: &Device,
+) -> Result<String> {
+    // 프롬프트 토큰화
+    let encoding = tokenizer.encode(prompt, false).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut input_ids = Tensor::new(encoding.get_ids(), device)?.unsqueeze(0)?;
     
-    /// 트랜스포머 레이어 적용
-    fn apply_transformer_layer(
-        &self,
-        hidden_states: &DMatrix<f32>,
-        layer: &TransformerLayer,
-        layer_idx: usize,
-    ) -> Result<DMatrix<f32>> {
-        let seq_len = hidden_states.nrows();
-        let hidden_size = hidden_states.ncols();
-        
-        // 1. Pre-LayerNorm (GPT-2 스타일)
-        let mut normed1 = hidden_states.clone();
-        self.apply_layer_norm_inplace(&mut normed1, &layer.ln1_weight, &layer.ln1_bias);
-        
-        // 2. Self-Attention (간소화된 버전)
-        let attn_output = self.apply_compressed_attention(&normed1, &layer.attn_weights, layer.attn_shape)?;
-        
-        // 3. Residual connection
-        let mut after_attn = &attn_output + hidden_states;
-        
-        // 4. Pre-LayerNorm for FFN
-        let mut normed2 = after_attn.clone();
-        self.apply_layer_norm_inplace(&mut normed2, &layer.ln2_weight, &layer.ln2_bias);
-        
-        // 5. Feed-Forward Network
-        let ffn_output = self.apply_compressed_ffn(&normed2, &layer.mlp_weights, layer.mlp_shape)?;
-        
-        // 6. Residual connection
-        let final_output = &ffn_output + &after_attn;
-        
-        Ok(final_output)
-    }
+    let mut past: Option<Vec<(Tensor, Tensor)>> = None;
+    let mut generated_tokens = Vec::new();
+    let mut token_counts: HashMap<u32, usize> = HashMap::new();
     
-    /// 압축된 attention 적용
-    fn apply_compressed_attention(
-        &self,
-        input: &DMatrix<f32>,
-        compressed_weights: &[HybridEncodedBlock],
-        shape: (usize, usize),
-    ) -> Result<DMatrix<f32>> {
-        // 압축된 가중치로부터 QKV 생성 (간소화)
-        let seq_len = input.nrows();
-        let hidden_size = input.ncols();
-        
-        // 간단한 선형 변환으로 근사
-        let mut output = DMatrix::zeros(seq_len, hidden_size);
-        
-        // RBE 블록들을 사용한 근사 연산
-        for (i, block) in compressed_weights.iter().enumerate().take(4) { // 첫 4개 블록만 사용
-            let decoded = block.decode();
-            let weight_factor = if decoded.is_empty() { 0.1 } else { decoded[0] * 0.1 };
-            
-            for r in 0..seq_len {
-                for c in 0..hidden_size {
-                    output[(r, c)] += input[(r, c)] * weight_factor;
-                }
-            }
-        }
-        
-        Ok(output)
-    }
+    println!("\n🚀 생성 시작...\n");
+    print!("{}", prompt);
     
-    /// 압축된 FFN 적용
-    fn apply_compressed_ffn(
-        &self,
-        input: &DMatrix<f32>,
-        compressed_weights: &[HybridEncodedBlock],
-        shape: (usize, usize),
-    ) -> Result<DMatrix<f32>> {
-        let seq_len = input.nrows();
-        let hidden_size = input.ncols();
+    for _ in 0..max_tokens {
+        // Forward pass
+        let (logits, new_past) = model.forward(&input_ids, past)?;
+        past = Some(new_past);
         
-        // FFN: Linear -> GELU -> Linear (간소화)
-        let mut intermediate = DMatrix::zeros(seq_len, hidden_size * 4); // GPT-2는 4배 확장
-        let mut output = DMatrix::zeros(seq_len, hidden_size);
+        // 마지막 토큰의 logits 가져오기
+        let seq_len = logits.dims()[1];
+        let logits = logits.i((.., seq_len - 1, ..))?;
         
-        // 첫 번째 Linear 층 (압축된 가중치 사용)
-        for (i, block) in compressed_weights.iter().enumerate().take(8) {
-            let decoded = block.decode();
-            let weight_factor = if decoded.is_empty() { 0.1 } else { decoded[0] * 0.1 };
-            
-            for r in 0..seq_len {
-                for c in 0..(hidden_size * 4).min(intermediate.ncols()) {
-                    intermediate[(r, c)] += input[(r, c % hidden_size)] * weight_factor;
-                }
+        // Repetition penalty 적용
+        let mut logits_vec: Vec<f32> = logits.to_vec1()?;
+        for (token_id, count) in &token_counts {
+            if *count > 0 {
+                let penalty = repetition_penalty.powf(*count as f32);
+                logits_vec[*token_id as usize] /= penalty;
             }
-        }
-        
-        // GELU 활성화 (근사)
-        for r in 0..seq_len {
-            for c in 0..intermediate.ncols() {
-                let x = intermediate[(r, c)];
-                intermediate[(r, c)] = x * 0.5 * (1.0 + (x * 0.7978845608).tanh()); // GELU 근사
-            }
-        }
-        
-        // 두 번째 Linear 층
-        for r in 0..seq_len {
-            for c in 0..hidden_size {
-                let mut sum = 0.0;
-                for i in 0..intermediate.ncols().min(hidden_size * 4) {
-                    sum += intermediate[(r, i)] * 0.1; // 간소화된 가중치
-                }
-                output[(r, c)] = sum;
-            }
-        }
-        
-        Ok(output)
-    }
-    
-    /// Layer Normalization 적용
-    fn apply_layer_norm_inplace(&self, tensor: &mut DMatrix<f32>, weight: &[f32], bias: &[f32]) {
-        let eps = 1e-5;
-        
-        for mut row in tensor.row_iter_mut() {
-            let mean = row.sum() / row.len() as f32;
-            let var = row.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / row.len() as f32;
-            let std = (var + eps).sqrt();
-            
-            for (j, x) in row.iter_mut().enumerate() {
-                let normalized = (*x - mean) / std;
-                let w = weight.get(j).unwrap_or(&1.0);
-                let b = bias.get(j).unwrap_or(&0.0);
-                *x = normalized * w + b;
-            }
-        }
-    }
-    
-    /// Temperature 샘플링
-    fn sample_with_temperature(&self, logits: &[f32], temperature: f32) -> Result<u32> {
-        if logits.is_empty() {
-            return Ok(0);
         }
         
         // Temperature 적용
-        let scaled_logits: Vec<f32> = logits.iter()
-            .map(|&x| x / temperature)
-            .collect();
+        if temperature > 0.0 {
+            for logit in &mut logits_vec {
+                *logit /= temperature;
+            }
+        }
         
         // Softmax
-        let max_logit = scaled_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_logits: Vec<f32> = scaled_logits.iter()
-            .map(|&x| (x - max_logit).exp())
+        let max_logit = logits_vec.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let mut probs: Vec<f32> = logits_vec.iter()
+            .map(|&logit| (logit - max_logit).exp())
             .collect();
-        let sum_exp: f32 = exp_logits.iter().sum();
-        
-        if sum_exp == 0.0 {
-            return Ok(0);
+        let sum: f32 = probs.iter().sum();
+        for prob in &mut probs {
+            *prob /= sum;
         }
         
-        let probs: Vec<f32> = exp_logits.iter()
-            .map(|&x| x / sum_exp)
-            .collect();
-        
-        // 샘플링
-        let random_val: f32 = rand::random();
-        let mut cumulative = 0.0f32;
-        
-        for (i, &prob) in probs.iter().enumerate() {
-            cumulative += prob;
-            if random_val <= cumulative {
-                return Ok(i as u32);
+        // Top-p (nucleus) 샘플링
+        let next_token = if top_p < 1.0 {
+            // 확률 기준 내림차순 정렬
+            let mut indexed_probs: Vec<(usize, f32)> = probs.iter()
+                .enumerate()
+                .map(|(i, &p)| (i, p))
+                .collect();
+            indexed_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            
+            // 누적 확률이 top_p를 넘을 때까지 선택
+            let mut cumsum = 0.0;
+            let mut nucleus_size = 0;
+            for (_, prob) in &indexed_probs {
+                cumsum += prob;
+                nucleus_size += 1;
+                if cumsum >= top_p {
+                    break;
+                }
             }
-        }
+            
+            // Nucleus 내에서 샘플링
+            let nucleus: Vec<(usize, f32)> = indexed_probs.into_iter()
+                .take(nucleus_size)
+                .collect();
+            let nucleus_probs: Vec<f32> = nucleus.iter().map(|(_, p)| *p).collect();
+            let nucleus_sum: f32 = nucleus_probs.iter().sum();
+            let normalized_probs: Vec<f32> = nucleus_probs.iter()
+                .map(|p| p / nucleus_sum)
+                .collect();
+            
+            let dist = WeightedIndex::new(&normalized_probs)?;
+            let idx = dist.sample(&mut thread_rng());
+            nucleus[idx].0
+        } else {
+            // 기본 샘플링
+            let dist = WeightedIndex::new(&probs)?;
+            dist.sample(&mut thread_rng())
+        };
         
-        Ok((probs.len() - 1) as u32)
-    }
-    
-    // 유틸리티 함수들
-    fn load_embeddings(weights_dir: &str, filename: &str) -> Result<DMatrix<f32>> {
-        let (data, shape) = Self::load_numpy_2d(&format!("{}/{}", weights_dir, filename))?;
-        Ok(DMatrix::from_row_slice(shape[0], shape[1], &data))
-    }
-    
-    fn load_numpy_1d(weights_dir: &str, filename: &str) -> Result<Vec<f32>> {
-        let (data, _) = Self::load_numpy_2d(&format!("{}/{}", weights_dir, filename))?;
-        Ok(data)
-    }
-    
-    fn load_numpy_2d(path: &str) -> Result<(Vec<f32>, Vec<usize>)> {
-        // 간단한 numpy 로더 (기존 코드 재사용)
-        let mut file = std::fs::File::open(path)?;
-        let (shape, total_size) = read_npy_header(&mut file)?;
-        
-        let mut buffer = vec![0u8; total_size * 4];
-        std::io::Read::read_exact(&mut file, &mut buffer)?;
-        
-        let data: Vec<f32> = buffer.chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
-        
-        Ok((data, shape))
-    }
-    
-    fn load_compressed_weights(path: &str) -> Result<(Vec<HybridEncodedBlock>, (usize, usize))> {
-        let content = fs::read_to_string(path)?;
-        let data: serde_json::Value = serde_json::from_str(&content)?;
-        
-        let blocks = data.get("blocks")
-            .ok_or_else(|| anyhow::anyhow!("블록 없음"))?;
-        let compressed_blocks: Vec<HybridEncodedBlock> = serde_json::from_value(blocks.clone())?;
-        
-        let metadata = data.get("metadata")
-            .ok_or_else(|| anyhow::anyhow!("메타데이터 없음"))?;
-        let matrix_size = metadata.get("matrix_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(768) as usize;
-        
-        Ok((compressed_blocks, (matrix_size, matrix_size)))
-    }
-}
-
-// NumPy 헤더 읽기 함수
-fn read_npy_header(file: &mut std::fs::File) -> Result<(Vec<usize>, usize)> {
-    use std::io::Read;
-    
-    let mut magic = [0u8; 6];
-    file.read_exact(&mut magic)?;
-    
-    if &magic != b"\x93NUMPY" {
-        return Err(anyhow::anyhow!("유효하지 않은 NumPy 파일"));
-    }
-    
-    let mut version = [0u8; 2];
-    file.read_exact(&mut version)?;
-    
-    let header_len = if version[0] == 1 {
-        let mut len_bytes = [0u8; 2];
-        file.read_exact(&mut len_bytes)?;
-        u16::from_le_bytes(len_bytes) as usize
-    } else {
-        let mut len_bytes = [0u8; 4];
-        file.read_exact(&mut len_bytes)?;
-        u32::from_le_bytes(len_bytes) as usize
-    };
-    
-    let mut header = vec![0u8; header_len];
-    file.read_exact(&mut header)?;
-    let header_str = String::from_utf8_lossy(&header);
-    
-    // shape 추출
-    let shape_start = header_str.find("'shape': (").unwrap_or(0) + 10;
-    let shape_end = header_str[shape_start..].find(')').unwrap_or(0) + shape_start;
-    let shape_str = &header_str[shape_start..shape_end];
-    
-    let shape: Vec<usize> = shape_str.split(", ")
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.trim_end_matches(',').parse().ok())
-        .collect();
-    
-    let total_size = shape.iter().product();
-    
-    Ok((shape, total_size))
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    println!("🚀 === RBE 실제 추론 엔진 ===");
-    
-    // 모델 로드
-    let model = RBETransformer::load_from_compressed(
-        "./models/skt-kogpt2-base-v2_compressed",
-        "./models/skt-kogpt2-base-v2/weights"
-    )?;
-    
-    println!("\n💭 텍스트 생성 시작 (종료: 'exit')");
-    
-    let stdin = io::stdin();
-    loop {
-        print!("프롬프트: ");
+        // 토큰 디코딩 및 출력
+        let token_str = tokenizer.decode(&[next_token as u32], false)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        print!("{}", token_str);
+        use std::io::{self, Write};
         io::stdout().flush()?;
         
-        let mut input = String::new();
-        stdin.read_line(&mut input)?;
-        let input = input.trim();
+        // 다음 입력 준비
+        input_ids = Tensor::new(&[next_token as u32], device)?.unsqueeze(0)?;
+        generated_tokens.push(next_token as u32);
         
-        if input == "exit" || input == "quit" {
-            println!("👋 종료합니다.");
+        // 토큰 카운트 업데이트
+        *token_counts.entry(next_token as u32).or_insert(0) += 1;
+        
+        // EOS 토큰 체크 (GPT-2의 경우 50256)
+        if next_token == 50256 {
             break;
         }
-        
-        if input.is_empty() {
-            continue;
-        }
-        
-        let start = Instant::now();
-        match model.generate_text(input, 20, 0.8) {
-            Ok(generated) => {
-                let duration = start.elapsed();
-                println!("🎯 결과: {}", generated);
-                println!("⏱️ 시간: {:.2}초\n", duration.as_secs_f32());
-            }
-            Err(e) => {
-                println!("❌ 오류: {}\n", e);
-            }
-        }
     }
+    
+    println!("\n\n✅ 생성 완료!");
+    
+    // 전체 생성된 텍스트 반환
+    let full_ids = [encoding.get_ids(), &generated_tokens].concat();
+    let generated_text = tokenizer.decode(&full_ids, true)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    
+    Ok(generated_text)
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    
+    println!("🤖 RBE GPT-2 추론 엔진 시작");
+    println!("📁 모델 디렉토리: {:?}", args.model_dir);
+    println!("📝 프롬프트: {}", args.prompt);
+    
+    // Random seed 설정
+    if let Some(seed) = args.seed {
+        // candle에는 set_seed가 없으므로 직접 처리하지 않음
+        println!("🎲 Random seed: {}", seed);
+    }
+    
+    // 토크나이저 로드
+    println!("\n📚 토크나이저 로드 중...");
+    let tokenizer = Tokenizer::from_file(&args.tokenizer_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+    
+    // RBE 모델 로드
+    println!("🔧 RBE 압축 모델 로드 중...");
+    let rbe_builder = RBEVarBuilder::new(&args.model_dir)?;
+    
+    // GPT-2 설정
+    let config = Config::default();
+    
+    // 모델 생성
+    println!("🏗️ GPT-2 모델 구성 중...");
+    let model = GPT2::new(&config, &rbe_builder)?;
+    
+    // 텍스트 생성
+    let generated = generate(
+        &model,
+        &tokenizer,
+        &args.prompt,
+        args.max_tokens,
+        args.temperature,
+        args.top_p,
+        args.repetition_penalty,
+        &rbe_builder.device,
+    )?;
+    
+    println!("\n\n📄 전체 생성 텍스트:");
+    println!("{}", generated);
+    
+    // 메모리 사용량
+    rbe_builder.loader.borrow().print_stats();
     
     Ok(())
 } 
