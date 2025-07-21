@@ -390,7 +390,7 @@ fn 비트_DP_자동미분_벤치마크(
             );
             
             // 🧮 DP 기반 128비트 융합 MatMul (메모이제이션)
-            let result = input_tensor.dp_matmul(&mut weight_tensor);
+            let mut result = input_tensor.dp_matmul(&mut weight_tensor);
             
             // 🧮 DP 기반 11비트 사이클 전이
             let mut cycle_result = result.dp_state_transition(cycle_states);
