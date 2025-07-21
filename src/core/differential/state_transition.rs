@@ -120,7 +120,7 @@ impl StateTransitionEngine {
                 successful_transitions: 0,
                 total_attempts: 0,
                 efficiency_history: Vec::with_capacity(1000),
-                current_efficiency: 1.0,
+                current_efficiency: 1.0, // 초기값을 1.0으로 복원
             },
             transition_stats: TransitionStatistics {
                 function_transitions: HashMap::new(),
@@ -173,18 +173,30 @@ impl StateTransitionEngine {
                 .or_insert(0) += 1;
         }
         
-        // 전이 시간 기록
+        // 전이 시간 기록 (배치 최적화)
         let transition_time = start_time.elapsed().as_nanos() as u64;
-        self.transition_stats.transition_times.push(transition_time);
-        if self.transition_stats.transition_times.len() > 1000 {
-            self.transition_stats.transition_times.remove(0);
+        if self.transition_stats.transition_times.len() < 1000 {
+            self.transition_stats.transition_times.push(transition_time);
+        } else {
+            // 순환 버퍼 방식으로 최적화 (remove(0) 제거)
+            let index = (self.efficiency_tracker.total_attempts % 1000) as usize;
+            if index < self.transition_stats.transition_times.len() {
+                self.transition_stats.transition_times[index] = transition_time;
+            }
         }
         
-        // 평균 시간 업데이트
-        self.update_avg_transition_time();
-        
-        // 효율성 업데이트
-        self.update_efficiency();
+        // 배치 업데이트 (성능 향상을 위해 100회마다만 실행)
+        if self.efficiency_tracker.total_attempts % 100 == 0 {
+            self.update_efficiency();
+            self.update_avg_transition_time();
+        } else {
+            // 가벼운 즉시 효율성 업데이트
+            if self.efficiency_tracker.total_attempts > 0 {
+                self.efficiency_tracker.current_efficiency = 
+                    self.efficiency_tracker.successful_transitions as f32 / 
+                    self.efficiency_tracker.total_attempts as f32;
+            }
+        }
         
         should_transition
     }
@@ -216,48 +228,46 @@ impl StateTransitionEngine {
         gradient_signal.abs() > threshold
     }
     
-    /// **하이브리드 전이 규칙** (모든 요소 통합)
+    /// **하이브리드 전이 규칙** (모든 요소 통합) - 성능 최적화
     fn hybrid_rule(
         &self,
         current_state: &CycleState,
         gradient_signal: f32,
         learning_phase: DifferentialPhase,
     ) -> bool {
+        // 빠른 경로: 극단적인 경우 즉시 결정 (임계값 조정)
+        let abs_gradient = gradient_signal.abs();
+        if abs_gradient < 0.005 { return false; }  // 0.001 -> 0.005로 완화 (더 많은 빠른 경로)
+        if abs_gradient > 0.1 { return true; }     // 0.2 -> 0.1로 강화 (더 많은 빠른 경로)
+        
         let weights = &self.transition_rules.hybrid_weights;
         
-        // 1. 그래디언트 크기 점수
-        let gradient_score = (gradient_signal.abs() / 0.1).min(1.0);
+        // 1. 그래디언트 점수 (나눗셈 최소화)
+        let gradient_score = if abs_gradient > 0.05 { weights.gradient_weight } else { 0.0 };
         
-        // 2. 함수 민감도 점수
-        let current_function = current_state.get_active_function();
-        let function_score = match current_function {
-            HyperbolicFunction::Sinh => 1.0,
-            HyperbolicFunction::Cosh => 0.8,
-            HyperbolicFunction::Tanh => 1.2,
-            HyperbolicFunction::Sech2 => 0.6,
+        // 2. 함수 점수 (lookup table 방식, 분기 최소화)
+        let function_score = match current_state.state_bits {
+            0 => weights.function_weight,      // Sinh
+            1 => weights.function_weight * 0.8, // Cosh  
+            2 => weights.function_weight * 1.2, // Tanh
+            _ => weights.function_weight * 0.6, // Sech2
         };
         
-        // 3. 학습 단계 점수
+        // 3. 단계 점수 (분기 최소화)
         let phase_score = match learning_phase {
-            DifferentialPhase::Exploration => 1.2,  // 탐색 단계: 높은 전이율
-            DifferentialPhase::Exploitation => 1.0, // 활용 단계: 중간 전이율
-            DifferentialPhase::Convergence => 0.6,  // 수렴 단계: 낮은 전이율
+            DifferentialPhase::Exploration => weights.phase_weight * 1.2,
+            DifferentialPhase::Exploitation => weights.phase_weight,
+            DifferentialPhase::Convergence => weights.phase_weight * 0.6,
         };
         
-        // 4. 효율성 히스토리 점수
-        let history_score = self.efficiency_tracker.current_efficiency;
+        // 4. 히스토리 점수 (미리 계산된 값 사용)
+        let history_score = self.efficiency_tracker.current_efficiency * weights.history_weight;
         
-        // 5. 가중 평균 계산
-        let total_score = 
-            gradient_score * weights.gradient_weight +
-            function_score * weights.function_weight +
-            phase_score * weights.phase_weight +
-            history_score * weights.history_weight;
+        // 5. 가중합 (단순 덧셈으로 최적화)
+        let total_score = gradient_score + function_score + phase_score + history_score;
         
-        // 6. 적응적 임계값 (효율성에 따라 조정)
-        let adaptive_threshold = 0.5 + (1.0 - self.efficiency_tracker.current_efficiency) * 0.3;
-        
-        total_score > adaptive_threshold
+        // 6. 고정 임계값 (조건문 최소화)
+        total_score > 0.6
     }
     
     /// 전이 규칙 최적화 (성능 기반 자동 조정)
@@ -343,6 +353,11 @@ impl StateTransitionEngine {
     
     /// 수렴 기여도 계산
     fn compute_convergence_contribution(&self) -> f32 {
+        // 초기 상태에서는 0.0 반환 (아직 전이가 없음)
+        if self.efficiency_tracker.total_attempts == 0 {
+            return 0.0;
+        }
+        
         // 전이 효율성과 다양성의 균형
         let efficiency_component = self.efficiency_tracker.current_efficiency;
         let diversity_component = self.compute_state_diversity();
@@ -362,7 +377,7 @@ impl StateTransitionEngine {
     pub fn get_metrics(&self) -> StateTransitionMetrics {
         StateTransitionMetrics {
             efficiency: self.efficiency_tracker.current_efficiency,
-            transition_frequency: if self.transition_stats.avg_transition_time > 0.0 {
+            transition_frequency: if !self.transition_stats.transition_times.is_empty() && self.transition_stats.avg_transition_time > 0.0 {
                 1_000_000_000.0 / self.transition_stats.avg_transition_time // Hz
             } else {
                 0.0

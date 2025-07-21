@@ -1,21 +1,40 @@
 //! 5단계 가중치 생성 파이프라인
 
 use crate::packed_params::{PoincarePackedBit128, PoincareQuadrant};
-use super::cordic::{HyperbolicCordic, POINCARE_BOUNDARY};
+use super::cordic::{hyperbolic_cordic, POINCARE_BOUNDARY};
 use libm;
 
 /// 5단계 가중치 생성 파이프라인 (문서 3.3.1)
 #[derive(Debug, Clone)]
 pub struct WeightGenerator {
-    cordic: HyperbolicCordic,
+    // CORDIC 함수를 직접 사용하므로 필드 불필요
 }
 
 impl WeightGenerator {
     /// 새로운 가중치 생성기 생성
     pub fn new() -> Self {
         Self {
-            cordic: HyperbolicCordic::new(),
         }
+    }
+
+    /// 1단계: 이산 비트에서 초기 회전각 생성
+    /// 문서 3.3.1.1: Discrete Bit Rotation Mapping
+    pub fn discrete_rotation(&self, bits: u32) -> f32 {
+        // 11비트를 [0, 2π) 범위로 정규화
+        let normalized = (bits as f32) / (1u32 << 11) as f32;
+        normalized * 2.0 * std::f32::consts::PI
+    }
+
+    /// 2단계: 쌍곡 CORDIC 회전
+    /// 문서 3.3.1.2: Hyperbolic CORDIC Rotation
+    pub fn hyperbolic_rotation(&self, r: f32, theta: f32, discrete_angle: f32) -> (f32, f32) {
+        let x = r * libm::cosf(theta);
+        let y = r * libm::sinf(theta);
+        
+        // rotation_sequence를 angle로 변환
+        let target_angle = discrete_angle;
+        
+        hyperbolic_cordic(x, y, target_angle)
     }
     
     /// 단일 가중치 생성 (5단계 파이프라인)
@@ -119,7 +138,7 @@ impl WeightGenerator {
         let initial_y = modulated_r * libm::sinf(combined_angle);
         
         // CORDIC 회전 수행
-        self.cordic.rotate(cordic_seq, initial_x, initial_y)
+        hyperbolic_cordic(initial_x, initial_y, combined_angle)
     }
     
     /// 4단계: 쌍곡 기저함수 적용 (문서 3.3.5 매핑 테이블)
@@ -222,7 +241,7 @@ impl WeightGenerator {
             let y = libm::sinf(angle) * 0.5;
             
             let rotation_seq = (i as u32 * 12345) % u32::MAX;
-            let (rotated_x, rotated_y) = self.cordic.rotate(rotation_seq, x, y);
+            let (rotated_x, rotated_y) = hyperbolic_cordic(x, y, angle);
             
             // 기대값과 비교 (간단한 검증)
             let expected_magnitude = libm::sqrtf(x * x + y * y);
@@ -247,7 +266,7 @@ impl WeightGenerator {
         ];
         
         for &(x, y) in &test_values {
-            let (result_x, result_y) = self.cordic.rotate(12345, x, y);
+            let (result_x, result_y) = hyperbolic_cordic(x, y, libm::atan2f(y, x));
             let magnitude = libm::sqrtf(result_x * result_x + result_y * result_y);
             
             if magnitude >= 1.0 || !result_x.is_finite() || !result_y.is_finite() {
