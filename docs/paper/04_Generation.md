@@ -4,7 +4,9 @@
 
 기존 신경망에서 학습은 **명시적으로 저장된 가중치**에 대한 그래디언트를 계산하고 업데이트하는 과정이다. 그러나 푸앵카레 볼 기반 RBE에서는 가중치가 128비트 `Packed128` 파라미터로부터 **즉석에서 생성**되므로, 학습 메커니즘 자체를 근본적으로 재설계해야 한다.
 
-본 장에서는 **압축된 기하학적 공간에서의 직접 학습**을 위한 수학적 프레임워크를 제시한다. 핵심은 푸앵카레 볼의 쌍곡기하학적 구조를 보존하면서도 효율적인 그래디언트 계산을 수행하는 것이다.
+본 장에서는 **압축된 기하학적 공간에서의 직접 학습**을 위한 수학적 프레임워크를 제시한다. 
+
+핵심은 푸앵카레 볼의 쌍곡기하학적 구조를 보존하면서도 효율적인 그래디언트 계산을 수행하는 것이다.
 
 ### 4.1.1. 학습의 새로운 정의
 
@@ -417,9 +419,22 @@ def update_parameters(params, gradients, learning_rate, epoch):
 **정리 4.1 (조건부 수렴성)**
 다음 조건들이 만족되면 학습 알고리즘이 수렴한다:
 
-1. **Lipschitz 연속성**: $|\mathcal{G}(\mathcal{P}_1, i, j) - \mathcal{G}(\mathcal{P}_2, i, j)| \leq L \cdot ||\mathcal{P}_1 - \mathcal{P}_2||$
-2. **그래디언트 바운드**: $||\nabla_{\mathcal{P}} \mathcal{L}|| \leq G_{max}$  
-3. **학습률 조건**: $\sum_t \alpha_t = \infty, \sum_t \alpha_t^2 < \infty$
+1. **Lipschitz 연속성**: 
+
+$$
+|\mathcal{G}(\mathcal{P}_1, i, j) - \mathcal{G}(\mathcal{P}_2, i, j)| \leq L \cdot ||\mathcal{P}_1 - \mathcal{P}_2||
+$$
+
+2. **그래디언트 바운드**: 
+$$
+||\nabla_{\mathcal{P}} \mathcal{L}|| \leq G_{max}
+$$
+
+3. **학습률 조건**: 
+
+$$
+\sum_t \alpha_t = \infty, \sum_t \alpha_t^2 < \infty
+$$
 
 **증명 스케치:**
 CORDIC 함수의 Lipschitz 상수와 기저함수의 유계성을 이용하여 표준 SGD 수렴 증명을 확장한다.
