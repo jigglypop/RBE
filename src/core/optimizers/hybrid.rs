@@ -349,6 +349,7 @@ impl PerformanceMetrics {
 }
 
 /// 통합 하이브리드 최적화기
+#[derive(Debug)]
 pub struct HybridOptimizer {
     /// 연속 파라미터용 Riemannian Adam
     riemannian_adam: RiemannianAdamState,

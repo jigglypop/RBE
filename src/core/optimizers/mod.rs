@@ -5,6 +5,10 @@ pub mod analyzer;
 pub mod config;
 pub mod cycle_differential;
 pub mod bit_aware_gradients;
+pub mod auto_diff;
+pub mod hybrid_autodiff;
+pub mod bit_autodiff;
+pub mod bit_dp_autodiff;
 
 // 주요 타입들 재수출
 pub use adam::{AdamState};
@@ -15,6 +19,21 @@ pub use config::{OptimizerConfig, AdamConfig, RiemannianAdamConfig};
 pub use cycle_differential::{
     CycleDifferentialSystem, DifferentialPhase, CycleState, 
     HyperbolicFunction
+};
+pub use bit_aware_gradients::{
+    FusedGradientComputer, BitGradientContribution, FieldGradientAnalysis
+};
+pub use auto_diff::{
+    RBEGradient, RBETensor, ComputationGraph, RBEOperation, BackwardFunction
+};
+pub use bit_autodiff::{
+    BitTensor, BitGradientTracker, BitGradient, StateTransitionGrad, GeometricGrad
+};
+pub use bit_dp_autodiff::{
+    BitDPTensor, BitDPTable
+};
+pub use hybrid_autodiff::{
+    AutoDiffHybridOptimizer, AutoDiffPerformanceMetrics, BenchmarkResults, AccuracyResults
 };
 
 /// 최적화 기법 종류
