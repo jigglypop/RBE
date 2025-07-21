@@ -2,48 +2,22 @@
 //!
 //! 푸앵카레 볼 기반 리만 기저 인코딩의 핵심 구성 요소들
 
-pub mod packed_params;
-pub mod math;
 pub mod encoder;
 pub mod decoder;
-pub mod generator;
+pub mod math;
 pub mod matrix;
-pub mod systems;
 pub mod optimizers;
+pub mod packed_params;
+pub mod systems;
+pub mod generator;
+pub mod differential; // 새로운 통합 미분 시스템
 
-pub use packed_params::{
-    Packed64, Packed128, DecodedParams, PoincareMatrix, PoincarePackedBit128,
-    PoincareQuadrant, HybridEncodedBlock, TransformType, RbeParameters, 
-    ResidualCoefficient, EncodedBlockGradients
-};
-
-pub use math::*;
-pub use encoder::{HybridEncoder, GridCompressedMatrix};
+// 주요 타입들 재수출
+pub use encoder::*;
 pub use decoder::*;
+pub use packed_params::*;
+pub use systems::*;
 pub use generator::*;
-pub use matrix::*;
+pub use differential::*; // 새로운 미분 시스템 타입들
 
-// systems 모듈 - config 충돌 방지를 위해 명시적 import
-pub use systems::{
-    EncodedLayer, FusedEncodedLayer,
-    HybridPoincareRBESystem, HybridPoincareLayer, 
-    PoincareEncodingLayer, FusionProcessingLayer, HybridLearningLayer,
-    SystemConfiguration, LearningParameters, AdaptiveLearningRateConfig,
-    LossWeights, HardwareConfiguration,
-    PerformanceMonitor, MemoryUsageTracker, ComputationTimeTracker,
-    QualityMetricsTracker, EnergyEfficiencyTracker,
-    LearningState, LossComponents, ConvergenceStatus,
-    StateManager, ParameterManager,
-    ResidualCompressor, CORDICEngine, BasisFunctionLUT,
-    ParallelGEMMEngine, RiemannianGradientComputer, StateTransitionDifferentiator,
-    AdaptiveScheduler, PerformanceAnalyzer, LayerMetrics,
-    ActivationStatistics, WeightStatistics, GradientStatistics,
-    InternalTransformType, LearningRateStrategy
-};
-
-// optimizers 모듈 - config 충돌 방지를 위해 명시적 import  
-pub use optimizers::{
-    AdamState, RiemannianAdamState, HybridOptimizer, OptimizationPhase, 
-    PerformanceMetrics, TransformAnalyzer, OptimizerConfig, 
-    AdamConfig, RiemannianAdamConfig, OptimizerType
-};
+// 각 모듈이 자체 테스트를 포함함

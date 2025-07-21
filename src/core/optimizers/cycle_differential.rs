@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(Sinh.derivative(), Cosh);
         assert_eq!(Cosh.derivative(), Sinh);
         assert_eq!(Tanh.derivative(), Sech2);
-        assert_eq!(Sech2.derivative(), Sinh);
+        assert_eq!(Sech2.derivative(), Tanh);  // 수정: sech²' ∝ tanh
     }
     
     #[test]
