@@ -4,7 +4,6 @@ use std::f32::consts::PI;
 #[test]
 fn Riemannian_Adam상태_초기화_테스트() {
     let riemannian_adam = RiemannianAdamState::new();
-    
     assert_eq!(riemannian_adam.m_r, 0.0, "r 파라미터 1차 모멘트는 0으로 초기화");
     assert_eq!(riemannian_adam.v_r, 0.0, "r 파라미터 2차 모멘트는 0으로 초기화");
     assert_eq!(riemannian_adam.m_theta, 0.0, "θ 파라미터 1차 모멘트는 0으로 초기화");
@@ -13,13 +12,12 @@ fn Riemannian_Adam상태_초기화_테스트() {
     assert_eq!(riemannian_adam.beta1, 0.9, "beta1 기본값은 0.9");
     assert_eq!(riemannian_adam.beta2, 0.999, "beta2 기본값은 0.999");
     assert_eq!(riemannian_adam.epsilon, 1e-8, "epsilon 기본값은 1e-8");
-    
     println!("✅ Riemannian Adam 상태 초기화 테스트 통과");
 }
 
 #[test]
 fn 메트릭텐서_계산_테스트() {
-    let riemannian_adam = RiemannianAdamState::new();
+    let mut riemannian_adam = RiemannianAdamState::new();
     
     // 다양한 r 값에 대한 메트릭 텐서 계산
     let test_cases = [
@@ -49,7 +47,7 @@ fn 메트릭텐서_계산_테스트() {
 
 #[test]
 fn 뫼비우스덧셈_테스트() {
-    let riemannian_adam = RiemannianAdamState::new();
+    let mut riemannian_adam = RiemannianAdamState::new();
     
     // 기본 테스트 케이스들
     let test_cases = [
@@ -85,7 +83,7 @@ fn 뫼비우스덧셈_테스트() {
 
 #[test]
 fn 지수사상_테스트() {
-    let riemannian_adam = RiemannianAdamState::new();
+    let mut riemannian_adam = RiemannianAdamState::new();
     
     // 기본 테스트 케이스들
     let test_cases = [
