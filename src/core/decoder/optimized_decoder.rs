@@ -75,8 +75,8 @@ impl OptimizedDecoder {
             parallel_dp_processor: ParallelDPProcessor::new(num_threads, 128, 8, 256),
             performance_stats: DecodingPerformanceStats::default(),
         }
-    }
-    
+}
+
     /// **핵심: DP 최적화 기반 디코딩** (완전한 동적 프로그래밍)
     pub fn decode_with_dp_optimization(
         &mut self,
@@ -89,7 +89,7 @@ impl OptimizedDecoder {
         
         // **1단계: DP 문제 정의**
         let dp_problems = self.construct_dp_problems(encoded_params, rows, cols, target_quality);
-        
+    
         // **2단계: 병렬 DP 최적화**
         let dp_start = std::time::Instant::now();
         let optimization_results = self.parallel_dp_processor.parallel_optimize(
@@ -113,7 +113,7 @@ impl OptimizedDecoder {
         
         // **5단계: 품질 메트릭 계산**
         let quality_metrics = self.compute_quality_metrics(&restored_matrix, &optimization_results);
-        
+            
         // **6단계: 성능 통계 업데이트**
         let total_time = start_time.elapsed().as_nanos() as u64;
         self.update_performance_stats(total_time, dp_time, weight_time);
@@ -124,14 +124,14 @@ impl OptimizedDecoder {
             quality_metrics,
             performance: self.performance_stats.clone(),
         }
-    }
-    
+}
+
     /// DP 문제 구성 (각 파라미터별로)
     fn construct_dp_problems(
         &self,
         encoded_params: &[PoincarePackedBit128],
-        rows: usize,
-        cols: usize,
+    rows: usize, 
+    cols: usize, 
         target_quality: f32,
     ) -> Vec<BitDPProblem> {
         encoded_params.iter().enumerate().map(|(idx, param)| {
@@ -182,8 +182,8 @@ impl OptimizedDecoder {
     fn calculate_remaining_steps(&self, current_idx: usize, total_params: usize) -> u8 {
         let remaining_ratio = (total_params - current_idx) as f32 / total_params as f32;
         (remaining_ratio * 15.0) as u8 + 1 // 1-15 단계
-    }
-    
+}
+
     /// PoincarePackedBit128을 Packed128으로 변환
     fn convert_to_packed128(&self, params: &[PoincarePackedBit128]) -> Vec<crate::packed_params::Packed128> {
         params.iter().map(|param| {
@@ -239,8 +239,8 @@ impl OptimizedDecoder {
             original.get_r_poincare(),
             original.get_theta_poincare(),
         )
-    }
-    
+}
+
     /// 최적화된 파라미터로 매트릭스 복원
     fn restore_matrix_with_optimized_params(
         &mut self,
@@ -269,14 +269,14 @@ impl OptimizedDecoder {
                 for j in 0..cols {
                     if i < output_vector.len() {
                         matrix[i][j] += output_vector[i] / optimized_params.len() as f32;
-                    }
+    }
                 }
             }
         }
         
         matrix
-    }
-    
+}
+
     /// 품질 메트릭 계산
     fn compute_quality_metrics(
         &self,
@@ -380,8 +380,8 @@ impl OptimizedDecoder {
     /// DP 시스템 통계 반환
     pub fn get_dp_stats(&self) -> (usize, usize, usize) {
         self.bit_dp_table.get_dp_stats()
-    }
-    
+}
+
     /// 캐시 정리
     pub fn clear_cache(&mut self) {
         self.weight_generator.clear_cache();
@@ -443,9 +443,9 @@ impl OptimizedDecoder {
                         result_matrix[i][j] += chunk_result.restored_matrix[i][j];
                     }
                 }
-            }
-        }
-        
+    }
+}
+
         // 정규화
         let chunk_count = (encoded_params.len() + chunk_size - 1) / chunk_size;
         for row in &mut result_matrix {
