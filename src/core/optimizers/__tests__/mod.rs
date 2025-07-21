@@ -8,5 +8,5 @@ pub mod config_test;
 pub mod cycle_differential_test;
 pub mod bit_aware_gradients_test;
 pub mod hybrid_optimizer_test;
-pub mod autodiff_benchmark_test;
-pub mod comprehensive_benchmark_test;
+pub mod autodiff_test;
+pub mod separated_autodiff_test;
