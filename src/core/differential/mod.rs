@@ -7,6 +7,7 @@ pub mod cycle_system;
 pub mod forward;
 pub mod backward;
 pub mod state_transition;
+pub mod bit_dp_system; // 새로운 비트 DP 시스템 모듈
 
 // 핵심 타입들 재수출
 pub use cycle_system::{
@@ -21,6 +22,7 @@ pub use backward::{
 pub use state_transition::{
     StateTransitionEngine, TransitionRule, StateTransitionMetrics
 };
+pub use bit_dp_system::*; // 새로운 모듈 추가
 
 /// 통합 미분 시스템 인터페이스
 #[derive(Debug, Clone)]
