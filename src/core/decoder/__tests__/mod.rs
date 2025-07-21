@@ -5,4 +5,5 @@
 // pub mod cordic_test;
 pub mod performance_test;
 pub mod rmse_accuracy_test; // RMSE 정확성 검증 테스트 추가
-pub mod wavelet_k_optimization_test; // 웨이블릿 K값 최적화 테스트 추가 
+pub mod wavelet_k_optimization_test; // 웨이블릿 K값 최적화 테스트 추가
+pub mod extreme_compression_test; // 1000배 극한 압축 테스트 추가 
