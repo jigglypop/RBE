@@ -8,6 +8,54 @@
 
 ### 1.1 목표 및 범위
 
+“sLLM(소형 LLM)” 을 **RBE 커널만으로 완전히 구동**하려면 Linear(프로젝션) 외에 최소한 다음 레이어들이 추가되어야한다. 
+
+| #  | 필수 레이어                           | 기능 & 수식                                       | **RBE-전용 구현**                        | CPU 지연(1 tok) |
+| -- | -------------------------------- | --------------------------------------------- | ------------------------------------ | ------------- |
+| 1  | **Embedding**                    | 토큰 id → $\mathbf{e}_t$                        | • 행별 RBE 패턴<br>• 잔차 K = ≤ 20         | 0.3 ms        |
+| 2  | **Positional Encoding** (RoPE)   | 회전 행렬 곱                                       | • 사인·코사인 LUT 512 entry<br>• FP32 FMA | 0.1 ms        |
+| 3  | **LayerNorm / RMSNorm**          | $\frac{x-\mu}{\sqrt{\sigma^2+\epsilon}}$      | • row-wise reduce(F32) + scale/shift | 0.4 ms        |
+| 4  | **Attention – Q, K, V 프로젝션**     | 3× RBE-Linear                                 | 이미 구현된 Fused RBE-GEMM                | 2.0 ms        |
+| 5  | **Scaled Dot-Product Attention** | $\mathrm{softmax}(QK^\top/\sqrt{d})V$         | • AVX-512 FMA + exp LUT              | 1.1 ms        |
+| 6  | **Attention Out 프로젝션**           | RBE-Linear                                    | Fused RBE-GEMM                       | 0.6 ms        |
+| 7  | **Feed-Forward (FFN)**           | $xW_1\rightarrow\mathrm{GELU}\rightarrow W_2$ | • 두 번 RBE-GEMM<br>• GELU tanh approx | 1.8 ms        |
+| 8  | **Dropout** (추론 시 생략)            | -                                             | 패스-스루                                | 0             |
+| 9  | **Output Projection**            | 마지막 hidden → vocab                            | RBE 또는 Dense (정확도↑)                  | 0.9 ms (RBE)  |
+| 10 | **Logits Softmax**               | prob = softmax(logits)                        | FP32 exp / reduce                    | 0.3 ms        |
+
+> 합계: **\~7.5 ms / 토큰** (Dense FP16 기준 11-12 ms) –— **원본보다 빠름 & 메모리 –90 %**
+
+---
+
+#### 핵심 구현 메모
+
+1. **RBE-Embedding**
+
+   * 토큰 id → row index ⇒ 패턴 계산 + 소수 DCT 잔차 합산
+   * LUT 캐싱: row-wise `d`, `cos(πx)` 값 128개
+2. **RBE-GEMM 커널 재사용**
+
+   * Q, K, V, Out, FFN\_W1, W2 모두 동일 Fused 커널 호출
+3. **Softmax & GELU**
+
+   * AVX-512: `exp_fast16` / Neon: `vexpq_f32`
+   * FP32 누적 후 FP16 cast
+4. **출력층**
+
+   * 소형 모델(≤30 k vocab)은 RBE 버전도 가능
+   * 대형 vocab은 Dense FP16 1 행만 복원해 속도 확보
+
+---
+
+### 체크리스트 (To-Implement)
+
+1. `RBEEmbedding`, `RBEAttention`, `RBEFFN` Python module
+2. Fused RBE-GEMM AVX-512 / Neon SIMD 커널
+3. Graph Pass: `RBEWeight` 노드 자동 Fusion
+4. Unit test – embedding round-trip, attention masking, FP32 parity
+5. End-to-end mini-chatbot: prompt→response BLEU 비교
+
+
 **Primary Objectives:**
 - GPT-2 아키텍처의 모든 레이어를 RBE 기반으로 구현
 - Candle/PyTorch 등 외부 딥러닝 프레임워크 의존성 완전 제거
@@ -709,43 +757,3 @@ impl RBEGPT2 {
     }
 }
 ```
-
-## 11. Implementation Timeline
-
-### Phase 1: Foundation (Week 1-2)
-- [ ] RBETensor 기본 구현
-- [ ] RBELayer trait 정의
-- [ ] 기본 수학 연산 (matmul, transpose, reshape)
-
-### Phase 2: Core Layers (Week 3-4) 
-- [ ] RBELinear layer
-- [ ] RBELayerNorm
-- [ ] RBEEmbedding layers
-
-### Phase 3: Advanced Layers (Week 5-6)
-- [ ] RBEMultiHeadAttention
-- [ ] RBEMLP with GELU
-- [ ] RBETransformerBlock
-
-### Phase 4: Model Assembly (Week 7-8)
-- [ ] Complete RBEGPT2 model
-- [ ] Text generation pipeline
-- [ ] KV caching system
-
-### Phase 5: Optimization (Week 9-10)
-- [ ] Memory optimization
-- [ ] Performance tuning
-- [ ] CUDA kernels (optional)
-- [ ] Comprehensive testing
-
-## Conclusion
-
-본 계획서는 RBE 기반 GPT-2 완전 구현을 위한 포괄적인 로드맵을 제시한다. 각 레이어의 수학적 정의부터 최적화 전략까지 상세히 다루어, 외부 딥러닝 프레임워크 의존성 없이 완전한 추론 엔진을 구축할 수 있다. 
-
-예상 성능 목표:
-- **압축률**: 50:1 ~ 1000:1
-- **추론 속도**: 50+ tokens/sec (CPU), 200+ tokens/sec (CUDA)  
-- **메모리 사용량**: < 2GB (GPT-2 117M 모델)
-- **정확도**: 원본 모델 대비 95%+ 유지
-
-이 구현을 통해 RBE의 실용성과 효율성을 실증하고, 대규모 언어 모델의 새로운 압축 패러다임을 제시할 수 있을 것이다. 

@@ -2,15 +2,17 @@
 
 ## 2.1. 서론: 차원의 변환, 정보의 압축
 
-현실 세계의 신경망 가중치는 평범한 **유클리드 공간**의 실수 행렬로 표현된다. 그러나 앞 장에서 살펴본 바와 같이, 푸앵카레 볼의 쌍곡기하학적 구조는 훨씬 강력한 정보 표현 능력을 갖는다. 본 장의 핵심 과제는 이 두 공간 사이의 **수학적 다리**를 구축하는 것이다.
+현실 세계의 신경망 가중치는 평범한 **유클리드 공간**의 실수 행렬로 표현된다. 그러나 앞 장에서 살펴본 바와 같이, 푸앵카레 볼의 쌍곡기하학적 구조는 훨씬 강력한 정보 표현 능력을 갖는다. 
 
-인코딩 과정은 단순한 데이터 압축이 아니다. 이는 **기하학적 변환(geometric transformation)**이며, 유클리드 공간의 선형적 관계를 쌍곡공간의 지수적 관계로 재해석하는 과정이다.
+인코딩 과정은 단순한 데이터 압축이 아니다. 이는 **기하학적 변환**이며, 유클리드 공간의 선형적 관계를 쌍곡공간의 지수적 관계로 재해석하는 과정이다.
 
 ### 2.1.1. 인코딩의 수학적 정의
 
 수학적으로 인코딩 함수 $\mathcal{E}$는 다음과 같이 정의된다:
 
-$$\mathcal{E}: \mathbb{R}^{m \times n} \rightarrow \mathcal{D}^{128}$$
+$$
+\mathcal{E}: \mathbb{R}^{m \times n} \rightarrow \mathcal{D}^{128}
+$$
 
 여기서:
 - $\mathbb{R}^{m \times n}$: 원본 가중치 행렬 공간 (유클리드)
@@ -24,7 +26,13 @@ $$\mathcal{E}: \mathbb{R}^{m \times n} \rightarrow \mathcal{D}^{128}$$
 
 $$\text{압축률} = \frac{mn \times 32}{128} = \frac{mn}{4}$$
 
-예를 들어, $64 \times 64$ 행렬의 경우 압축률은 $\frac{64 \times 64}{4} = 1024:1$이다!
+예를 들어, 이상적인 경우
+$64 \times 64$ 행렬의 경우 압축률은 
+
+$$
+\frac{64 \times 64}{4} = 1024:1
+$$
+에 다다른다
 
 ## 2.2. 4단계 인코딩 파이프라인: 수학적 여정
 
@@ -40,7 +48,6 @@ $$\text{압축률} = \frac{mn \times 32}{128} = \frac{mn}{4}$$
 각 단계를 상세히 분석해보자.
 
 ## 2.3. 1단계: 주파수 도메인 분석 - 유클리드 공간의 해부
-
 ### 2.3.1. 2차원 고속 푸리에 변환 (2D FFT)
 
 원본 행렬 $S \in \mathbb{R}^{m \times n}$에 대해 2차원 이산 푸리에 변환을 적용한다:
@@ -48,8 +55,8 @@ $$\text{압축률} = \frac{mn \times 32}{128} = \frac{mn}{4}$$
 $$\hat{S}(k_x, k_y) = \sum_{i=0}^{m-1} \sum_{j=0}^{n-1} S(i,j) \cdot e^{-2\pi i \left(\frac{k_x \cdot i}{m} + \frac{k_y \cdot j}{n}\right)}$$
 
 여기서:
-- $(k_x, k_y)$: 주파수 좌표
-- $\hat{S}(k_x, k_y)$: 주파수 $(k_x, k_y)$에서의 복소 진폭
+- $(k_x, k_y)$ : 주파수 좌표
+- $\hat{S}(k_x, k_y)$ : 주파수 $(k_x, k_y)$에서의 복소 진폭
 
 ### 2.3.2. 지배적 주파수 추출
 
@@ -66,7 +73,12 @@ $$E(k_x, k_y) = |\hat{S}(k_x, k_y)|^2 = \text{Re}(\hat{S})^2 + \text{Im}(\hat{S}
 
 지배적 주파수를 푸앵카레 볼에 적합한 형태로 정규화한다:
 
-$$\omega_{x,norm} = \frac{\omega_x^*}{m} \times 2\pi, \quad \omega_{y,norm} = \frac{\omega_y^*}{n} \times 2\pi$$
+$$
+\omega_{x,norm} = \frac{\omega_x^*}{m} \times 2\pi
+$$ 
+$$
+\quad \omega_{y,norm} = \frac{\omega_y^*}{n} \times 2\pi
+$$
 
 이렇게 정규화된 주파수는 $[0, 2\pi]$ 범위에 있다.
 
@@ -205,8 +217,8 @@ $$W_{ij}(r, \theta) = f_{basis}(x_{ij}^{norm}, y_{ij}^{norm}, r, \theta)$$
 $$f_{basis}(x, y, r, \theta) = A(r) \cdot g\left(\sqrt{x^2 + y^2} \cdot r + \theta\right)$$
 
 여기서:
-- $A(r)$: 진폭 함수
-- $g(\cdot)$: 선택된 쌍곡함수
+- $A(r)$ : 진폭 함수
+- $g(\cdot)$ : 선택된 쌍곡함수
 
 ### 2.5.3. Levenberg-Marquardt 알고리즘 적용
 
@@ -288,16 +300,15 @@ $$W_{kl} = \sum_{i,j} R_{ij} \psi_{kl}(i,j)$$
 $$E_k = |C_k|^2 \text{ (DCT의 경우) or } |W_k|^2 \text{ (DWT의 경우)}$$
 
 **선택 알고리즘:**
-```
+
+```python
 function select_top_k_coefficients(coefficients, K):
     energies = [|coeff|^2 for coeff in coefficients]
     sorted_indices = argsort(energies, descending=True)
     selected = []
-    
     for i = 0 to K-1:
         idx = sorted_indices[i]
         selected.append((idx, coefficients[idx]))
-    
     return selected
 ```
 
@@ -358,7 +369,7 @@ $$\eta = \frac{H_{encoded}}{H_{original}} = \frac{128 + 48K}{32mn}$$
 $64 \times 64$ 행렬, $K=10$인 경우:
 $$\eta = \frac{128 + 480}{32 \times 64 \times 64} = \frac{608}{131,072} = 0.0046 = 0.46\%$$
 
-즉, 원본 정보의 **0.46%**만으로 전체 행렬을 표현한다!
+즉, 원본 정보의 0.46%만으로 전체 행렬을 표현한다
 
 ## 2.8. 적응적 인코딩 전략
 

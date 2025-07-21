@@ -18,23 +18,17 @@ struct OptimizedBlock {
     block_width: usize,
 }
 
-/// RBE 압축된 Linear Layer (100배 성능 최적화)
-/// 압축 상태에서 직접 연산 수행 (디코딩 없음)
+/// RBE 압축된 Linear Layer
 #[derive(Debug)]
 pub struct RBELinear {
     input_dim: usize,
     output_dim: usize,
-    
-    // 최적화된 블록들 (기저 함수 미리 계산됨)
     optimized_blocks: Vec<Vec<OptimizedBlock>>,
     bias: Option<Vec<f32>>,
-    
-    // 블록 레이아웃
     block_height: usize,
     block_width: usize,
     blocks_per_row: usize,
     blocks_per_col: usize,
-    
     // 성능 통계
     operation_count: std::sync::atomic::AtomicUsize,
 }
