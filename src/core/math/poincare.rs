@@ -1,5 +1,9 @@
 use std::f32::consts::PI;
 
+// f64 정밀도에 맞는 푸앵카레볼 경계값 상수
+const POINCARE_BOUNDARY_F32: f32 = 0.9999999; // f32용 안전한 경계값
+const POINCARE_BOUNDARY_F64: f64 = 0.9999999999999999; // f64용 안전한 경계값
+
 /// 5.2 푸앵카레 볼 위의 점
 /// 
 /// 푸앵카레 볼 D^n = {x ∈ R^n : ||x|| < 1}에서 점을 나타냅니다.
@@ -15,7 +19,7 @@ impl PoincareBallPoint {
     /// 새로운 푸앵카레 볼 점 생성
     pub fn new(r: f32, theta: f32) -> Self {
         Self {
-            r: r.clamp(0.0, 0.99), // 경계 근처에서 수치적 안정성 보장
+            r: r.clamp(0.0, POINCARE_BOUNDARY_F32), // f32 정밀도에 맞는 경계값 사용
             theta,
         }
     }
@@ -32,7 +36,7 @@ impl PoincareBallPoint {
     
     /// 데카르트 좌표에서 변환
     pub fn from_cartesian(x: f32, y: f32) -> Self {
-        let r = (x*x + y*y).sqrt().min(0.99);
+        let r = (x*x + y*y).sqrt().min(POINCARE_BOUNDARY_F32);
         let theta = libm::atan2f(y, x);
         Self { r, theta }
     }
@@ -135,7 +139,7 @@ impl RiemannianGeometry {
         }
         
         let norm = point.r;
-        let artanh_norm = if norm < 0.99 {
+        let artanh_norm = if norm < POINCARE_BOUNDARY_F32 {
             0.5 * libm::logf((1.0 + norm) / (1.0 - norm))
         } else {
             10.0 // 경계 근처에서 클램핑
@@ -147,7 +151,7 @@ impl RiemannianGeometry {
             t
         };
         
-        let new_r = (scale_factor * norm).clamp(0.0, 0.99);
+        let new_r = (scale_factor * norm).clamp(0.0, POINCARE_BOUNDARY_F32);
         
         PoincareBallPoint::new(new_r, point.theta)
     }
@@ -210,7 +214,7 @@ impl RiemannianGeometry {
         let norm = diff.r;
         if norm < eps {
             0.0
-        } else if norm < 0.99 {
+        } else if norm < POINCARE_BOUNDARY_F32 {
             0.5 * libm::logf((1.0 + norm) / (1.0 - norm))
         } else {
             10.0 // 경계에서 클램핑

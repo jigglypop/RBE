@@ -1,16 +1,37 @@
 use std::f32::consts::PI;
 
-/// Riemannian Adam 최적화기 (푸앵카레 볼용)
+// f32 정밀도에 맞는 푸앵카레볼 경계값
+const POINCARE_BOUNDARY_F32: f32 = 0.9999999;
+
+/// 푸앵카레 볼에서의 리만 아담 최적화기
+/// 
+/// 6.1 리만 아담 알고리즘
+/// 하이퍼볼릭 공간에서의 기울기 하강법
 #[derive(Debug, Clone)]
 pub struct RiemannianAdamState {
-    pub m_r: f32,     // r 파라미터 1차 모멘트
-    pub v_r: f32,     // r 파라미터 2차 모멘트
-    pub m_theta: f32, // θ 파라미터 1차 모멘트
-    pub v_theta: f32, // θ 파라미터 2차 모멘트
-    pub t: i32,       // 시간 스텝
     pub beta1: f32,
     pub beta2: f32,
     pub epsilon: f32,
+    pub m_r: f32,      // r에 대한 1차 모멘텀
+    pub v_r: f32,      // r에 대한 2차 모멘텀
+    pub m_theta: f32,  // θ에 대한 1차 모멘텀
+    pub v_theta: f32,  // θ에 대한 2차 모멘텀
+    pub t: i32,        // 시간 스텝
+}
+
+impl Default for RiemannianAdamState {
+    fn default() -> Self {
+        Self {
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            m_r: 0.0,
+            v_r: 0.0,
+            m_theta: 0.0,
+            v_theta: 0.0,
+            t: 0,
+        }
+    }
 }
 
 impl RiemannianAdamState {
@@ -97,7 +118,7 @@ impl RiemannianAdamState {
         let update_theta = -learning_rate * m_theta_hat / (v_theta_hat.sqrt() + self.epsilon);
         
         // 지수 사상을 통한 업데이트
-        *r = self.exponential_map(*r, update_r).clamp(0.0, 0.99);
+        *r = self.exponential_map(*r, update_r).clamp(0.0, POINCARE_BOUNDARY_F32);
         *theta = ((*theta + update_theta) % (2.0 * PI) + 2.0 * PI) % (2.0 * PI);
     }
     

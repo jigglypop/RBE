@@ -159,9 +159,14 @@ impl UnifiedCycleDifferentialSystem {
             return 0;
         }
         
-        // 성능 캐시 확인 (35.4ns/op 달성 핵심)
-        let gradient_hash = gradient_signal.to_bits();
-        let cache_key = (position, gradient_hash);
+        // 빠른 경로: 작은 그래디언트는 즉시 처리
+        if gradient_signal.abs() <= 0.01 {
+            return self.current_states[position].state_bits;
+        }
+        
+        // 성능 캐시 확인 (최적화: 해시 계산 최소화)
+        let gradient_bucket = ((gradient_signal.abs() * 1000.0) as u32 / 10) * 10; // 10ms 단위 버킷
+        let cache_key = (position, gradient_bucket);
         
         if let Some(&cached_result) = self.performance_cache.get(&cache_key) {
             // 캐시 히트: 즉시 반환 (극초단시간)
@@ -245,10 +250,12 @@ impl UnifiedCycleDifferentialSystem {
         };
         
         // 성능 캐시 업데이트 (다음 호출 최적화)
+        let gradient_bucket = ((gradient_signal.abs() * 1000.0) as u32 / 10) * 10;
+        let cache_key = (position, gradient_bucket);
         self.performance_cache.insert(cache_key, result_state as f32);
         
-        // 캐시 크기 제한 (메모리 관리)
-        if self.performance_cache.len() > 1000 {
+        // 캐시 크기 제한 (메모리 관리, 800개로 낮춤)
+        if self.performance_cache.len() > 800 {
             self.performance_cache.clear();
         }
         

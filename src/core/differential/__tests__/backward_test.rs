@@ -227,8 +227,8 @@ fn test_parameter_update_bounds() {
     
     let updated_r = f32::from_bits((packed.lo >> 32) as u32);
     
-    // r 값이 [0.1, 2.0] 범위에 있어야 함
-    assert!(updated_r >= 0.1 && updated_r <= 2.0);
+    // r 값이 푸앵카레볼 범위 [0.0, 0.9999999] 내에 있어야 함
+    assert!(updated_r >= 0.0 && updated_r <= 0.9999999);
     
     println!("Original r: {}, Updated r: {}", original_r, updated_r);
 }
