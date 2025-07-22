@@ -61,7 +61,7 @@ impl CompressionConfig {
         Self {
             block_size: 64,
             quality_grade: QualityGrade::B,
-            transform_type: TransformType::Dwt,
+            transform_type: TransformType::Dwt,  // DWT! DWT! DWT!
             profile: CompressionProfile::Balanced,
             custom_coefficients: None,
             min_block_count: None,
@@ -75,7 +75,7 @@ impl CompressionConfig {
         Self {
             block_size: 32,  // 작은 블록 = 높은 품질
             quality_grade: QualityGrade::S,
-            transform_type: TransformType::Dwt,
+            transform_type: TransformType::Dwt,  // DWT 사용!
             profile: CompressionProfile::UltraHigh,
             custom_coefficients: None,
             min_block_count: None,
@@ -89,7 +89,7 @@ impl CompressionConfig {
         Self {
             block_size: 128, // 큰 블록 = 빠른 속도
             quality_grade: QualityGrade::C,
-            transform_type: TransformType::Dwt,
+            transform_type: TransformType::Dwt,  // DWT 사용!
             profile: CompressionProfile::Fast,
             custom_coefficients: Some(256), // 적은 계수
             min_block_count: None,
@@ -108,7 +108,7 @@ impl CompressionConfig {
         Self {
             block_size,
             quality_grade: QualityGrade::B,
-            transform_type: TransformType::Dwt,
+            transform_type: TransformType::Dwt,  // DWT! DWT! DWT!
             profile: CompressionProfile::Balanced,
             custom_coefficients: None,
             min_block_count: min_blocks,
@@ -130,22 +130,22 @@ impl RBEEncoder {
     
     /// S급 품질 (RMSE < 0.001): 819:1 압축률, 128x128 블록 권장
     pub fn new_s_grade() -> Self {
-        Self::new(500, TransformType::Dwt)  // 웨이블릿으로 변경
+        Self::new(500, TransformType::Dwt)  // DWT 사용!
     }
     
     /// A급 품질 (RMSE < 0.01): 3276:1 압축률, 256x256 블록 권장  
     pub fn new_a_grade() -> Self {
-        Self::new(300, TransformType::Dwt)  // 웨이블릿으로 변경
+        Self::new(300, TransformType::Dwt)  // DWT 사용!
     }
     
     /// B급 품질 (RMSE < 0.1): 3276:1 압축률, 256x256 블록 권장
     pub fn new_b_grade() -> Self {
-        Self::new(200, TransformType::Dwt)  // 웨이블릿으로 변경
+        Self::new(200, TransformType::Dwt)  // DWT 사용!
     }
     
     /// 극한 압축 (RMSE ~0.09): 3276:1 압축률
     pub fn new_extreme_compression() -> Self {
-        Self::new(50, TransformType::Dwt)   // 웨이블릿으로 변경
+        Self::new(75, TransformType::Dwt)   // DWT 사용! 계수 100 -> 75
     }
 
     /// 단일 블록을 RBE+DCT/DWT로 압축 (기존 HybridEncoder::encode_block)

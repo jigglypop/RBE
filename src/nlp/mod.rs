@@ -5,8 +5,7 @@
 pub mod linear;
 pub mod model_tools;
 
-// 공통 imports
-pub use crate::core::*;
+// tensor 모듈 제거 - WeightGenerator 직접 사용으로 대체
 
 /// 두 벡터 간의 상대 오차 계산
 pub fn compute_relative_error(reference: &[f32], approximation: &[f32]) -> f32 {
