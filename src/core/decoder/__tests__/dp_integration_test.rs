@@ -65,12 +65,12 @@ fn dp_최적화된_가중치_생성_테스트() {
     let packed_seeds = vec![
         PoincarePackedBit128::new(
             PoincareQuadrant::First,
-            1024, 512, 256, 0x12345678,
+            255, 255, 255, 0x12345678,
             0.5, 0.0
         ),
         PoincarePackedBit128::new(
             PoincareQuadrant::Second,
-            2048, 1024, 512, 0x87654321,
+            255, 255, 255, 0x87654321,
             0.3, 0.25
         ),
     ];
@@ -231,7 +231,7 @@ fn dp_캐시_효율성_검증_테스트() {
     let seeds = vec![
         PoincarePackedBit128::new(
             PoincareQuadrant::First,
-            1024, 512, 256, 0xABCDEF12,
+            255, 255, 255, 0xABCDEF12,
             0.5, 0.25
         )
     ];

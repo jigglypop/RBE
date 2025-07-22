@@ -4,6 +4,7 @@ pub mod hybrid_optimizer;
 pub mod constraint_projection;
 pub mod regularization;
 pub mod convergence;
+pub mod weight_generator;
 
 // 테스트 모듈
 #[cfg(test)]
