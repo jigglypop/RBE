@@ -178,8 +178,7 @@ impl WeightMapper {
         
         for blocks in all_blocks {
             // 각 가중치의 블록들을 직렬화
-            let config = bincode::config::standard();
-            let serialized = bincode::encode_to_vec(blocks, config)
+            let serialized = bincode::serialize(blocks)
                 .map_err(|e| format!("블록 직렬화 실패: {}", e))?;
             buffer.extend_from_slice(&serialized);
         }

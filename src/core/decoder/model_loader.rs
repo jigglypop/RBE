@@ -189,8 +189,7 @@ impl RBEModelLoader {
         let buffer = &self.weight_data[start..];
         
         // bincode로 역직렬화
-        let config = bincode::config::standard();
-        let (blocks, _): (Vec<HybridEncodedBlock>, usize) = bincode::decode_from_slice(buffer, config)
+        let blocks: Vec<HybridEncodedBlock> = bincode::deserialize(buffer)
             .with_context(|| format!("'{}' 가중치 역직렬화 실패", info.name))?;
         
         // 블록 개수 검증

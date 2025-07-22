@@ -1,33 +1,34 @@
-//! 변환 및 인코딩 관련 타입들
+//! 변환 타입 정의 (DCT, Wavelet 등)
 
 use serde::{Serialize, Deserialize};
 
-/// 변환 타입 (DCT, Wavelet, Adaptive)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+/// 변환 타입
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TransformType {
-    Dct,
-    Dwt,
-    Adaptive,
+    Dct,      // Discrete Cosine Transform
+    Dwt,      // Discrete Wavelet Transform
+    Adaptive, // 적응형 (현재는 DCT)
 }
 
-/// DCT/웨이블릿 잔차 계수
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+/// 잔차 계수 구조체
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResidualCoefficient {
-    pub index: (u16, u16), // 블록 내 좌표 (최대 65535x65535)
+    /// 계수의 2차원 인덱스 (row, col)
+    pub index: (u16, u16),
+    /// 계수 값
     pub value: f32,
 }
 
-/// RBE 기본 패턴 + 잔차 계수를 포함하는 하이브리드 압축 블록
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HybridEncodedBlock {
-    /// RBE 기본 패턴을 생성하는 8개의 연속 파라미터
-    pub rbe_params: RbeParameters,
-    /// 잔차 보정을 위한 상위 K개의 DCT 또는 웨이블릿 계수
+    /// RBE 파라미터 (8개)
+    pub rbe_params: [f32; 8],
+    /// 잔차 계수들 (스파스 저장)
     pub residuals: Vec<ResidualCoefficient>,
-    /// 블록의 원래 크기
+    /// 블록 크기 정보
     pub rows: usize,
     pub cols: usize,
-    /// 적용된 변환 타입
+    /// 사용된 변환 타입
     pub transform_type: TransformType,
 }
 

@@ -3,7 +3,10 @@
 pub mod core;
 pub mod nlp;
 pub use core::*;
-pub use core::encoder::{RBEEncoder, HybridEncoder, GridCompressedMatrix};
+pub use core::encoder::RBEEncoder;
+pub use core::decoder::{WeightGenerator, FusedForwardPass};
+pub use core::differential::UnifiedCycleDifferentialSystem;
+pub use core::systems::HybridPoincareRBESystem;
 pub use core::packed_params::{HybridEncodedBlock, TransformType, RbeParameters, ResidualCoefficient, EncodedBlockGradients};
 pub use core::systems::EncodedLayer;
 // NLP 모듈 re-exports
