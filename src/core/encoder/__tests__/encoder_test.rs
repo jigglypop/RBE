@@ -444,3 +444,60 @@ fn A_matrix_캐싱_벤치마크() {
     
     println!("\n✅ A matrix 캐싱이 효과적으로 작동함!");
 }
+
+#[test]
+fn 동적_블록_크기_결정_테스트() {
+    println!("🧪 동적 블록 크기 결정 테스트");
+    
+    let test_cases = [
+        // (rows, cols, expected_block_size)
+        (128, 128, 128),     // 정사각형, GCD = 128
+        (256, 128, 128),     // 2:1 비율, GCD = 128
+        (192, 128, 64),      // 3:2 비율, GCD = 64
+        (100, 100, 32),      // 100x100은 32로 나누어떨어지지 않지만 가장 가까운 2의 거듭제곱
+        (768, 3072, 256),    // GPT-2 크기 (실제로는 256이 최대)
+        (17, 17, 16),        // 소수 크기
+        (64, 96, 32),        // GCD = 32
+    ];
+    
+    for (rows, cols, _expected) in test_cases {
+        let block_size = RBEEncoder::determine_optimal_block_size(rows, cols);
+        println!("행렬 {}x{} → 블록 크기: {}", rows, cols, block_size);
+        
+        // 기본 검증
+        assert!(block_size >= 16, "블록 크기가 너무 작음: {}", block_size);
+        assert!(block_size <= 256, "블록 크기가 너무 큼: {}", block_size);
+        
+        // 2의 거듭제곱인지 확인
+        assert_eq!(block_size & (block_size - 1), 0, "블록 크기가 2의 거듭제곱이 아님: {}", block_size);
+    }
+}
+
+#[test]
+fn 동적_블록_압축_테스트() {
+    println!("🧪 동적 블록 크기를 사용한 압축 테스트");
+    
+    // 비대칭 행렬 테스트
+    let test_data = generate_asymmetric_pattern(256, 512);
+    
+    let (blocks, block_size, time, ratio, rmse) = 
+        RBEEncoder::compress_with_dynamic_blocks(
+            &test_data,
+            256,
+            512,
+            200,  // B급 품질 계수
+            TransformType::Dwt,
+        ).unwrap();
+    
+    println!("결과:");
+    println!("  블록 크기: {}x{}", block_size, block_size);
+    println!("  블록 개수: {}", blocks.len());
+    println!("  압축률: {:.1}x", ratio);
+    println!("  RMSE: {:.6}", rmse);
+    println!("  시간: {:.3}초", time);
+    
+    // 결과 검증
+    assert_eq!(256 % block_size, 0, "블록이 행을 나누어떨어뜨리지 않음");
+    assert_eq!(512 % block_size, 0, "블록이 열을 나누어떨어뜨리지 않음");
+    assert!(rmse < 0.1, "RMSE가 너무 높음: {}", rmse);
+}

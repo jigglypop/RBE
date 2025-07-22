@@ -128,6 +128,77 @@ impl RBEEncoder {
         }
     }
     
+    /// 최대공약수(GCD) 계산
+    fn gcd(a: usize, b: usize) -> usize {
+        if b == 0 {
+            a
+        } else {
+            Self::gcd(b, a % b)
+        }
+    }
+    
+    /// 행렬 크기에 따른 최적 블록 크기 결정
+    pub fn determine_optimal_block_size(rows: usize, cols: usize) -> usize {
+        // 행과 열의 최대공약수 계산
+        let gcd_size = Self::gcd(rows, cols);
+        
+        // 2의 배수로 맞추기 (SIMD 최적화를 위해)
+        let mut block_size = gcd_size;
+        
+        // 너무 작으면 성능이 떨어지므로 최소값 보장
+        if block_size < 16 {
+            // 16의 배수 중 rows와 cols를 나누어 떨어뜨리는 가장 큰 값 찾기
+            for size in &[64, 32, 16] {
+                if rows % size == 0 && cols % size == 0 {
+                    block_size = *size;
+                    break;
+                }
+            }
+            if block_size < 16 {
+                block_size = 16; // 최소값
+            }
+        }
+        
+        // 너무 크면 압축 품질이 떨어지므로 최대값 제한
+        if block_size > 256 {
+            // 256의 약수 중 rows와 cols를 나누어 떨어뜨리는 가장 큰 값 찾기
+            for size in &[256, 128, 64, 32] {
+                if rows % size == 0 && cols % size == 0 {
+                    block_size = *size;
+                    break;
+                }
+            }
+        }
+        
+        // 2의 거듭제곱으로 조정 (성능 최적화)
+        let mut power_of_two = 1;
+        while power_of_two < block_size {
+            power_of_two *= 2;
+        }
+        if power_of_two > block_size {
+            power_of_two /= 2;
+        }
+        
+        // rows와 cols를 나누어 떨어뜨리는 가장 가까운 2의 거듭제곱 찾기
+        while power_of_two >= 16 {
+            if rows % power_of_two == 0 && cols % power_of_two == 0 {
+                return power_of_two;
+            }
+            power_of_two /= 2;
+        }
+        
+        // 마지막 대안: 패딩이 필요하더라도 적절한 크기 선택
+        if rows <= 64 && cols <= 64 {
+            16
+        } else if rows <= 128 && cols <= 128 {
+            32
+        } else if rows <= 256 && cols <= 256 {
+            64
+        } else {
+            128
+        }
+    }
+    
     /// S급 품질 (RMSE < 0.001): 819:1 압축률, 128x128 블록 권장
     pub fn new_s_grade() -> Self {
         Self::new(500, TransformType::Dwt)  // DWT 사용!
@@ -611,6 +682,32 @@ impl RBEEncoder {
         }
         
         Ok(critical_coeffs)
+    }
+
+    /// 동적 블록 크기를 사용한 압축
+    pub fn compress_with_dynamic_blocks(
+        matrix_data: &[f32],
+        height: usize,
+        width: usize,
+        coefficients: usize,
+        transform_type: TransformType,
+    ) -> Result<(Vec<HybridEncodedBlock>, usize, f64, f32, f32), String> {
+        // 최적 블록 크기 자동 결정
+        let block_size = Self::determine_optimal_block_size(height, width);
+        
+        println!("행렬 크기 {}x{}, 최적 블록 크기: {}x{}", height, width, block_size, block_size);
+        
+        // 기존 압축 함수 호출
+        let (blocks, time, ratio, rmse) = Self::compress_with_profile(
+            matrix_data,
+            height,
+            width,
+            block_size,
+            coefficients,
+            transform_type,
+        )?;
+        
+        Ok((blocks, block_size, time, ratio, rmse))
     }
 }
 

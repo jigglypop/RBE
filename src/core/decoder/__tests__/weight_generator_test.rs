@@ -38,7 +38,7 @@ mod tests {
     
     #[test]
     fn test_캐시_효율성() {
-        let mut generator = WeightGenerator::new();
+        let generator = WeightGenerator::new();
         
         let block = HybridEncodedBlock {
             rows: 8,
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn test_병렬_처리_일관성() {
         let config = RBEDecoderConfig {
-            cache_size: 16,
+            caching_strategy: crate::core::decoder::CachingStrategy::FixedLRU { size: 16 },
             enable_parallel: true,
             enable_simd: false,
         };
@@ -149,12 +149,12 @@ mod tests {
     #[test]
     fn test_캐시_크기_제한() {
         let config = RBEDecoderConfig {
-            cache_size: 2, // 매우 작은 캐시
+            caching_strategy: crate::core::decoder::CachingStrategy::FixedLRU { size: 2 },
             enable_parallel: false,
             enable_simd: false,
         };
         
-        let mut generator = WeightGenerator::with_config(config);
+        let generator = WeightGenerator::with_config(config);
         
         // 3개의 서로 다른 블록 생성
         let blocks: Vec<HybridEncodedBlock> = (0..3).map(|i| {

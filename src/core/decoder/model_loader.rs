@@ -9,6 +9,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use crate::core::encoder::weight_mapper::{ModelLayout, WeightInfo};
+use crate::core::decoder::weight_generator::WeightGenerator;
+use std::sync::Arc;
 
 /// 로드된 가중치 타입
 pub enum LoadedWeight {
@@ -16,6 +18,8 @@ pub enum LoadedWeight {
     Compressed(Vec<HybridEncodedBlock>),
     /// 압축되지 않은 원본 가중치
     Raw(Vec<f32>),
+    /// 사전 디코딩된 가중치 (추론 속도 최적화)
+    Precomputed(Arc<Vec<f32>>),
 }
 
 /// RBE 모델 로더 - 메타데이터 기반 동적 로딩
@@ -26,6 +30,10 @@ pub struct RBEModelLoader {
     weight_data: Vec<u8>,
     /// 캐시된 가중치 (lazy loading)
     cache: std::collections::HashMap<String, LoadedWeight>,
+    /// 가중치 생성기 (디코딩용)
+    weight_generator: WeightGenerator,
+    /// 사전 디코딩 모드
+    precompute_mode: bool,
 }
 
 impl RBEModelLoader {
@@ -56,7 +64,83 @@ impl RBEModelLoader {
             layout,
             weight_data,
             cache: std::collections::HashMap::new(),
+            weight_generator: WeightGenerator::new(),
+            precompute_mode: false,
         })
+    }
+    
+    /// 사전 디코딩 모드 활성화/비활성화
+    pub fn set_precompute_mode(&mut self, enable: bool) {
+        self.precompute_mode = enable;
+    }
+    
+    /// 특정 가중치를 사전 디코딩하여 메모리에 로드
+    pub fn precompute_weight(&mut self, weight_name: &str) -> Result<()> {
+        // 이미 사전 계산되어 있으면 스킵
+        if let Some(LoadedWeight::Precomputed(_)) = self.cache.get(weight_name) {
+            return Ok(());
+        }
+        
+        // 먼저 압축된 블록을 로드
+        if !self.cache.contains_key(weight_name) {
+            self.load(weight_name)?;
+        }
+        
+        // 블록들을 가져와서 디코딩
+        let precomputed = match self.cache.get(weight_name) {
+            Some(LoadedWeight::Compressed(blocks)) => {
+                let info = self.get_weight_info(weight_name)?;
+                let total_elements: usize = info.original_shape.iter().product();
+                let mut decoded_data = Vec::with_capacity(total_elements);
+                
+                // 병렬로 블록 디코딩
+                use rayon::prelude::*;
+                let decoded_blocks: Vec<_> = blocks.par_iter()
+                    .map(|block| self.weight_generator.decode_block(block))
+                    .collect();
+                
+                for decoded_block in decoded_blocks {
+                    decoded_data.extend_from_slice(&decoded_block);
+                }
+                
+                if decoded_data.len() != total_elements {
+                    return Err(anyhow::anyhow!(
+                        "'{}' 가중치 디코딩 크기 불일치: 예상 {}, 실제 {}",
+                        weight_name, total_elements, decoded_data.len()
+                    ));
+                }
+                
+                Arc::new(decoded_data)
+            },
+            Some(LoadedWeight::Raw(data)) => Arc::new(data.clone()),
+            Some(LoadedWeight::Precomputed(data)) => return Ok(()), // 이미 사전 계산됨
+            None => return Err(anyhow::anyhow!("'{}' 가중치를 찾을 수 없습니다", weight_name)),
+        };
+        
+        // 캐시 업데이트
+        self.cache.insert(weight_name.to_string(), LoadedWeight::Precomputed(precomputed));
+        Ok(())
+    }
+    
+    /// 모든 가중치를 사전 디코딩 (추론 전 호출)
+    pub fn precompute_all(&mut self) -> Result<()> {
+        let weight_names: Vec<_> = self.layout.weights.iter()
+            .map(|w| w.name.clone())
+            .collect();
+            
+        println!("모든 가중치 사전 디코딩 시작 ({} 개)", weight_names.len());
+        let start = std::time::Instant::now();
+        
+        for (idx, name) in weight_names.iter().enumerate() {
+            self.precompute_weight(name)?;
+            if (idx + 1) % 10 == 0 {
+                println!("  진행률: {}/{}", idx + 1, weight_names.len());
+            }
+        }
+        
+        let elapsed = start.elapsed();
+        println!("사전 디코딩 완료: {:.2}초 소요", elapsed.as_secs_f64());
+        Ok(())
     }
     
     /// 가중치 정보를 반환
@@ -149,6 +233,7 @@ impl RBEModelLoader {
                     Ok(decoded_data)
                 },
                 LoadedWeight::Raw(data) => Ok(data.clone()),
+                LoadedWeight::Precomputed(precomputed) => Ok((*precomputed).to_vec()),
             }
         } else {
             // 캐시에 없으면 로드하고 디코딩
@@ -180,9 +265,10 @@ impl RBEModelLoader {
                         Ok(decoded_data)
                     },
                     LoadedWeight::Raw(data) => Ok(data.clone()),
+                    LoadedWeight::Precomputed(precomputed) => Ok((*precomputed).to_vec()),
                 }
             } else {
-                Err(anyhow::anyhow!("'{}' 가중치 로드 실패", weight_name))
+                Err(anyhow::anyhow!("'{}' 가중치 로드 실패", weight_name))  
             }
         }
     }
@@ -247,6 +333,7 @@ impl RBEModelLoader {
             .map(|(_, w)| match w {
                 LoadedWeight::Compressed(blocks) => blocks.len() * std::mem::size_of::<HybridEncodedBlock>(),
                 LoadedWeight::Raw(data) => data.len() * std::mem::size_of::<f32>(),
+                LoadedWeight::Precomputed(precomputed) => precomputed.len() * std::mem::size_of::<f32>(),
             })
             .sum();
         

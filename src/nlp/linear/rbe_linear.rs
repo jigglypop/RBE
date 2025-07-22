@@ -18,7 +18,7 @@ impl Default for RBELinearConfig {
         Self {
             enable_parallel: true,
             cache_size: 16,
-        }
+}
     }
 }
 
@@ -49,7 +49,7 @@ impl RBELinear {
     ) -> Self {
         Self::with_config(blocks, in_features, out_features, bias, RBELinearConfig::default())
     }
-
+    
     /// 설정과 함께 새로운 RBE 선형 레이어 생성
     pub fn with_config(
         blocks: Vec<HybridEncodedBlock>,
@@ -69,7 +69,7 @@ impl RBELinear {
             config,
         }
     }
-
+    
     /// 순전파
     pub fn forward(&self, input: &[f32]) -> Vec<f32> {
         assert_eq!(input.len(), self.in_features, "입력 크기 불일치");
@@ -83,7 +83,7 @@ impl RBELinear {
         
         output
     }
-
+    
     /// 배치 순전파
     pub fn forward_batch(&self, inputs: &[Vec<f32>]) -> Vec<Vec<f32>> {
         inputs.iter()
@@ -95,7 +95,7 @@ impl RBELinear {
     pub fn clear_cache(&mut self) {
         self.weight_generator.clear_cache();
     }
-
+    
     /// 메모리 사용량 추정
     pub fn memory_usage(&self) -> (usize, f32) {
         let compressed_size = self.blocks.len() * std::mem::size_of::<HybridEncodedBlock>();
@@ -103,8 +103,8 @@ impl RBELinear {
         let compression_ratio = original_size as f32 / compressed_size as f32;
         
         (compressed_size, compression_ratio)
-    }
-}
+                }
+            }
 
 #[cfg(test)]
 mod tests {
