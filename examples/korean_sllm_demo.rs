@@ -175,7 +175,7 @@ fn build_compressed_bert<'a>(weights: &'a CompressedWeights, config: &'a ModelCo
     
     let mut bert_layers = Vec::with_capacity(config.n_layers);
     for i in 0..config.n_layers {
-        let prefix = format!("bert.encoder.layer.{}", i);
+        let prefix = format!("encoder.layer.{}", i);
         let attention = BertAttention {
             q_w: weights.layers.get(&format!("{}.attention.self.query.weight", prefix)).ok_or_else(|| anyhow!("Missing weight"))?,
             q_b: weights.biases.get(&format!("{}.attention.self.query.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
@@ -204,22 +204,20 @@ fn build_compressed_bert<'a>(weights: &'a CompressedWeights, config: &'a ModelCo
     }
 
     let bert_model = CompressedBert {
-        token_emb: weights.layers.get("bert.embeddings.word_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
-        position_emb: weights.layers.get("bert.embeddings.position_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
-        token_type_emb: weights.layers.get("bert.embeddings.token_type_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
-        emb_layernorm_w: weights.layernorms.get("bert.embeddings.LayerNorm.weight").ok_or_else(|| anyhow!("Missing layernorm"))?,
-        emb_layernorm_b: weights.biases.get("bert.embeddings.LayerNorm.bias").ok_or_else(|| anyhow!("Missing bias"))?,
+        token_emb: weights.layers.get("embeddings.word_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
+        position_emb: weights.layers.get("embeddings.position_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
+        token_type_emb: weights.layers.get("embeddings.token_type_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
+        emb_layernorm_w: weights.layernorms.get("embeddings.LayerNorm.weight").ok_or_else(|| anyhow!("Missing layernorm"))?,
+        emb_layernorm_b: weights.biases.get("embeddings.LayerNorm.bias").ok_or_else(|| anyhow!("Missing bias"))?,
         layers: bert_layers,
         
-        // LM Head 재구성
-        lm_head_dense_w: weights.layers.get("cls.predictions.transform.dense.weight").ok_or_else(|| anyhow!("Missing cls.predictions.transform.dense.weight"))?,
-        lm_head_dense_b: weights.biases.get("cls.predictions.transform.dense.bias").ok_or_else(|| anyhow!("Missing cls.predictions.transform.dense.bias"))?,
-        lm_head_layernorm_w: weights.layernorms.get("cls.predictions.transform.LayerNorm.weight").ok_or_else(|| anyhow!("Missing cls.predictions.transform.LayerNorm.weight"))?,
-        lm_head_layernorm_b: weights.biases.get("cls.predictions.transform.LayerNorm.bias").ok_or_else(|| anyhow!("Missing cls.predictions.transform.LayerNorm.bias"))?,
+        lm_head_dense_w: weights.layers.get("cls.predictions.transform.dense.weight"),
+        lm_head_dense_b: weights.biases.get("cls.predictions.transform.dense.bias").map(|v| &**v),
+        lm_head_layernorm_w: weights.layernorms.get("cls.predictions.transform.LayerNorm.weight").map(|v| &**v),
+        lm_head_layernorm_b: weights.biases.get("cls.predictions.transform.LayerNorm.bias").map(|v| &**v),
         
-        // 디코더 가중치는 임베딩과 공유
-        lm_head_decoder_w: weights.layers.get("bert.embeddings.word_embeddings.weight").ok_or_else(|| anyhow!("Missing word_embeddings.weight for decoder"))?,
-        lm_head_decoder_b: weights.biases.get("cls.predictions.bias").map(|v| &**v), // 'decoder' bias는 없고 'predictions.bias'가 존재할 수 있음
+        lm_head_decoder_w: weights.layers.get("embeddings.word_embeddings.weight").ok_or_else(|| anyhow!("Missing word_embeddings for decoder"))?,
+        lm_head_decoder_b: weights.biases.get("cls.predictions.bias").map(|v| &**v),
 
         hidden_size: config.hidden_size,
         n_heads: config.n_heads,

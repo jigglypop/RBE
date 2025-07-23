@@ -9,12 +9,16 @@ use std::ops::{AddAssign, MulAssign};
 // --- Helper Functions ---
 
 fn layer_norm(x: &mut [f32], weight: &[f32], bias: &[f32], eps: f32) {
-    let n = x.len();
-    let mean = x.iter().sum::<f32>() / n as f32;
-    let var = x.iter().map(|&val| (val - mean).powi(2)).sum::<f32>() / n as f32;
-    let std_dev_inv = 1.0 / (var + eps).sqrt();
-    for i in 0..n {
-        x[i] = (x[i] - mean) * std_dev_inv * weight[i] + bias[i];
+    let hidden_size = weight.len();
+    for chunk in x.chunks_mut(hidden_size) {
+        let n = chunk.len();
+        if n == 0 { continue; }
+        let mean = chunk.iter().sum::<f32>() / n as f32;
+        let var = chunk.iter().map(|&val| (val - mean).powi(2)).sum::<f32>() / n as f32;
+        let std_dev_inv = 1.0 / (var + eps).sqrt();
+        for i in 0..n {
+            chunk[i] = (chunk[i] - mean) * std_dev_inv * weight[i] + bias[i];
+        }
     }
 }
 
@@ -154,10 +158,10 @@ pub struct CompressedBert<'a> {
     pub layers: Vec<CompressedBertLayer<'a>>,
     
     // Prediction Head
-    pub lm_head_dense_w: &'a CompressedLayer,
-    pub lm_head_dense_b: &'a [f32],
-    pub lm_head_layernorm_w: &'a [f32],
-    pub lm_head_layernorm_b: &'a [f32],
+    pub lm_head_dense_w: Option<&'a CompressedLayer>,
+    pub lm_head_dense_b: Option<&'a [f32]>,
+    pub lm_head_layernorm_w: Option<&'a [f32]>,
+    pub lm_head_layernorm_b: Option<&'a [f32]>,
     pub lm_head_decoder_w: &'a CompressedLayer,
     pub lm_head_decoder_b: Option<&'a [f32]>,
 
@@ -176,40 +180,49 @@ impl<'a> BertAttention<'a> {
     fn forward(&self, hidden_states: &mut [f32], generator: &WeightGenerator) -> Result<()> {
         let seq_len = hidden_states.len() / self.hidden_size;
         let head_size = self.hidden_size / self.n_heads;
+
+        let mut all_q = Vec::with_capacity(seq_len * self.hidden_size);
+        let mut all_k = Vec::with_capacity(seq_len * self.hidden_size);
+        let mut all_v = Vec::with_capacity(seq_len * self.hidden_size);
+
+        for i in 0..seq_len {
+            let chunk = &hidden_states[i * self.hidden_size..(i + 1) * self.hidden_size];
+            all_q.extend(self.q_w.linear_forward(generator, chunk, self.q_b)?);
+            all_k.extend(self.k_w.linear_forward(generator, chunk, self.k_b)?);
+            all_v.extend(self.v_w.linear_forward(generator, chunk, self.v_b)?);
+        }
+
         let scale = 1.0 / (head_size as f32).sqrt();
-
-        // Linear projections for Q, K, V
-        let q = self.q_w.linear_forward(generator, hidden_states, self.q_b)?;
-        let k = self.k_w.linear_forward(generator, hidden_states, self.k_b)?;
-        let v = self.v_w.linear_forward(generator, hidden_states, self.v_b)?;
-
-        // Multi-head attention logic
         let mut attention_output = vec![0.0f32; seq_len * self.hidden_size];
-        for h in 0..self.n_heads {
-            let q_head = q.chunks(self.hidden_size).map(|s| &s[h*head_size..(h+1)*head_size]).collect::<Vec<_>>();
-            let k_head = k.chunks(self.hidden_size).map(|s| &s[h*head_size..(h+1)*head_size]).collect::<Vec<_>>();
-            let v_head = v.chunks(self.hidden_size).map(|s| &s[h*head_size..(h+1)*head_size]).collect::<Vec<_>>();
-            
-            for i in 0..seq_len {
-                let mut scores = vec![0.0; seq_len];
+
+        for i in 0..seq_len {
+            let mut context_layer = vec![0.0f32; self.hidden_size];
+            for h in 0..self.n_heads {
+                let q_offset = i * self.hidden_size + h * head_size;
+                let q_head = &all_q[q_offset..q_offset + head_size];
+                
+                let mut scores = vec![0.0f32; seq_len];
                 for j in 0..seq_len {
-                    scores[j] = q_head[i].iter().zip(k_head[j]).map(|(a,b)| a * b).sum::<f32>() * scale;
+                    let k_offset = j * self.hidden_size + h * head_size;
+                    let k_head = &all_k[k_offset..k_offset + head_size];
+                    scores[j] = q_head.iter().zip(k_head).map(|(a, b)| a * b).sum::<f32>() * scale;
                 }
                 softmax(&mut scores);
 
                 for j in 0..seq_len {
+                    let v_offset = j * self.hidden_size + h * head_size;
+                    let v_head = &all_v[v_offset..v_offset + head_size];
                     for d in 0..head_size {
-                        attention_output[i * self.hidden_size + h * head_size + d] += scores[j] * v_head[j][d];
+                        context_layer[h * head_size + d] += scores[j] * v_head[d];
                     }
                 }
             }
+            let output_chunk = &mut attention_output[i * self.hidden_size..(i + 1) * self.hidden_size];
+            output_chunk.copy_from_slice(&self.output_w.linear_forward(generator, &context_layer, self.output_b)?);
         }
-        
-        let output = self.output_w.linear_forward(generator, &attention_output, self.output_b)?;
-        
-        // Residual connection and LayerNorm
+
         for i in 0..hidden_states.len() {
-            hidden_states[i] += output[i];
+            hidden_states[i] += attention_output[i];
         }
         layer_norm(hidden_states, self.layernorm_w, self.layernorm_b, 1e-12);
         
@@ -260,19 +273,25 @@ impl<'a> CompressedBert<'a> {
             let mut residual = hidden_states.clone();
             layer.attention.forward(&mut hidden_states, &self.generator)?;
             for i in 0..hidden_states.len() { hidden_states[i] += residual[i]; }
-            layer_norm(&mut hidden_states, layer.attention.layernorm_w, layer.attention.layernorm_b, 1e-12);
+            layer_norm(&mut hidden_states, &layer.attention.layernorm_w, &layer.attention.layernorm_b, 1e-12);
 
             residual = hidden_states.clone();
             layer.ffn.forward(&mut hidden_states, &self.generator)?;
             for i in 0..hidden_states.len() { hidden_states[i] += residual[i]; }
-            layer_norm(&mut hidden_states, layer.ffn.layernorm_w, layer.ffn.layernorm_b, 1e-12);
+            layer_norm(&mut hidden_states, &layer.ffn.layernorm_w, &layer.ffn.layernorm_b, 1e-12);
         }
 
         // 3. Prediction Head
         let last_token_hidden = &hidden_states[(seq_len - 1) * self.hidden_size..];
-        let mut lm_head_hidden = self.lm_head_dense_w.linear_forward(&self.generator, last_token_hidden, self.lm_head_dense_b)?;
-        gelu(&mut lm_head_hidden);
-        layer_norm(&mut lm_head_hidden, self.lm_head_layernorm_w, self.lm_head_layernorm_b, 1e-12);
+        let mut lm_head_hidden = last_token_hidden.to_vec();
+
+        // Apply transform if it exists
+        if let (Some(dense_w), Some(dense_b), Some(ln_w), Some(ln_b)) =
+            (self.lm_head_dense_w, self.lm_head_dense_b, self.lm_head_layernorm_w, self.lm_head_layernorm_b) {
+            lm_head_hidden = dense_w.linear_forward(&self.generator, &lm_head_hidden, dense_b)?;
+            gelu(&mut lm_head_hidden);
+            layer_norm(&mut lm_head_hidden, ln_w, ln_b, 1e-12);
+        }
 
         let decoder_bias = self.lm_head_decoder_b.unwrap_or(&[]);
         let logits = self.lm_head_decoder_w.linear_forward(&self.generator, &lm_head_hidden, decoder_bias)?;
