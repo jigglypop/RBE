@@ -43,37 +43,6 @@ impl HybridEncodedBlock {
             reconstruction[idx] = value;
         }
         
-        // 잔차 역변환 및 추가
-        match self.transform_type {
-            TransformType::Dwt => {
-                use ndarray::Array2;
-                use omni_wave::{wavelet as w, completely_reconstruct_2d};
-                
-                // 스파스 계수를 행렬로 변환
-                let mut residual_matrix = Array2::<f32>::zeros((rows, cols));
-                for coeff in &self.residuals {
-                    let (row, col) = coeff.index;
-                    if (row as usize) < rows && (col as usize) < cols {
-                        residual_matrix[[row as usize, col as usize]] = coeff.value;
-                    }
-                }
-                
-                // DWT 역변환
-                let wavelet = w::BIOR_3_1;
-                let mut buffer = ndarray::Array1::zeros(rows.max(cols) + wavelet.window_size() - 2);
-                completely_reconstruct_2d(residual_matrix.view_mut(), buffer.view_mut(), wavelet);
-                
-                // 역변환된 잔차를 reconstruction에 추가
-                for (idx, &residual) in residual_matrix.as_slice().unwrap().iter().enumerate() {
-                    reconstruction[idx] += residual;
-                }
-            },
-            _ => {
-                // DCT나 Adaptive는 지원하지 않음
-                // 변환 없이 직접 적용은 의미가 없으므로 무시
-            }
-        }
-        
         reconstruction
     }
 } 

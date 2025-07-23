@@ -8,6 +8,10 @@ edition = "2021"
 name = "test_memory_size"
 path = "src/test_memory_size.rs"
 
+[[example]]
+name = "korean_sllm_demo"
+path = "examples/korean_sllm_demo.rs"
+
 [dependencies]
 # 기존 의존성들
 rand = "0.8"
