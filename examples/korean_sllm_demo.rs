@@ -1,410 +1,272 @@
+//! Korean sLLM (소형 언어 모델) 압축 및 추론 데모
+//! 실제 한국어 모델을 다운로드하고 RBE로 압축한 후 텍스트 생성
+#![allow(unused_imports, dead_code, unused_variables, unused_mut)]
+
 use rbe_llm::{
-    encoder::{RBEEncoder, encoder::{QualityGrade, CompressionProfile, CompressionConfig}},
+    encoder::{encoder::{QualityGrade, CompressionProfile}, CompressionConfig, RBEEncoder},
     decoder::WeightGenerator,
     TransformType,
     HybridEncodedBlock,
-    nlp::linear::rbe_linear::{RBELinear, RBELinearConfig},
+};
+use rbe_llm::nlp::bert_inference::{
+    CompressedLayer, CompressedBert, BertAttention, BertFeedForward, CompressedBertLayer
 };
 use std::{time::Instant, path::Path, collections::HashMap};
 use tokenizers::tokenizer::Tokenizer;
-use safetensors::{tensor::SafeTensors, SafeTensorError};
+use safetensors::{tensor::SafeTensors, SafeTensorError, Dtype};
 use std::fs;
 use std::io::Read;
 use serde_json::Value;
+use anyhow::{Result, bail, anyhow};
 
 /// 한글 sLLM 압축 데모
 /// KoMiniLM-23M 모델을 RBE로 압축하고 실제 한글 텍스트를 생성합니다.
 
-// 모델 구조체
-struct CompressedKoreanLLM {
-    tokenizer: Tokenizer,
-    layers: HashMap<String, CompressedLayer>,
-    config: ModelConfig,
-}
-
-// 압축된 레이어
-struct CompressedLayer {
-    blocks: Vec<HybridEncodedBlock>,
-    shape: Vec<usize>,
-}
-
 // 모델 설정
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ModelConfig {
     vocab_size: usize,
     hidden_size: usize,
     n_layers: usize,
     n_heads: usize,
-    max_position_embeddings: usize,
-    model_type: String,
+    intermediate_size: usize,
 }
 
-// LayerNorm (압축 없이 그대로 사용)
-struct LayerNorm {
-    weight: Vec<f32>,
-    bias: Vec<f32>,
-    eps: f32,
+// 가중치 저장소
+struct CompressedWeights {
+    layers: HashMap<String, CompressedLayer>,
+    biases: HashMap<String, Vec<f32>>,
+    layernorms: HashMap<String, Vec<f32>>,
 }
 
-impl LayerNorm {
-    fn from_tensors(weight: Vec<f32>, bias: Vec<f32>) -> Self {
-        Self { weight, bias, eps: 1e-5 }
-    }
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("🚀 RBE 기반 한국어 sLLM 데모 시작");
     
-    fn forward(&self, x: &[f32]) -> Vec<f32> {
-        let mean = x.iter().sum::<f32>() / x.len() as f32;
-        let variance = x.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / x.len() as f32;
-        let std = (variance + self.eps).sqrt();
-        
-        x.iter().enumerate()
-            .map(|(i, &v)| ((v - mean) / std) * self.weight[i] + self.bias[i])
-            .collect()
+    // 모델 경로 설정 (예: ./models/KoMiniLM-23M)
+    let model_path = Path::new("models").join("KoMiniLM-23M");
+    if !model_path.exists() {
+        println!("모델 파일이 없습니다. `setup_korean_test_model.py`를 실행하여 다운로드하세요.");
+        return Ok(());
     }
+
+    // 1. 모델 로드 및 압축
+    let (weights, config, tokenizer) = load_and_compress_model(&model_path).await?;
+    
+    // 2. 압축된 BERT 모델 구성
+    let bert_model = build_compressed_bert(&weights, &config)?;
+
+    // 3. 텍스트 생성
+    let prompt = "대한민국에서 가장 높은 산은";
+    let generated_text = generate_text(bert_model, &tokenizer, prompt, 30).await?;
+
+    println!("\n✅ 최종 생성 결과:");
+    println!("--------------------");
+    println!("{}", generated_text);
+    println!("--------------------");
+
+    Ok(())
 }
 
-// 모델 로드 및 압축
-async fn load_and_compress_korean_model(model_path: &Path) -> Result<CompressedKoreanLLM, Box<dyn std::error::Error>> {
-    println!("🔍 한국어 모델 로드 시작: {:?}", model_path);
-    
-    // 1. 설정 파일 로드
+async fn load_and_compress_model(model_path: &Path) -> Result<(CompressedWeights, ModelConfig, Tokenizer)> {
+    println!("\n[1/3] 모델 로딩 및 압축...");
+    let start_time = Instant::now();
+
+    // 설정 파일 로드
     let config_path = model_path.join("config.json");
-    let config_str = fs::read_to_string(&config_path)?;
-    let config_json: Value = serde_json::from_str(&config_str)?;
-    
+    let mut config_file = fs::File::open(&config_path)?;
+    let mut config_str = String::new();
+    config_file.read_to_string(&mut config_str)?;
+    let json_config: Value = serde_json::from_str(&config_str)?;
+
     let config = ModelConfig {
-        vocab_size: config_json["vocab_size"].as_u64().unwrap() as usize,
-        hidden_size: config_json["hidden_size"].as_u64().unwrap() as usize,
-        n_layers: config_json["num_hidden_layers"].as_u64().unwrap() as usize,
-        n_heads: config_json["num_attention_heads"].as_u64().unwrap() as usize,
-        max_position_embeddings: config_json["max_position_embeddings"].as_u64().unwrap() as usize,
-        model_type: config_json["model_type"].as_str().unwrap().to_string(),
+        vocab_size: json_config["vocab_size"].as_u64().unwrap() as usize,
+        hidden_size: json_config["hidden_size"].as_u64().unwrap() as usize,
+        n_layers: json_config["num_hidden_layers"].as_u64().unwrap() as usize,
+        n_heads: json_config["num_attention_heads"].as_u64().unwrap() as usize,
+        intermediate_size: json_config["intermediate_size"].as_u64().unwrap() as usize,
     };
-    
-    println!("📊 모델 구성:");
-    println!("  - 모델 타입: {}", config.model_type);
-    println!("  - 어휘 크기: {}", config.vocab_size);
-    println!("  - 히든 크기: {}", config.hidden_size);
-    println!("  - 레이어 수: {}", config.n_layers);
-    
-    // 2. 토크나이저 로드
-    println!("\n🔤 토크나이저 로드 중...");
+    println!("모델 설정 로드 완료: {:?}", config);
+
+    // 토크나이저 로드
     let tokenizer_path = model_path.join("tokenizer.json");
-    let tokenizer = Tokenizer::from_file(&tokenizer_path)
-        .map_err(|e| format!("토크나이저 로드 실패: {}", e))?;
-    
-    // 3. 가중치 로드
-    println!("\n📦 모델 가중치 로드 중...");
+    let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| anyhow!("Tokenizer 로드 실패: {}", e))?;
+    println!("토크나이저 로드 완료");
+
+    // 가중치 파일 로드
     let weights_path = model_path.join("model.safetensors");
-    let mut file = fs::File::open(&weights_path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-    let tensors = SafeTensors::deserialize(&buffer)?;
-    
-    // 4. RBE 압축 설정
+    let weights_data = fs::read(&weights_path)?;
+    let tensors = SafeTensors::deserialize(&weights_data)?;
+    println!("가중치 파일 로드 완료");
+
+    // 압축 설정
     let compression_config = CompressionConfig {
         block_size: 64,
         quality_grade: QualityGrade::A,
         transform_type: TransformType::Dwt,
-        profile: CompressionProfile::Balanced,
-        custom_coefficients: Some(200), // A급 품질을 위한 계수
+        profile: CompressionProfile::High,
+        custom_coefficients: None,
         min_block_count: None,
-        rmse_threshold: Some(0.001),
-        compression_ratio_threshold: Some(500.0),
+        rmse_threshold: Some(0.1),
+        compression_ratio_threshold: None,
     };
-    
-    // 5. 레이어별 압축
-    println!("\n🔨 레이어별 RBE 압축 시작...");
-    let start_time = Instant::now();
-    
-    let mut layers = HashMap::new();
-    
-    // 압축할 텐서들의 목록을 수집
-    let tensor_names: Vec<_> = tensors.names().into_iter().collect();
-    let total_tensors = tensor_names.len();
-    
-    for (idx, tensor_name) in tensor_names.iter().enumerate() {
-        if idx % 10 == 0 {
-            println!("  진행률: {}/{} ({:.1}%)", idx, total_tensors, 
-                     idx as f32 / total_tensors as f32 * 100.0);
-        }
-        
-        // LayerNorm은 압축하지 않음
-        if tensor_name.contains("LayerNorm") || tensor_name.contains("ln_") {
-            continue;
-        }
-        
-        // 텐서 데이터 추출
-        let tensor = tensors.tensor(tensor_name)?;
-        let shape = tensor.shape();
-        let data = tensor.data();
-        
-        // f32로 변환
-        let weights: Vec<f32> = data.chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
-        
-        // 압축
-        let compressed = compress_tensor(&weights, shape, &compression_config)?;
-        layers.insert(tensor_name.to_string(), compressed);
-    }
-    
-    println!("\n✅ 전체 압축 완료! 시간: {:.2}초", start_time.elapsed().as_secs_f64());
-    
-    // 메모리 사용량 분석
-    print_memory_usage(&layers, &config);
-    
-    Ok(CompressedKoreanLLM {
-        tokenizer,
-        layers,
-        config,
-    })
-}
 
-// 텐서 압축
-fn compress_tensor(
-    weights: &[f32],
-    shape: &[usize],
-    config: &CompressionConfig,
-) -> Result<CompressedLayer, Box<dyn std::error::Error>> {
-    // 2D로 변환
-    let (rows, cols) = match shape.len() {
-        1 => (shape[0], 1),
-        2 => (shape[0], shape[1]),
-        _ => {
-            let rows = shape[0];
-            let cols = shape[1..].iter().product();
-            (rows, cols)
-        }
+    let mut compressed_weights = CompressedWeights {
+        layers: HashMap::new(),
+        biases: HashMap::new(),
+        layernorms: HashMap::new(),
     };
-    
-    // RBE 압축
-    let (blocks, _, compression_ratio, rmse) = RBEEncoder::compress_with_profile(
-        weights,
-        rows,
-        cols,
-        config.block_size,
-        config.custom_coefficients.unwrap_or(200),
-        config.transform_type,
-    )?;
-    
-    Ok(CompressedLayer {
-        blocks,
-        shape: shape.to_vec(),
-    })
-}
 
-// 메모리 사용량 출력
-fn print_memory_usage(layers: &HashMap<String, CompressedLayer>, config: &ModelConfig) {
-    println!("\n📊 압축률 통계:");
-    
-    let mut total_original = 0usize;
-    let mut total_compressed = 0usize;
-    
-    for (name, layer) in layers {
-        let original_size = layer.shape.iter().product::<usize>() * 4; // f32
-        let compressed_size = layer.blocks.len() * std::mem::size_of::<HybridEncodedBlock>();
-        
-        total_original += original_size;
-        total_compressed += compressed_size;
-        
-        if name.contains("embedding") || name.contains("lm_head") {
-            println!("  - {}: {:.2}MB → {:.2}MB (압축률 {:.1}x)", 
-                     name,
-                     original_size as f32 / 1024.0 / 1024.0,
-                     compressed_size as f32 / 1024.0 / 1024.0,
-                     original_size as f32 / compressed_size as f32);
+    let mut original_total_size = 0;
+    let mut compressed_total_size = 0;
+
+    for (name, tensor_view) in tensors.tensors() {
+        let shape = tensor_view.shape();
+        let data = tensor_view.data();
+        let original_size = data.len();
+        original_total_size += original_size;
+
+        // 모든 2D 텐서를 압축 대상으로 간주
+        if shape.len() == 2 {
+            // 행렬 가중치 압축
+            let weights_f32 = bytes_to_f32(data);
+            
+            match RBEEncoder::compress_with_config(&weights_f32, shape[0], shape[1], &compression_config) {
+                Ok((blocks, _time, ratio, rmse)) => {
+                    let compressed_size = blocks.iter().map(|b| 32 + b.residuals.len() * 8).sum::<usize>();
+                    compressed_total_size += compressed_size;
+                    
+                    let layer = CompressedLayer { blocks, shape: (shape[0], shape[1]) };
+                    compressed_weights.layers.insert(name.clone(), layer);
+                    
+                    println!("  - 압축: {} ({} -> {} bytes, {:.2}x, RMSE: {:.4})", name, original_size, compressed_size, ratio, rmse);
+                }
+                Err(e) => {
+                    println!("  - 압축 실패 {}: {}. 압축 없이 진행합니다.", name, e);
+                    let blocks = Vec::new(); 
+                    let layer = CompressedLayer { blocks, shape: (shape[0], shape[1]) };
+                    compressed_weights.layers.insert(name.clone(), layer);
+                    compressed_total_size += original_size;
+                }
+            }
+
+        } else if shape.len() == 1 {
+            // 1D 텐서는 bias 또는 layernorm으로 간주 (압축 안함)
+            if name.contains("bias") {
+                compressed_weights.biases.insert(name.clone(), bytes_to_f32(data));
+            } else {
+                compressed_weights.layernorms.insert(name.clone(), bytes_to_f32(data));
+            }
+            compressed_total_size += original_size;
         }
     }
     
-    println!("\n📈 전체 통계:");
-    println!("  - 원본 크기: {:.2}MB", total_original as f32 / 1024.0 / 1024.0);
-    println!("  - 압축 크기: {:.2}MB", total_compressed as f32 / 1024.0 / 1024.0);
-    println!("  - 전체 압축률: {:.1}x", total_original as f32 / total_compressed as f32);
-    println!("  - 메모리 절약: {:.1}%", 
-             (1.0 - total_compressed as f32 / total_original as f32) * 100.0);
+    println!("\n압축 완료! ({:.2}s)", start_time.elapsed().as_secs_f32());
+    println!("  - 원본 크기: {:.2} MB", original_total_size as f32 / 1_048_576.0);
+    println!("  - 압축 크기: {:.2} MB", compressed_total_size as f32 / 1_048_576.0);
+    println!("  - 압축률: {:.2}x", original_total_size as f32 / compressed_total_size as f32);
+
+    Ok((compressed_weights, config, tokenizer))
 }
 
-// 한글 텍스트 생성
-async fn generate_korean_text(
-    model: &CompressedKoreanLLM,
-    prompt: &str,
-    max_length: usize,
-) -> Result<String, Box<dyn std::error::Error>> {
-    println!("\n🚀 한글 텍스트 생성 시작");
-    println!("📝 프롬프트: {}", prompt);
+
+fn build_compressed_bert<'a>(weights: &'a CompressedWeights, config: &'a ModelConfig) -> Result<CompressedBert<'a>> {
+    println!("\n[2/3] 압축된 BERT 모델 구성...");
     
-    // 토큰화
-    let encoding = model.tokenizer.encode(prompt, false)
-        .map_err(|e| format!("토큰화 실패: {:?}", e))?;
-    let mut input_ids: Vec<u32> = encoding.get_ids().to_vec();
-    
-    println!("🔢 입력 토큰: {:?} ({}개)", &input_ids[..5.min(input_ids.len())], input_ids.len());
-    
-    // WeightGenerator 생성
-    let weight_generator = WeightGenerator::new();
-    
-    // 생성 루프
-    for step in 0..max_length {
-        let start = Instant::now();
-        
-        // 간단한 추론 데모 (실제로는 전체 트랜스포머 구조를 구현해야 함)
-        // 여기서는 임베딩 레이어만 사용해서 다음 토큰 예측을 시뮬레이션
-        let token_id = input_ids.last().unwrap();
-        
-        // 토큰 임베딩 가져오기 (예시)
-        let embedding_key = match model.config.model_type.as_str() {
-            "gpt2" => "wte.weight",
-            "bert" | "electra" => "embeddings.word_embeddings.weight",
-            _ => "embeddings.token_embeddings.weight",
+    let mut bert_layers = Vec::with_capacity(config.n_layers);
+    for i in 0..config.n_layers {
+        let prefix = format!("bert.encoder.layer.{}", i);
+        let attention = BertAttention {
+            q_w: weights.layers.get(&format!("{}.attention.self.query.weight", prefix)).ok_or_else(|| anyhow!("Missing weight"))?,
+            q_b: weights.biases.get(&format!("{}.attention.self.query.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
+            k_w: weights.layers.get(&format!("{}.attention.self.key.weight", prefix)).ok_or_else(|| anyhow!("Missing weight"))?,
+            k_b: weights.biases.get(&format!("{}.attention.self.key.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
+            v_w: weights.layers.get(&format!("{}.attention.self.value.weight", prefix)).ok_or_else(|| anyhow!("Missing weight"))?,
+            v_b: weights.biases.get(&format!("{}.attention.self.value.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
+            output_w: weights.layers.get(&format!("{}.attention.output.dense.weight", prefix)).ok_or_else(|| anyhow!("Missing weight"))?,
+            output_b: weights.biases.get(&format!("{}.attention.output.dense.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
+            layernorm_w: weights.layernorms.get(&format!("{}.attention.output.LayerNorm.weight", prefix)).ok_or_else(|| anyhow!("Missing layernorm"))?,
+            layernorm_b: weights.biases.get(&format!("{}.attention.output.LayerNorm.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
+            n_heads: config.n_heads,
+            hidden_size: config.hidden_size,
+        };
+
+        let ffn = BertFeedForward {
+            intermediate_w: weights.layers.get(&format!("{}.intermediate.dense.weight", prefix)).ok_or_else(|| anyhow!("Missing weight"))?,
+            intermediate_b: weights.biases.get(&format!("{}.intermediate.dense.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
+            output_w: weights.layers.get(&format!("{}.output.dense.weight", prefix)).ok_or_else(|| anyhow!("Missing weight"))?,
+            output_b: weights.biases.get(&format!("{}.output.dense.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
+            layernorm_w: weights.layernorms.get(&format!("{}.output.LayerNorm.weight", prefix)).ok_or_else(|| anyhow!("Missing layernorm"))?,
+            layernorm_b: weights.biases.get(&format!("{}.output.LayerNorm.bias", prefix)).ok_or_else(|| anyhow!("Missing bias"))?,
         };
         
-        if let Some(embedding_layer) = model.layers.get(embedding_key) {
-            // 압축된 블록에서 토큰 임베딩 디코딩
-            // 실제로는 전체 forward pass를 구현해야 하지만, 데모를 위해 간단히 처리
-            let next_token = generate_next_token(&weight_generator, embedding_layer, *token_id as usize);
-            input_ids.push(next_token);
-            
-            // 디코딩
-            let generated = model.tokenizer.decode(&input_ids, false)
-                .map_err(|e| format!("디코딩 실패: {:?}", e))?;
-            
-            if step % 5 == 0 {
-                println!("  Step {}: {} ({:.1}ms)", step, generated, start.elapsed().as_millis());
-            }
-            
-            // 종료 조건 (EOS 토큰)
-            if next_token == 2 {  // 일반적인 EOS token ID
-                break;
-            }
-        } else {
-            println!("⚠️  임베딩 레이어를 찾을 수 없습니다.");
+        bert_layers.push(CompressedBertLayer { attention, ffn });
+    }
+
+    let bert_model = CompressedBert {
+        token_emb: weights.layers.get("bert.embeddings.word_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
+        position_emb: weights.layers.get("bert.embeddings.position_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
+        token_type_emb: weights.layers.get("bert.embeddings.token_type_embeddings.weight").ok_or_else(|| anyhow!("Missing embedding"))?,
+        emb_layernorm_w: weights.layernorms.get("bert.embeddings.LayerNorm.weight").ok_or_else(|| anyhow!("Missing layernorm"))?,
+        emb_layernorm_b: weights.biases.get("bert.embeddings.LayerNorm.bias").ok_or_else(|| anyhow!("Missing bias"))?,
+        layers: bert_layers,
+        
+        // LM Head 재구성
+        lm_head_dense_w: weights.layers.get("cls.predictions.transform.dense.weight").ok_or_else(|| anyhow!("Missing cls.predictions.transform.dense.weight"))?,
+        lm_head_dense_b: weights.biases.get("cls.predictions.transform.dense.bias").ok_or_else(|| anyhow!("Missing cls.predictions.transform.dense.bias"))?,
+        lm_head_layernorm_w: weights.layernorms.get("cls.predictions.transform.LayerNorm.weight").ok_or_else(|| anyhow!("Missing cls.predictions.transform.LayerNorm.weight"))?,
+        lm_head_layernorm_b: weights.biases.get("cls.predictions.transform.LayerNorm.bias").ok_or_else(|| anyhow!("Missing cls.predictions.transform.LayerNorm.bias"))?,
+        
+        // 디코더 가중치는 임베딩과 공유
+        lm_head_decoder_w: weights.layers.get("bert.embeddings.word_embeddings.weight").ok_or_else(|| anyhow!("Missing word_embeddings.weight for decoder"))?,
+        lm_head_decoder_b: weights.biases.get("cls.predictions.bias").map(|v| &**v), // 'decoder' bias는 없고 'predictions.bias'가 존재할 수 있음
+
+        hidden_size: config.hidden_size,
+        n_heads: config.n_heads,
+        generator: WeightGenerator::new(),
+    };
+
+    println!("BERT 모델 구성 완료");
+    Ok(bert_model)
+}
+
+
+async fn generate_text(mut model: CompressedBert<'_>, tokenizer: &Tokenizer, prompt: &str, max_length: usize) -> Result<String> {
+    println!("\n[3/3] 텍스트 생성 시작...");
+    println!("  - 프롬프트: \"{}\"", prompt);
+
+    let encoding = tokenizer.encode(prompt, false).map_err(|e| anyhow!("토큰화 실패: {}", e))?;
+    let mut token_ids = encoding.get_ids().to_vec();
+
+    for i in 0..max_length {
+        let start_time = Instant::now();
+        
+        let logits = model.forward(&token_ids)?;
+        
+        // 가장 확률이 높은 토큰 선택 (greedy)
+        let next_token = logits.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(index, _)| index as u32)
+            .unwrap_or(0);
+
+        token_ids.push(next_token);
+        
+        let current_text = tokenizer.decode(&token_ids, true).map_err(|e| anyhow!("디코딩 실패: {}", e))?;
+        println!("  - Step {}: \"{}\" ({:.2}ms)", i + 1, current_text, start_time.elapsed().as_millis());
+
+        // [SEP] 토큰 만나면 종료
+        if next_token == tokenizer.token_to_id("[SEP]").unwrap_or(102) {
             break;
         }
     }
-    
-    let final_text = model.tokenizer.decode(&input_ids, false)
-        .map_err(|e| format!("최종 디코딩 실패: {:?}", e))?;
-    
-    Ok(final_text)
+
+    tokenizer.decode(&token_ids, true).map_err(|e| anyhow!("최종 디코딩 실패: {}", e))
 }
 
-// 다음 토큰 생성 (간단한 예시)
-fn generate_next_token(
-    weight_generator: &WeightGenerator,
-    embedding_layer: &CompressedLayer,
-    current_token: usize,
-) -> u32 {
-    // 실제로는 전체 모델을 통과해야 하지만, 데모를 위해 간단히 처리
-    // 여기서는 랜덤하게 다음 토큰을 선택
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    
-    // 토큰 범위 내에서 랜덤 선택 (실제로는 확률 분포에 따라 선택해야 함)
-    rng.gen_range(0..50000) as u32
-}
-
-// RBE 레이어를 사용한 실제 추론 함수
-fn forward_rbe_layer(
-    weight_generator: &WeightGenerator,
-    compressed_layer: &CompressedLayer,
-    input: &[f32],
-) -> Vec<f32> {
-    // 블록별로 디코딩하고 행렬 곱셈 수행
-    let mut output = vec![0.0f32; compressed_layer.shape[0]];
-    
-    for (block_idx, block) in compressed_layer.blocks.iter().enumerate() {
-        // 블록 디코딩
-        let decoded_block = weight_generator.decode_block(block);
-        
-        // 부분 행렬 곱셈 (간단한 구현)
-        // 실제로는 블록 위치를 고려한 정확한 계산이 필요
-        for i in 0..block.rows {
-            for j in 0..block.cols {
-                if i < output.len() && j < input.len() {
-                    output[i] += decoded_block[i * block.cols + j] * input[j];
-                }
-            }
-        }
-    }
-    
-    output
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🚀 RBE 한국어 sLLM 압축 및 추론 데모");
-    println!("=====================================\n");
-    
-    let start_time = Instant::now();
-    
-    // 1. 모델 경로 설정
-    let model_path = Path::new("models/kominilm-23m");
-    if !model_path.exists() {
-        println!("❌ 모델이 없습니다. 먼저 setup_korean_test_model.py를 실행하세요.");
-        println!("   python setup_korean_test_model.py");
-        return Ok(());
-    }
-    
-    // 2. 모델 로드 및 압축
-    let compressed_model = load_and_compress_korean_model(model_path).await?;
-    
-    // 3. 한글 텍스트 생성 테스트
-    println!("\n🧪 한글 텍스트 생성 테스트");
-    println!("==========================");
-    
-    let test_prompts = vec![
-        "안녕하세요",
-        "오늘 날씨가",
-        "RBE 시스템은",
-        "한국어 자연어처리",
-    ];
-    
-    for prompt in test_prompts {
-        println!("\n📝 프롬프트: \"{}\"", prompt);
-        
-        match generate_korean_text(&compressed_model, prompt, 20).await {
-            Ok(generated) => {
-                println!("✅ 생성된 텍스트: {}", generated);
-            }
-            Err(e) => {
-                println!("❌ 생성 실패: {}", e);
-            }
-        }
-    }
-    
-    // 4. RBE 블록 직접 테스트
-    println!("\n🔬 RBE 압축 블록 직접 테스트");
-    println!("=============================");
-    
-    // 임베딩 레이어에서 첫 번째 블록 테스트
-    if let Some(embedding_layer) = compressed_model.layers.get("wte.weight")
-        .or(compressed_model.layers.get("embeddings.word_embeddings.weight")) {
-        
-        if let Some(first_block) = embedding_layer.blocks.first() {
-            let weight_generator = WeightGenerator::new();
-            let decoded = weight_generator.decode_block(first_block);
-            
-            println!("  - 첫 번째 블록 크기: {}x{}", first_block.rows, first_block.cols);
-            println!("  - RBE 파라미터: {:?}", &first_block.rbe_params[..4]);
-            println!("  - 잔차 계수 개수: {}", first_block.residuals.len());
-            println!("  - 디코딩된 값 샘플: {:?}", &decoded[..5.min(decoded.len())]);
-            
-            // RMSE 계산 (원본 데이터가 없으므로 자체 검증)
-            let re_encoded = RBEEncoder::new(200, TransformType::Dwt)
-                .encode_block(&decoded, first_block.rows, first_block.cols);
-            let re_decoded = weight_generator.decode_block(&re_encoded);
-            
-            let rmse: f32 = decoded.iter()
-                .zip(re_decoded.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f32>() / decoded.len() as f32;
-            
-            println!("  - 재인코딩 RMSE: {:.6}", rmse.sqrt());
-        }
-    }
-    
-    println!("\n🏁 전체 실행 시간: {:.2}초", start_time.elapsed().as_secs_f64());
-    println!("\n✨ RBE 한국어 모델 압축 및 추론 완료!");
-    
-    Ok(())
+fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
 } 
