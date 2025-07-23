@@ -176,7 +176,7 @@ impl RiemannianAdamState {
         }
     }
     
-    /// 푸앵카레 볼에서의 지수 사상 (고속 최적화)
+    /// 푸앵카레 볼에서의 지수 사상 (고속 최적화 + Small-Move 근사)
     #[inline]
     pub fn exponential_map(&self, x: f32, v: f32) -> f32 {
         // **극초기 종료** (조기 최적화)
@@ -189,7 +189,18 @@ impl RiemannianAdamState {
         
         let norm_v = v.abs();
         
-        // tanh 계산 시 오버플로 방지 + **고속 tanh 사용**
+        // **Small-Move 지오데식 근사**: 작은 이동에 대해 Taylor 근사 사용
+        if norm_v < 0.1 {
+            // 1차 근사: exp_x(v) ≈ x + v/(1-|x|²)
+            let x_norm_sq = x * x;
+            if x_norm_sq < 0.999 {
+                let conformal_factor = 1.0 / (1.0 - x_norm_sq);
+                let result = x + v * conformal_factor;
+                return result.clamp(0.0, POINCARE_BOUNDARY_F32);
+            }
+        }
+        
+        // 큰 이동에 대해서는 기존 정확한 공식 사용
         let tanh_arg = (norm_v / 2.0).min(5.0); // tanh 포화 방지
         let tanh_factor = self.fast_tanh(tanh_arg);
         let direction = v / norm_v;

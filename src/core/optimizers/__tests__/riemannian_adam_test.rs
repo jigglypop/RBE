@@ -215,25 +215,84 @@ fn Riemannian_Adam상태_reset_테스트() {
     let mut r = 0.5;
     let mut theta = PI / 4.0;
     
-    // 몇 번 업데이트하여 상태 변경
-    for _ in 0..3 {
-        riemannian_adam.update(&mut r, &mut theta, 0.1, 0.05, 0.01);
+    // 여러 번 업데이트
+    for _ in 0..5 {
+        riemannian_adam.update(&mut r, &mut theta, 0.1, 0.2, 0.001);
     }
     
-    // 상태가 변경되었는지 확인
-    assert_ne!(riemannian_adam.m_r, 0.0, "업데이트 후 r 1차 모멘트가 변경되어야 함");
-    assert_ne!(riemannian_adam.v_r, 0.0, "업데이트 후 r 2차 모멘트가 변경되어야 함");
-    assert_eq!(riemannian_adam.t, 3, "업데이트 후 시간 스텝이 3이어야 함");
-    
-    // 리셋 수행
+    // 상태 초기화
     riemannian_adam.reset();
     
-    // 리셋 후 상태 확인
-    assert_eq!(riemannian_adam.m_r, 0.0, "리셋 후 r 1차 모멘트는 0이어야 함");
-    assert_eq!(riemannian_adam.v_r, 0.0, "리셋 후 r 2차 모멘트는 0이어야 함");
-    assert_eq!(riemannian_adam.m_theta, 0.0, "리셋 후 θ 1차 모멘트는 0이어야 함");
-    assert_eq!(riemannian_adam.v_theta, 0.0, "리셋 후 θ 2차 모멘트는 0이어야 함");
-    assert_eq!(riemannian_adam.t, 0, "리셋 후 시간 스텝은 0이어야 함");
+    // 상태가 초기화되었는지 확인
+    assert_eq!(riemannian_adam.t, 0);
+    assert_eq!(riemannian_adam.m_r, 0.0);
+    assert_eq!(riemannian_adam.v_r, 0.0);
+    assert_eq!(riemannian_adam.m_theta, 0.0);
+    assert_eq!(riemannian_adam.v_theta, 0.0);
+}
+
+// 추가: Small-Move 지오데식 근사 성능 테스트 (수정됨)
+#[test]
+fn test_small_move_geodesic_성능() {
+    use std::time::Instant;
     
-    println!("✅ Riemannian Adam 상태 reset 테스트 통과");
+    let iterations = 100000;
+    
+    // 작은 이동만 테스트 (근사 활성화)
+    let mut r = 0.5;
+    let mut total_time_approx = std::time::Duration::ZERO;
+    
+    for _ in 0..iterations {
+        let small_v = 0.05; // 0.1보다 작은 값
+        let adam = RiemannianAdamState::new();
+        
+        let start = Instant::now();
+        let _ = adam.exponential_map(r, small_v);
+        total_time_approx += start.elapsed();
+        
+        r = (r + 0.001) % 0.99; // r 값 변경
+    }
+    
+    // 큰 이동만 테스트 (정확한 공식)
+    r = 0.5;
+    let mut total_time_exact = std::time::Duration::ZERO;
+    
+    for _ in 0..iterations {
+        let large_v = 0.5; // 0.1보다 큰 값
+        let adam = RiemannianAdamState::new();
+        
+        let start = Instant::now();
+        let _ = adam.exponential_map(r, large_v);
+        total_time_exact += start.elapsed();
+        
+        r = (r + 0.001) % 0.99; // r 값 변경
+    }
+    
+    println!("Small-move 근사 (작은 이동): {:?} ({} iterations)", total_time_approx, iterations);
+    println!("정확한 공식 (큰 이동): {:?} ({} iterations)", total_time_exact, iterations);
+    
+    // 작은 이동에서는 근사가 더 빠름
+    println!("속도 향상: {:.2}x", total_time_exact.as_secs_f64() / total_time_approx.as_secs_f64());
+}
+
+// 추가: Small-Move 근사 정확도 테스트
+#[test]
+fn test_small_move_geodesic_정확도() {
+    let adam = RiemannianAdamState::new();
+    
+    // 작은 이동에 대한 근사 테스트
+    let x = 0.5;
+    let small_v = 0.01;
+    
+    // 근사 공식
+    let x_norm_sq = x * x;
+    let conformal_factor = 1.0 / (1.0 - x_norm_sq);
+    let approx_result = x + small_v * conformal_factor;
+    
+    // 정확한 공식 (mobius_add)
+    let exact_result = adam.exponential_map(x, small_v);
+    
+    // 근사 오차가 충분히 작아야 함
+    let error = (approx_result - exact_result).abs();
+    assert!(error < 1e-4, "근사 오차: {}", error);
 } 

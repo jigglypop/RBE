@@ -182,3 +182,75 @@ impl AdamState {
         self.m.abs() < threshold && self.v.sqrt() < threshold
     }
 } 
+
+/// 파라미터별 모멘텀 버퍼 (재사용 메모리)
+pub struct AdamBuffer {
+    pub m: Box<[f32]>,
+    pub v: Box<[f32]>,
+}
+
+impl AdamBuffer {
+    /// 길이 `len`의 0-초기화 버퍼 생성
+    pub fn zeroed(len: usize) -> Self {
+        let mut m = vec![0f32; len].into_boxed_slice();
+        let mut v = vec![0f32; len].into_boxed_slice();
+        Self { m, v }
+    }
+
+    /// 길이 확인 및 확장(0-패딩)
+    pub fn ensure_len(&mut self, len: usize) {
+        if self.m.len() < len {
+            let add = len - self.m.len();
+            let mut extra_m = vec![0f32; add];
+            let mut extra_v = vec![0f32; add];
+            self.m = {
+                let mut vec = self.m.to_vec();
+                vec.extend(extra_m);
+                vec.into_boxed_slice()
+            };
+            self.v = {
+                let mut vec = self.v.to_vec();
+                vec.extend(extra_v);
+                vec.into_boxed_slice()
+            };
+        }
+    }
+}
+
+impl AdamState {
+    /// **배치 업데이트** (SIMD 가속)
+    pub fn update_batch_simd(&mut self, params: &mut [f32], grads: &[f32], buf: &mut AdamBuffer, lr: f32) {
+        buf.ensure_len(params.len());
+        self.t += 1;  // t를 먼저 증가
+        
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            crate::core::optimizers::simd_utils::adam_update_avx2(
+                params,
+                grads,
+                &mut buf.m[..params.len()],
+                &mut buf.v[..params.len()],
+                self.beta1,
+                self.beta2,
+                lr,
+                self.epsilon,
+                self.t,  // 증가된 t를 전달
+            );
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            // Fallback to scalar loop
+            for ((p, &g), (m_i, v_i)) in params.iter_mut().zip(grads.iter()).zip(buf.m.iter_mut().zip(buf.v.iter_mut())) {
+                // per-param update using same equations as scalar update
+                *m_i = self.beta1 * *m_i + (1.0 - self.beta1) * g;
+                *v_i = self.beta2 * *v_i + (1.0 - self.beta2) * g * g;
+                let beta1_pow = self.beta1.powi(self.t);
+                let beta2_pow = self.beta2.powi(self.t);
+                let m_hat = *m_i / (1.0 - beta1_pow);
+                let v_hat = *v_i / (1.0 - beta2_pow);
+                let denom = v_hat.sqrt() + self.epsilon;
+                *p += -lr * m_hat / denom;
+            }
+        }
+    }
+} 

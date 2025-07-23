@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 # 바이너리들이 삭제되어 일시적으로 제거됨
+[[bin]]
+name = "test_memory_size"
+path = "src/test_memory_size.rs"
 
 [dependencies]
 # 기존 의존성들

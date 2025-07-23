@@ -1,6 +1,4 @@
-// Optimizers 모듈 테스트 통합
-// 각 모듈별로 분리된 테스트들을 재수출
-
+// 옵티마이저 테스트 모듈
 pub mod adam_test;
 pub mod riemannian_adam_test;
 pub mod analyzer_test;
