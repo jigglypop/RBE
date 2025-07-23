@@ -57,7 +57,14 @@ impl CompressedLayer {
         if input.len() != input_size {
             bail!("Input size mismatch for linear_forward. Expected {}, got {}", input_size, input.len());
         }
-        let mut output = bias.to_vec();
+        let mut output = if bias.is_empty() {
+            vec![0.0f32; output_size]
+        } else {
+            if bias.len() != output_size {
+                bail!("Bias size mismatch for linear_forward. Expected {} or 0, got {}", output_size, bias.len());
+            }
+            bias.to_vec()
+        };
         
         let blocks_per_row = (self.shape.1 + 63) / 64;
         
@@ -180,6 +187,7 @@ impl<'a> BertAttention<'a> {
     fn forward(&self, hidden_states: &mut [f32], generator: &WeightGenerator) -> Result<()> {
         let seq_len = hidden_states.len() / self.hidden_size;
         let head_size = self.hidden_size / self.n_heads;
+        let original_input = hidden_states.to_vec(); // For residual connection
 
         let mut all_q = Vec::with_capacity(seq_len * self.hidden_size);
         let mut all_k = Vec::with_capacity(seq_len * self.hidden_size);
@@ -222,7 +230,7 @@ impl<'a> BertAttention<'a> {
         }
 
         for i in 0..hidden_states.len() {
-            hidden_states[i] += attention_output[i];
+            hidden_states[i] = original_input[i] + attention_output[i];
         }
         layer_norm(hidden_states, self.layernorm_w, self.layernorm_b, 1e-12);
         
@@ -232,18 +240,27 @@ impl<'a> BertAttention<'a> {
 
 impl<'a> BertFeedForward<'a> {
     fn forward(&self, hidden_states: &mut [f32], generator: &WeightGenerator) -> Result<()> {
-        let residual = hidden_states.to_vec();
-        
-        // Intermediate layer
-        let mut intermediate = self.intermediate_w.linear_forward(generator, hidden_states, self.intermediate_b)?;
-        gelu(&mut intermediate);
-        
-        // Output layer
-        let output = self.output_w.linear_forward(generator, &intermediate, self.output_b)?;
+        let input_size = self.intermediate_w.shape.1;
+        let seq_len = hidden_states.len() / input_size;
+        let original_input = hidden_states.to_vec(); // For residual connection
+        let mut final_output = vec![0.0; hidden_states.len()];
+
+        for i in 0..seq_len {
+            let chunk = &hidden_states[i*input_size..(i+1)*input_size];
+            
+            // Intermediate layer
+            let mut intermediate = self.intermediate_w.linear_forward(generator, chunk, self.intermediate_b)?;
+            gelu(&mut intermediate);
+
+            // Output layer
+            let output_chunk = &mut final_output[i*input_size..(i+1)*input_size];
+            let processed_output = self.output_w.linear_forward(generator, &intermediate, self.output_b)?;
+            output_chunk.copy_from_slice(&processed_output);
+        }
         
         // Residual and LayerNorm
         for i in 0..hidden_states.len() {
-            hidden_states[i] = residual[i] + output[i];
+            hidden_states[i] = original_input[i] + final_output[i];
         }
         layer_norm(hidden_states, self.layernorm_w, self.layernorm_b, 1e-12);
         
@@ -270,15 +287,8 @@ impl<'a> CompressedBert<'a> {
 
         // 2. BERT Encoder Layers
         for layer in &self.layers {
-            let mut residual = hidden_states.clone();
             layer.attention.forward(&mut hidden_states, &self.generator)?;
-            for i in 0..hidden_states.len() { hidden_states[i] += residual[i]; }
-            layer_norm(&mut hidden_states, &layer.attention.layernorm_w, &layer.attention.layernorm_b, 1e-12);
-
-            residual = hidden_states.clone();
             layer.ffn.forward(&mut hidden_states, &self.generator)?;
-            for i in 0..hidden_states.len() { hidden_states[i] += residual[i]; }
-            layer_norm(&mut hidden_states, &layer.ffn.layernorm_w, &layer.ffn.layernorm_b, 1e-12);
         }
 
         // 3. Prediction Head
