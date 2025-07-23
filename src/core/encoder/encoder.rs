@@ -347,7 +347,13 @@ impl RBEEncoder {
             })
             .collect();
         coeffs.sort_unstable_by(|a, b| b.value.abs().partial_cmp(&a.value.abs()).unwrap());
-        let top_k_coeffs = coeffs.into_iter().take(self.k_coeffs).collect();
+        
+        // k_coeffs가 8 이하면 잔차 없음
+        let top_k_coeffs = if self.k_coeffs <= 8 {
+            Vec::new()
+        } else {
+            coeffs.into_iter().take(self.k_coeffs - 8).collect()
+        };
 
         HybridEncodedBlock {
             rbe_params,
