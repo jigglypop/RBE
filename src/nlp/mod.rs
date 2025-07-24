@@ -5,6 +5,10 @@
 pub mod linear;
 pub mod model_tools;
 pub mod bert_inference;
+pub mod embedding;
+pub mod layernorm;
+pub mod ffn;
+pub mod attention;
 
 // tensor 모듈 제거 - WeightGenerator 직접 사용으로 대체
 
