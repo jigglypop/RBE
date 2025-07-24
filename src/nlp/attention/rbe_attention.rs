@@ -1,12 +1,15 @@
 //! RBE 기반 Multi-Head Self-Attention
 //! Transformer의 핵심인 attention 메커니즘을 압축된 형태로 구현
 
-use crate::core::{
-    decoder::weight_generator::WeightGenerator,
-    encoder::{RBEEncoder, CompressionConfig, QualityGrade},
-    packed_params::{HybridEncodedBlock, TransformType},
+use crate::{
+    core::{
+        decoder::WeightGenerator,
+        encoder::RBEEncoder,
+        packed_params::HybridEncodedBlock,
+    },
+    nlp::linear::{RBELinear, RBELinearConfig},
+    QualityGrade,
 };
-use crate::nlp::linear::{RBELinear, RBELinearConfig};
 use anyhow::{Result, bail};
 use std::sync::Arc;
 use rayon::prelude::*;
@@ -137,30 +140,33 @@ impl RBEAttention {
         })
     }
     
-    /// 랜덤 가중치로 초기화 및 압축
+    /// 랜덤 가중치로 초기화하고 압축
     pub fn init_random(&mut self) -> Result<()> {
+        use rand::thread_rng;
+        use rand::distributions::{Distribution, Uniform};
+        
         println!("Attention 랜덤 초기화 및 압축 시작...");
         
         // RBE 인코더 생성
-        let encoder = match self.config.quality_grade {
+        let mut encoder = match self.config.quality_grade {
             QualityGrade::S => RBEEncoder::new_s_grade(),
             QualityGrade::A => RBEEncoder::new_a_grade(),
             QualityGrade::B => RBEEncoder::new_b_grade(),
-            QualityGrade::C => RBEEncoder::new_c_grade(),
+            QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
         };
         
         // 각 projection 압축
-        self.compress_projection(&encoder, "Q")?;
-        self.compress_projection(&encoder, "K")?;
-        self.compress_projection(&encoder, "V")?;
-        self.compress_projection(&encoder, "O")?;
+        self.compress_projection(&mut encoder, "query")?;
+        self.compress_projection(&mut encoder, "key")?;
+        self.compress_projection(&mut encoder, "value")?;
+        self.compress_projection(&mut encoder, "output")?;
         
         println!("Attention 초기화 완료!");
         Ok(())
     }
     
-    /// Projection 압축
-    fn compress_projection(&mut self, encoder: &RBEEncoder, proj_type: &str) -> Result<()> {
+    /// 특정 projection 압축
+    fn compress_projection(&mut self, encoder: &mut RBEEncoder, proj_type: &str) -> Result<()> {
         use rand::{thread_rng, Rng};
         use rand::distributions::Uniform;
         
@@ -198,10 +204,10 @@ impl RBEAttention {
         
         // 해당 projection에 블록 할당
         match proj_type {
-            "Q" => self.q_proj.blocks = blocks,
-            "K" => self.k_proj.blocks = blocks,
-            "V" => self.v_proj.blocks = blocks,
-            "O" => self.out_proj.blocks = blocks,
+            "query" => self.q_proj.blocks = blocks,
+            "key" => self.k_proj.blocks = blocks,
+            "value" => self.v_proj.blocks = blocks,
+            "output" => self.out_proj.blocks = blocks,
             _ => bail!("Unknown projection type: {}", proj_type),
         }
         
@@ -441,6 +447,7 @@ impl RBEAttention {
 
 /// 사전 학습된 가중치에서 로드
 impl RBEAttention {
+    /// 사전 학습된 가중치로부터 RBEAttention 생성
     pub fn from_pretrained_weights(
         q_weights: &[f32],
         k_weights: &[f32],
@@ -448,38 +455,114 @@ impl RBEAttention {
         o_weights: &[f32],
         config: RBEAttentionConfig,
     ) -> Result<Self> {
-        let expected_size = config.hidden_dim * config.hidden_dim;
-        
         // 검증
-        for (weights, name) in &[
-            (q_weights, "Q"),
-            (k_weights, "K"),
-            (v_weights, "V"),
-            (o_weights, "O"),
-        ] {
-            if weights.len() != expected_size {
-                bail!("{} weights size mismatch: expected {}, got {}", 
-                      name, expected_size, weights.len());
-            }
+        let weight_size = config.hidden_dim * config.hidden_dim;
+        
+        if q_weights.len() != weight_size || k_weights.len() != weight_size ||
+           v_weights.len() != weight_size || o_weights.len() != weight_size {
+            bail!("Weight size mismatch: expected {}, got Q:{}, K:{}, V:{}, O:{}", 
+                  weight_size, q_weights.len(), k_weights.len(), 
+                  v_weights.len(), o_weights.len());
         }
         
-        let mut attention = Self::new(config.clone())?;
-        
         // RBE 인코더 생성
-        let encoder = match config.quality_grade {
+        let mut encoder = match config.quality_grade {
             QualityGrade::S => RBEEncoder::new_s_grade(),
             QualityGrade::A => RBEEncoder::new_a_grade(),
             QualityGrade::B => RBEEncoder::new_b_grade(),
-            QualityGrade::C => RBEEncoder::new_c_grade(),
+            QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
         };
         
         println!("사전 학습된 Attention 가중치 압축 시작...");
         
         // 각 projection 압축
-        attention.compress_weights(&encoder, q_weights, "Q")?;
-        attention.compress_weights(&encoder, k_weights, "K")?;
-        attention.compress_weights(&encoder, v_weights, "V")?;
-        attention.compress_weights(&encoder, o_weights, "O")?;
+        let q_blocks = Self::compress_weights(
+            q_weights,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.block_size,
+            &mut encoder,
+        )?;
+        
+        let k_blocks = Self::compress_weights(
+            k_weights,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.block_size,
+            &mut encoder,
+        )?;
+        
+        let v_blocks = Self::compress_weights(
+            v_weights,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.block_size,
+            &mut encoder,
+        )?;
+        
+        let o_blocks = Self::compress_weights(
+            o_weights,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.block_size,
+            &mut encoder,
+        )?;
+        
+        // RBELinear 생성
+        let q_proj = RBELinear::with_config(
+            q_blocks,
+            config.hidden_dim,
+            config.hidden_dim,
+            None,
+            RBELinearConfig {
+                enable_parallel: config.enable_parallel,
+                cache_size: config.cache_size,
+            },
+        );
+        
+        let k_proj = RBELinear::with_config(
+            k_blocks,
+            config.hidden_dim,
+            config.hidden_dim,
+            None,
+            RBELinearConfig {
+                enable_parallel: config.enable_parallel,
+                cache_size: config.cache_size,
+            },
+        );
+        
+        let v_proj = RBELinear::with_config(
+            v_blocks,
+            config.hidden_dim,
+            config.hidden_dim,
+            None,
+            RBELinearConfig {
+                enable_parallel: config.enable_parallel,
+                cache_size: config.cache_size,
+            },
+        );
+        
+        let out_proj = RBELinear::with_config(
+            o_blocks,
+            config.hidden_dim,
+            config.hidden_dim,
+            None,
+            RBELinearConfig {
+                enable_parallel: config.enable_parallel,
+                cache_size: config.cache_size,
+            },
+        );
+        
+        let scale = 1.0 / (config.head_dim as f32).sqrt();
+        
+        let attention = Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            out_proj,
+            scale,
+            config,
+        };
         
         let (compressed_size, ratio) = attention.memory_usage();
         println!("Attention 압축 완료! 압축률: {:.1}:1, 압축 크기: {:.2} MB", 
@@ -488,22 +571,22 @@ impl RBEAttention {
         Ok(attention)
     }
     
-    /// 가중치 압축 헬퍼
+    /// 특정 가중치 압축 헬퍼
     fn compress_weights(
-        &mut self,
-        encoder: &RBEEncoder,
         weights: &[f32],
-        proj_type: &str,
-    ) -> Result<()> {
+        rows: usize,
+        cols: usize,
+        block_size: usize,
+        encoder: &mut RBEEncoder,
+    ) -> Result<Vec<HybridEncodedBlock>> {
         let mut blocks = Vec::new();
-        let dim = self.config.hidden_dim;
-        let block_size = self.config.block_size;
+        let dim = rows; // Use rows for block_size
+        let block_size = block_size;
         
         let blocks_per_row = (dim + block_size - 1) / block_size;
-        let blocks_per_col = blocks_per_row;
         
         for row_block in 0..blocks_per_row {
-            for col_block in 0..blocks_per_col {
+            for col_block in 0..blocks_per_row {
                 let row_start = row_block * block_size;
                 let row_end = ((row_block + 1) * block_size).min(dim);
                 let col_start = col_block * block_size;
@@ -522,19 +605,12 @@ impl RBEAttention {
                     }
                 }
                 
+                // 압축
                 let encoded = encoder.encode_block(&block_data, block_rows, block_cols);
                 blocks.push(encoded);
             }
         }
         
-        match proj_type {
-            "Q" => self.q_proj.blocks = blocks,
-            "K" => self.k_proj.blocks = blocks,
-            "V" => self.v_proj.blocks = blocks,
-            "O" => self.out_proj.blocks = blocks,
-            _ => bail!("Unknown projection type: {}", proj_type),
-        }
-        
-        Ok(())
+        Ok(blocks)
     }
 } 

@@ -4,6 +4,7 @@ pub mod analysis_results;
 pub mod grid_compressor;
 pub mod metric_encoder;
 pub mod svd_encoder;
+pub mod mulaw;
 
 #[cfg(test)]
 pub mod __tests__;

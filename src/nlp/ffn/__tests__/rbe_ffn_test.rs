@@ -1,7 +1,7 @@
 //! RBEFFN 레이어 테스트
 
 use crate::nlp::ffn::{RBEFFN, RBEFFNConfig, ActivationType};
-use crate::core::encoder::QualityGrade;
+use crate::QualityGrade;
 use anyhow::Result;
 
 #[test]
@@ -194,9 +194,10 @@ fn 드롭아웃_동작_테스트() -> Result<()> {
     let output2 = ffn.forward(&input)?;
     
     // 드롭아웃으로 인해 결과가 달라야 함
+    // 동일성 검증
     let diff_count = output1.iter()
-        .zip(output2.iter())
-        .filter(|(a, b)| (a - b).abs() > 1e-6)
+        .zip(&output2)
+        .filter(|(&a, &b)| (a - b).abs() > 1e-6)
         .count();
     
     assert!(diff_count > 10, 

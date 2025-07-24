@@ -57,6 +57,8 @@ mod tests {
                     min_block_count: None,
                     rmse_threshold: None,
                     compression_ratio_threshold: None,
+                    enable_residual: false,
+                    residual_threshold: 0.0,
                 };
                 
                 let mut encoder = RBEEncoder::new(10, TransformType::Dct); // k=10 계수

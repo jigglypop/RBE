@@ -15,7 +15,7 @@ fn 레이어놈_생성_및_기본동작_테스트() -> Result<()> {
     let layer_norm = RBELayerNorm::new(config)?;
     
     // 간단한 입력
-    let input = vec![1.0, 2.0, 3.0, 4.0; 32];  // 128개 원소
+    let input = vec![1.0, 2.0, 3.0, 4.0].repeat(32);  // 128개 원소
     let output = layer_norm.forward(&input)?;
     
     assert_eq!(output.len(), input.len());
@@ -113,10 +113,10 @@ fn 배치_처리_일관성_테스트() -> Result<()> {
     let layer_norm = RBELayerNorm::new(config)?;
     
     // 배치 입력 (3개 샘플, 각 64차원)
-    let batch_input = vec![
-        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,  // 샘플 1 시작
-        9.0, 10.0; 64 * 3
-    ];
+    let mut batch_input = Vec::new();
+    for i in 0..(64 * 3) {
+        batch_input.push((i % 10) as f32 + 1.0);
+    }
     
     // 전체 배치 처리
     let batch_output = layer_norm.forward(&batch_input)?;

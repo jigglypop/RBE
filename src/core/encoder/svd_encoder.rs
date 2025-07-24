@@ -37,26 +37,8 @@ pub struct SvdCompressedBlock {
     pub v_t_matrix: Vec<u8>,       // 압축된 V^T 행렬
 }
 
-/// μ-law 인코딩/디코딩 (재사용)
-mod mulaw {
-    const MU: f32 = 255.0;
-    
-    pub fn encode(value: f32) -> u8 {
-        let sign = value.signum();
-        let abs_val = value.abs().clamp(0.0, 1.0);
-        let encoded = sign * (1.0 + MU * abs_val).ln() / (1.0 + MU).ln();
-        let byte_val = (encoded * 127.0) as i8;
-        (byte_val as i16 + 128) as u8
-    }
-    
-    pub fn decode(byte: u8) -> f32 {
-        let signed_val = (byte as i16 - 128) as i8;
-        let normalized = signed_val as f32 / 127.0;
-        let sign = normalized.signum();
-        let abs_val = normalized.abs();
-        sign * ((1.0 + MU).powf(abs_val) - 1.0) / MU
-    }
-}
+// 통합된 mulaw 모듈 사용
+use super::mulaw;
 
 /// SVD 인코더
 pub struct SvdEncoder {

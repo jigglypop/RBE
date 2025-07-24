@@ -1,7 +1,7 @@
 //! RBEAttention 레이어 테스트
 
 use crate::nlp::attention::{RBEAttention, RBEAttentionConfig};
-use crate::core::encoder::QualityGrade;
+use crate::QualityGrade;
 use anyhow::Result;
 
 #[test]
@@ -47,16 +47,16 @@ fn 어텐션_순전파_기본동작_테스트() -> Result<()> {
     };
     
     let mut attention = RBEAttention::new(config.clone())?;
-    attention.init_random()?;
     
-    // 입력 생성 (seq_len=5, hidden_dim=48)
-    let seq_len = 5;
-    let hidden_states = vec![0.1; seq_len * config.hidden_dim];
+    // 테스트 입력
+    let batch_size = 2;
+    let seq_len = 10;
+    let input_size = seq_len * config.hidden_dim;
     
-    let output = attention.forward(&hidden_states, None)?;
+    let output = attention.forward(&vec![0.1; input_size], None)?;
     
     // 출력 크기 확인
-    assert_eq!(output.len(), hidden_states.len());
+    assert_eq!(output.len(), input_size);
     
     // 값이 합리적인 범위인지 확인
     for &val in output.iter() {
@@ -132,7 +132,7 @@ fn 어텐션_마스크_동작_테스트() -> Result<()> {
     // 결과가 달라야 함
     let diff_count = output_with_mask.iter()
         .zip(output_no_mask.iter())
-        .filter(|(a, b)| (a - b).abs() > 1e-6)
+        .filter(|(a, b)| (**a - **b).abs() > 1e-6)
         .count();
     
     assert!(diff_count > 0, "어텐션 마스크가 적용되지 않음");
@@ -159,14 +159,14 @@ fn 어텐션_드롭아웃_테스트() -> Result<()> {
     
     let hidden_states = vec![0.5; 3 * 48];  // seq_len=3
     
-    // 같은 입력에 대해 여러 번 실행
+    // 같은 입력에 대해 다른 마스크는 다른 결과를 내야 함
     let output1 = attention.forward(&hidden_states, None)?;
     let output2 = attention.forward(&hidden_states, None)?;
     
     // 드롭아웃으로 인해 결과가 달라야 함
     let diff_count = output1.iter()
-        .zip(output2.iter())
-        .filter(|(a, b)| (a - b).abs() > 1e-6)
+        .zip(&output2)
+        .filter(|(a, b)| (**a - **b).abs() > 1e-6)
         .count();
     
     assert!(diff_count > 10, 
@@ -272,13 +272,14 @@ fn 성능_벤치마크_테스트() -> Result<()> {
         cache_size: 16,
     };
     
+    let hidden_dim = config.hidden_dim;  // config 사용 전에 필요한 값 추출
     let mut attention = RBEAttention::new(config)?;
     attention.init_random()?;
     
     // 배치 크기 16, 시퀀스 길이 64
     let seq_len = 64;
     let batch_size = 16;
-    let input_size = seq_len * config.hidden_dim;
+    let input_size = seq_len * hidden_dim;
     
     // 실제로는 배치 처리를 위해 반복
     let mut total_time = std::time::Duration::new(0, 0);

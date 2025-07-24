@@ -1,10 +1,13 @@
 //! RBE 기반 임베딩 레이어
 //! Token과 Position embedding을 압축된 형태로 저장하고 효율적으로 사용
 
-use crate::core::{
-    decoder::weight_generator::WeightGenerator,
-    encoder::{RBEEncoder, CompressionConfig, QualityGrade},
-    packed_params::{HybridEncodedBlock, TransformType},
+use crate::{
+    core::{
+        decoder::WeightGenerator,
+        encoder::RBEEncoder,
+        packed_params::HybridEncodedBlock,
+    },
+    QualityGrade,
 };
 use anyhow::{Result, bail};
 use std::sync::Arc;
@@ -86,30 +89,26 @@ impl RBEEmbedding {
         })
     }
     
-    /// 랜덤 가중치로 초기화 및 압축
+    /// 랜덤 가중치로 초기화하고 압축
     pub fn init_random(&mut self) -> Result<()> {
-        println!("임베딩 랜덤 초기화 및 압축 시작...");
+        use rand::thread_rng;
+        use rand::distributions::{Distribution, Uniform};
         
-        // RBE 인코더 생성
-        let encoder = match self.config.quality_grade {
+        let mut encoder = match self.config.quality_grade {
             QualityGrade::S => RBEEncoder::new_s_grade(),
             QualityGrade::A => RBEEncoder::new_a_grade(),
             QualityGrade::B => RBEEncoder::new_b_grade(),
-            QualityGrade::C => RBEEncoder::new_c_grade(),
+            QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
         };
         
-        // 토큰 임베딩 압축
-        self.compress_token_embeddings(&encoder)?;
+        self.compress_token_embeddings(&mut encoder)?;
+        self.compress_position_embeddings(&mut encoder)?;
         
-        // 위치 임베딩 압축
-        self.compress_position_embeddings(&encoder)?;
-        
-        println!("임베딩 초기화 완료!");
         Ok(())
     }
     
     /// 토큰 임베딩 압축
-    fn compress_token_embeddings(&mut self, encoder: &RBEEncoder) -> Result<()> {
+    fn compress_token_embeddings(&mut self, encoder: &mut RBEEncoder) -> Result<()> {
         use rand::{thread_rng, Rng};
         use rand::distributions::Uniform;
         
@@ -129,7 +128,7 @@ impl RBEEmbedding {
                     .collect();
                 
                 // 압축
-                let encoded = encoder.encode_block(&block_data, 1, block_width);
+                let encoded = encoder.encode_vector(&block_data);
                 self.token_embeddings.push(encoded);
             }
             
@@ -142,7 +141,7 @@ impl RBEEmbedding {
     }
     
     /// 위치 임베딩 압축
-    fn compress_position_embeddings(&mut self, encoder: &RBEEncoder) -> Result<()> {
+    fn compress_position_embeddings(&mut self, encoder: &mut RBEEncoder) -> Result<()> {
         use std::f32::consts::PI;
         
         // Sinusoidal position encoding
@@ -167,7 +166,7 @@ impl RBEEmbedding {
                 }
                 
                 // 압축
-                let encoded = encoder.encode_block(&block_data, 1, block_width);
+                let encoded = encoder.encode_vector(&block_data);
                 self.position_embeddings.push(encoded);
             }
             
@@ -240,8 +239,9 @@ impl RBEEmbedding {
             let block_end = ((block_col + 1) * self.config.block_size).min(self.config.embedding_dim);
             let block_width = block_end - block_start;
             
-            // 복사
-            embedding[block_start..block_end].copy_from_slice(&decoded_data[..block_width]);
+            // 디코딩된 데이터 크기와 필요한 크기 중 작은 값만큼만 복사
+            let copy_size = block_width.min(decoded_data.len());
+            embedding[block_start..block_start + copy_size].copy_from_slice(&decoded_data[..copy_size]);
         }
         
         Ok(embedding)
@@ -268,8 +268,9 @@ impl RBEEmbedding {
             let block_end = ((block_col + 1) * self.config.block_size).min(self.config.embedding_dim);
             let block_width = block_end - block_start;
             
-            // 복사
-            embedding[block_start..block_end].copy_from_slice(&decoded_data[..block_width]);
+            // 디코딩된 데이터 크기와 필요한 크기 중 작은 값만큼만 복사
+            let copy_size = block_width.min(decoded_data.len());
+            embedding[block_start..block_start + copy_size].copy_from_slice(&decoded_data[..copy_size]);
         }
         
         Ok(embedding)
@@ -300,70 +301,77 @@ impl RBEEmbedding {
 impl RBEEmbedding {
     pub fn from_pretrained_weights(
         token_weights: &[f32],
-        position_weights: &[f32],
+        position_weights: Option<&[f32]>,
         config: RBEEmbeddingConfig,
     ) -> Result<Self> {
-        // 검증
-        let expected_token_size = config.vocab_size * config.embedding_dim;
-        let expected_position_size = config.max_position_embeddings * config.embedding_dim;
-        
-        if token_weights.len() != expected_token_size {
-            bail!("Token weights size mismatch: expected {}, got {}", 
-                  expected_token_size, token_weights.len());
-        }
-        
-        if position_weights.len() != expected_position_size {
-            bail!("Position weights size mismatch: expected {}, got {}", 
-                  expected_position_size, position_weights.len());
-        }
-        
         let mut embedding = Self::new(config)?;
         
-        // RBE 인코더 생성
-        let encoder = match embedding.config.quality_grade {
+        // 토큰 임베딩 압축
+        let vocab_size = embedding.config.vocab_size;
+        let embedding_dim = embedding.config.embedding_dim;
+        
+        if token_weights.len() != vocab_size * embedding_dim {
+            return Err(anyhow::anyhow!(
+                "Token weights size mismatch: expected {}, got {}",
+                vocab_size * embedding_dim,
+                token_weights.len()
+            ));
+        }
+        
+        let mut encoder = match embedding.config.quality_grade {
             QualityGrade::S => RBEEncoder::new_s_grade(),
             QualityGrade::A => RBEEncoder::new_a_grade(),
             QualityGrade::B => RBEEncoder::new_b_grade(),
-            QualityGrade::C => RBEEncoder::new_c_grade(),
+            QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
         };
         
-        println!("사전 학습된 가중치 압축 시작...");
-        
-        // 토큰 임베딩 압축
-        for token_id in 0..embedding.config.vocab_size {
-            let row_start = token_id * embedding.config.embedding_dim;
-            let row_data = &token_weights[row_start..row_start + embedding.config.embedding_dim];
+        // 각 토큰 별로 압축
+        for token_id in 0..vocab_size {
+            let start = token_id * embedding_dim;
+            let end = start + embedding_dim;
+            let token_embedding = &token_weights[start..end];
             
-            for block_col in 0..embedding.token_blocks_per_row {
-                let block_start = block_col * embedding.config.block_size;
-                let block_end = ((block_col + 1) * embedding.config.block_size)
-                    .min(embedding.config.embedding_dim);
-                let block_data = &row_data[block_start..block_end];
-                
-                let encoded = encoder.encode_block(block_data, 1, block_data.len());
+            // 블록 단위로 압축
+            let block_size = embedding.config.block_size;
+            
+            for i in (0..embedding_dim).step_by(block_size) {
+                let block_width = (block_size).min(embedding_dim - i);
+                let block_data = &token_embedding[i..i + block_width];
+                let encoded = encoder.encode_vector(block_data);
                 embedding.token_embeddings.push(encoded);
             }
         }
         
-        // 위치 임베딩 압축
-        for pos in 0..embedding.config.max_position_embeddings {
-            let row_start = pos * embedding.config.embedding_dim;
-            let row_data = &position_weights[row_start..row_start + embedding.config.embedding_dim];
+        // 위치 임베딩 압축 (제공된 경우)
+        if let Some(pos_weights) = position_weights {
+            let max_pos = embedding.config.max_position_embeddings;
             
-            for block_col in 0..embedding.position_blocks_per_row {
-                let block_start = block_col * embedding.config.block_size;
-                let block_end = ((block_col + 1) * embedding.config.block_size)
-                    .min(embedding.config.embedding_dim);
-                let block_data = &row_data[block_start..block_end];
-                
-                let encoded = encoder.encode_block(block_data, 1, block_data.len());
-                embedding.position_embeddings.push(encoded);
+            if pos_weights.len() != max_pos * embedding_dim {
+                return Err(anyhow::anyhow!(
+                    "Position weights size mismatch: expected {}, got {}",
+                    max_pos * embedding_dim,
+                    pos_weights.len()
+                ));
             }
+            
+            for pos in 0..max_pos {
+                let start = pos * embedding_dim;
+                let end = start + embedding_dim;
+                let pos_embedding = &pos_weights[start..end];
+                
+                let block_size = embedding.config.block_size;
+                
+                for i in (0..embedding_dim).step_by(block_size) {
+                    let block_width = (block_size).min(embedding_dim - i);
+                    let block_data = &pos_embedding[i..i + block_width];
+                    let encoded = encoder.encode_vector(block_data);
+                    embedding.position_embeddings.push(encoded);
+                }
+            }
+        } else {
+            // 사인파 위치 임베딩 생성
+            embedding.compress_position_embeddings(&mut encoder)?;
         }
-        
-        let (compressed_size, ratio) = embedding.memory_usage();
-        println!("압축 완료! 압축률: {:.1}:1, 압축 크기: {:.2} MB", 
-                 ratio, compressed_size as f32 / 1024.0 / 1024.0);
         
         Ok(embedding)
     }

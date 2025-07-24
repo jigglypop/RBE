@@ -3,12 +3,13 @@
 #[cfg(test)]
 mod tests {
     use crate::core::encoder::{
-        RBEEncoder, 
-        MetricTensorEncoder, 
-        MetricTensorDecoder,
-    };
-    use crate::core::decoder::WeightGenerator;
-    use std::time::Instant;
+    RBEEncoder, 
+    MetricTensorEncoder, 
+    MetricTensorDecoder,
+};
+use crate::core::decoder::WeightGenerator;
+use crate::core::math::compute_rmse;
+use std::time::Instant;
     
     fn generate_test_weights(rows: usize, cols: usize) -> Vec<f32> {
         (0..rows * cols)
@@ -20,14 +21,7 @@ mod tests {
             .collect()
     }
     
-    fn calculate_rmse(original: &[f32], reconstructed: &[f32]) -> f32 {
-        let sum_squared_diff: f32 = original
-            .iter()
-            .zip(reconstructed.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum();
-        (sum_squared_diff / original.len() as f32).sqrt()
-    }
+
     
     #[test]
     fn test_메트릭_텐서_vs_RBE_성능_비교() {
@@ -59,7 +53,7 @@ mod tests {
             let rbe_decoded = rbe_block.decode();
             let rbe_decode_time = rbe_decode_start.elapsed();
             
-            let rbe_rmse = calculate_rmse(&weights, &rbe_decoded);
+                            let rbe_rmse = compute_rmse(&weights, &rbe_decoded);
             let rbe_compression_ratio = original_size as f32 / rbe_compressed_size as f32;
             
             println!("  인코딩 시간: {:?}", rbe_encode_time);
@@ -114,7 +108,7 @@ mod tests {
                 }
                 let metric_decode_time = metric_decode_start.elapsed();
                 
-                let metric_rmse = calculate_rmse(&weights, &w_reconstructed);
+                let metric_rmse = compute_rmse(&weights, &w_reconstructed);
                 let metric_compression_ratio = original_size as f32 / serialized.len() as f32;
                 
                 print!("압축률 {:.1}:1, ", metric_compression_ratio);

@@ -5,6 +5,7 @@ use crate::core::{
     packed_params::HybridEncodedBlock,
 };
 use std::sync::Arc;
+use anyhow::{Result, bail};
 
 /// RBE 선형 레이어 설정
 #[derive(Debug, Clone)]
@@ -39,6 +40,8 @@ pub struct RBELinear {
     weight_generator: WeightGenerator,
     /// 설정
     config: RBELinearConfig,
+    /// 행 당 블록 수
+    blocks_per_row: usize,
 }
 
 impl RBELinear {
@@ -62,6 +65,15 @@ impl RBELinear {
     ) -> Self {
         let weight_generator = WeightGenerator::new();
         let cache = vec![None; blocks.len()];
+        
+        // blocks_per_row 계산
+        let blocks_per_row = if blocks.is_empty() { 
+            1 
+        } else {
+            // 첫 번째 블록의 cols가 블록 크기를 나타냄
+            let block_size = blocks[0].cols;
+            (in_features + block_size - 1) / block_size
+        };
 
         Self {
             blocks,
@@ -71,6 +83,7 @@ impl RBELinear {
             bias,
             weight_generator,
             config,
+            blocks_per_row,
         }
     }
     
@@ -170,6 +183,97 @@ impl RBELinear {
         inputs.iter()
             .map(|input| self.forward(input))
             .collect()
+    }
+
+    /// 메모리 재사용을 위한 순전파 - output 버퍼에 직접 쓰기
+    pub fn forward_into(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
+        if input.len() != self.in_features {
+            bail!("입력 크기 불일치: expected {}, got {}", self.in_features, input.len());
+        }
+        if output.len() != self.out_features {
+            bail!("출력 크기 불일치: expected {}, got {}", self.out_features, output.len());
+        }
+        
+        // 출력 버퍼 초기화
+        output.fill(0.0);
+        
+        // 블록별 처리
+        for (block_idx, block) in self.blocks.iter().enumerate() {
+            let block_row = block_idx / self.blocks_per_row;
+            let block_col = block_idx % self.blocks_per_row;
+            
+            // 캐시된 가중치 사용 또는 디코딩
+            let weights = if let Some(ref cached) = self.decoded_cache[block_idx] {
+                cached
+            } else {
+                let decoded = self.weight_generator.decode_block(block);
+                self.decoded_cache[block_idx] = Some(decoded.clone());
+                self.decoded_cache[block_idx].as_ref().unwrap()
+            };
+            
+            // SIMD 또는 스칼라 연산
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            unsafe {
+                use std::arch::x86_64::*;
+                for local_r in 0..block.rows {
+                    let out_row = block_row * block.rows + local_r;
+                    if out_row >= self.out_features { break; }
+                    
+                    let mut acc_vec = _mm256_setzero_ps();
+                    let weight_offset = local_r * block.cols;
+                    
+                    let mut local_c = 0;
+                    while local_c + 8 <= block.cols {
+                        let in_base = block_col * block.cols + local_c;
+                        if in_base + 8 > self.in_features { break; }
+                        
+                        let w = _mm256_loadu_ps(&weights[weight_offset + local_c]);
+                        let inp = _mm256_loadu_ps(&input[in_base]);
+                        acc_vec = _mm256_fmadd_ps(w, inp, acc_vec);
+                        local_c += 8;
+                    }
+                    
+                    let mut acc_arr = [0.0f32; 8];
+                    _mm256_storeu_ps(acc_arr.as_mut_ptr(), acc_vec);
+                    let mut acc = acc_arr.iter().sum::<f32>();
+                    
+                    // 나머지 처리
+                    for local_c in (local_c..block.cols) {
+                        let in_col = block_col * block.cols + local_c;
+                        if in_col >= self.in_features { break; }
+                        let w = weights[weight_offset + local_c];
+                        acc += w * input[in_col];
+                    }
+                    
+                    output[out_row] += acc;
+                }
+            }
+            
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+            {
+                for local_r in 0..block.rows {
+                    let out_row = block_row * block.rows + local_r;
+                    if out_row >= self.out_features { break; }
+                    let mut acc = 0.0f32;
+                    for local_c in 0..block.cols {
+                        let in_col = block_col * block.cols + local_c;
+                        if in_col >= self.in_features { break; }
+                        let w = weights[local_r * block.cols + local_c];
+                        acc += w * input[in_col];
+                    }
+                    output[out_row] += acc;
+                }
+            }
+        }
+        
+        // 편향 추가
+        if let Some(ref bias) = self.bias {
+            for (o, b) in output.iter_mut().zip(bias.iter()) {
+                *o += *b;
+            }
+        }
+        
+        Ok(())
     }
 
     /// 캐시 초기화

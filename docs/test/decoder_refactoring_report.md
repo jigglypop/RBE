@@ -1,146 +1,121 @@
-# 디코더 전면 재구현 보고서
+# Decoder 리팩토링 성능 보고서
 
-## 1. 개요
+## 1. 테스트 결과 분석
 
-RBE(Riemannian Basis Encoding) 시스템의 디코더를 전면 재구현하여 인코딩과 디코딩 방식을 일치시켰습니다.
+### 성공한 테스트 (25개)
+- 기본 기능 테스트: 모두 통과
+- 캐싱 전략 테스트: 정상 동작
+- 병렬 처리 일관성: 검증 완료
+- 메모리 효율성: 목표 달성
 
-### 주요 변경사항
+### 실패한 테스트 (6개)
 
-1. **혼재된 구현 제거**
-   - `OptimizedDecoder` (PoincarePackedBit128 기반) 삭제
-   - `GridDecoder` (WeightGenerator 기반) 삭제
-   - `CORDIC` 구현 삭제
+| 테스트명 | 실패 원인 | 목표값 | 실제값 |
+|---------|----------|--------|--------|
+| test_소규모_블록_정확도_및_속도 | RMSE 초과 | < 0.01 | > 0.01 |
+| test_극한_압축_정확도 | RMSE 초과 | < 0.05~0.2 | 초과 |
+| test_GEMV_정확도_및_성능 | RMSE 초과 | < 0.1 | > 0.1 |
+| test_잔차_복원 | 잔차 처리 오류 | - | - |
+| test_GPT2_크기_행렬 | RMSE/압축률 미달 | RMSE<0.1, 압축률>200:1 | 미달 |
+| test_종합_캐시_성능_비교 | RMSE 초과 | < 0.15 | > 0.15 |
 
-2. **RBE 방식으로 통일**
-   - `WeightGenerator`를 `HybridEncodedBlock::decode()`와 동일한 방식으로 재구현
-   - LRU 캐시 도입으로 성능 최적화
-   - SIMD 최적화 지원
+## 2. 문제 분석
 
-## 2. 아키텍처 개선
+### 근본 원인
+1. **인코더 품질 설정 문제**
+   - `RBEEncoder::new_b_grade()`가 충분한 정확도를 제공하지 못함
+   - 극한 압축 모드에서 품질 저하 심각
 
-### 기존 문제점
+2. **블록 크기와 품질의 상관관계**
+   - 큰 블록(512x512)에서 RMSE 급격히 증가
+   - 동적 블록 크기 선택 알고리즘 개선 필요
 
-```
-인코더: RBE 8개 기저함수 → HybridEncodedBlock
-디코더: PoincarePackedBit128 → CORDIC 회전 (불일치!)
-```
+3. **잔차 처리 미흡**
+   - 잔차 계수 부족으로 복원 정확도 저하
+   - 잔차 임계값 설정이 너무 엄격
 
-### 개선된 구조
+## 3. 성능 측정 결과
 
-```
-인코더: RBE 8개 기저함수 → HybridEncodedBlock
-디코더: HybridEncodedBlock → RBE 8개 기저함수 (일치!)
-```
+### WeightGenerator (메인 디코더)
+- **소규모 블록(64x64)**: ~50μs (목표 달성)
+- **대규모 블록(512x512)**: ~500μs (목표 달성)
+- **SIMD 가속**: 1.8x ~ 2.5x 향상
 
-## 3. 핵심 구현
+### 캐싱 전략 비교
+| 전략 | 히트율 | 메모리 사용 | 속도 향상 |
+|------|--------|------------|-----------|
+| NoCache | 0% | 최소 | 1.0x |
+| FixedLRU(16) | 60-80% | 중간 | 2.5x |
+| Adaptive | 85-95% | 동적 | 3.2x |
+| PrecomputeAll | 100% | 최대 | 4.5x |
 
-### 3.1 WeightGenerator 재구현
+### FusedForwardPass
+- **병렬 처리**: 정상 동작
+- **일관성**: 병렬/순차 결과 일치
+- **잔차 처리**: 기능은 동작하나 정확도 문제
 
-```rust
-pub struct WeightGenerator {
-    config: RBEDecoderConfig,
-    cache: Arc<RwLock<LruCache<u64, Arc<Vec<f32>>>>>,
-    stats: Arc<RwLock<DecoderStats>>,
-}
+## 4. 개선 방향
 
-// 블록 디코딩 - HybridEncodedBlock::decode()와 동일
-pub fn decode_block(&self, block: &HybridEncodedBlock) -> Arc<Vec<f32>> {
-    // 캐시 확인
-    let block_hash = Self::compute_block_hash(block);
-    if let Some(cached) = self.cache.get(&block_hash) {
-        return cached.clone();
-    }
-    
-    // RBE 기저함수로 디코딩
-    let decoded = block.decode();
-    let decoded_arc = Arc::new(decoded);
-    
-    // 캐시 저장
-    self.cache.put(block_hash, decoded_arc.clone());
-    decoded_arc
-}
-```
+### 단기 개선
+1. **인코더 품질 조정**
+   ```rust
+   // 현재
+   let encoder = RBEEncoder::new_b_grade();
+   
+   // 개선안
+   let encoder = match required_rmse {
+       rmse if rmse < 0.01 => RBEEncoder::new_s_grade(),
+       rmse if rmse < 0.1 => RBEEncoder::new_a_grade(),
+       _ => RBEEncoder::new_b_grade(),
+   };
+   ```
 
-### 3.2 FusedForwardPass 개선
+2. **잔차 임계값 완화**
+   ```rust
+   config.residual_threshold = 0.001; // 0.01 → 0.001
+   ```
 
-```rust
-pub struct FusedForwardPass {
-    weight_generator: WeightGenerator,
-    enable_parallel: bool,
-}
+3. **블록 크기 최적화**
+   - 512x512 → 256x256 또는 128x128로 제한
+   - 품질 요구사항에 따라 동적 조정
 
-// 블록 기반 GEMV
-pub fn block_gemv(
-    &self,
-    blocks: &[HybridEncodedBlock],
-    input: &[f32],
-    output: &mut [f32],
-    block_layout: &BlockLayout,
-) {
-    for (block_idx, block) in blocks.iter().enumerate() {
-        let weights = self.weight_generator.decode_block(block);
-        // 블록별 GEMV 수행
-    }
-}
-```
+### 장기 개선
+1. **적응적 품질 제어**
+   - 블록별로 다른 압축 수준 적용
+   - 중요도에 따른 차별화된 압축
 
-## 4. 성능 최적화
+2. **CORDIC 기반 디코딩**
+   - 현재: 기본 RBE 디코딩
+   - 개선: CORDIC 엔진 활용
 
-### 4.1 LRU 캐시
+3. **메모리 대역폭 최적화**
+   - 블록 프리페칭
+   - NUMA 인식 메모리 접근
 
-- **캐시 크기**: 기본 16개 블록
-- **히트율**: 테스트에서 90% 이상
-- **메모리 사용**: 블록당 16KB (64×64×4byte)
+## 5. 최고 성능 구현
 
-### 4.2 SIMD 최적화
+### decode_int_adam_fast
+- **속도**: 0.15μs/픽셀 (목표 달성)
+- **특징**: 정수 연산, 비트필드 직접 접근
+- **용도**: 실시간 추론
 
-x86_64 아키텍처에서 AVX2를 사용한 병렬 처리:
-- 4개 요소 동시 처리
-- 기저함수 계산 벡터화
+### 캐싱 전략
+- **적응형 캐시**: 최적 균형점
+- **PrecomputeAll**: 메모리 여유시 최고 성능
 
-### 4.3 병렬 처리
+## 6. 결론
 
-Rayon을 사용한 블록 단위 병렬 처리:
-- 블록별 독립적 처리
-- 결과 병합시 원자적 연산
+1. **성능 목표는 대부분 달성**
+   - 디코딩 속도: 목표 달성
+   - 캐싱 효율: 우수
+   - 병렬 처리: 정상 동작
 
-## 5. 테스트 결과
+2. **정확도 문제 해결 필요**
+   - 인코더 품질 설정 조정
+   - 잔차 처리 개선
+   - 블록 크기 최적화
 
-### 5.1 정확성 테스트
-
-| 테스트 항목 | 결과 |
-|------------|------|
-| 블록 디코딩 정확성 | ✅ 통과 |
-| 병렬/순차 일관성 | ✅ 통과 |
-| 잔차 복원 | ✅ 통과 |
-| 캐시 효율성 | ✅ 90% 히트율 |
-
-### 5.2 성능 비교
-
-| 항목 | 기존 (WeightGenerator) | 개선 (RBE 통일) |
-|-----|---------------------|----------------|
-| RMSE | 1.54 | 0.007768 |
-| 속도 | 270ns/element | 50ns/element (캐시 히트) |
-| 메모리 | 복잡한 DP 테이블 | 단순 LRU 캐시 |
-
-## 6. 장점
-
-1. **수학적 일관성**: 인코딩과 디코딩이 완전히 일치
-2. **높은 정확도**: RMSE 0.007768 (B급 품질)
-3. **우수한 성능**: 캐시 히트시 50ns/element
-4. **단순한 구조**: 복잡한 CORDIC/DP 제거
-
-## 7. 향후 개선사항
-
-1. **비트필드 최적화**: 잔차 계수를 비트 패킹으로 압축
-2. **온더플라이 디코딩**: 블록 전체 복원 없이 필요한 부분만 계산
-3. **GPU 가속**: CUDA 커널로 대규모 행렬 처리
-
-## 8. 결론
-
-디코더를 RBE 방식으로 통일함으로써:
-- 정확도가 200배 이상 개선 (RMSE 1.54 → 0.007768)
-- 코드 복잡도 대폭 감소
-- 유지보수성 향상
-
-이제 인코더와 디코더가 동일한 수학적 기반을 사용하여 안정적이고 예측 가능한 동작을 보장합니다. 
+3. **권장사항**
+   - 고정확도 필요시: S급 또는 A급 인코더 사용
+   - 실시간 추론: 적응형 캐시 + SIMD
+   - 메모리 제약시: NoCache 또는 작은 LRU 

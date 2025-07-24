@@ -1,12 +1,15 @@
 //! RBE 기반 Feed-Forward Network (FFN)
 //! Transformer의 FFN 블록을 압축된 형태로 구현
 
-use crate::core::{
-    decoder::weight_generator::WeightGenerator,
-    encoder::{RBEEncoder, CompressionConfig, QualityGrade},
-    packed_params::{HybridEncodedBlock, TransformType},
+use crate::{
+    core::{
+        decoder::WeightGenerator,
+        encoder::RBEEncoder,
+        packed_params::HybridEncodedBlock,
+    },
+    nlp::linear::{RBELinear, RBELinearConfig},
+    QualityGrade,
 };
-use crate::nlp::linear::{RBELinear, RBELinearConfig};
 use anyhow::{Result, bail};
 use std::sync::Arc;
 use rayon::prelude::*;
@@ -111,30 +114,33 @@ impl RBEFFN {
         })
     }
     
-    /// 랜덤 가중치로 초기화 및 압축
+    /// 랜덤 가중치로 초기화하고 압축
     pub fn init_random(&mut self) -> Result<()> {
+        use rand::thread_rng;
+        use rand::distributions::{Distribution, Uniform};
+        
         println!("FFN 랜덤 초기화 및 압축 시작...");
         
         // RBE 인코더 생성
-        let encoder = match self.config.quality_grade {
+        let mut encoder = match self.config.quality_grade {
             QualityGrade::S => RBEEncoder::new_s_grade(),
             QualityGrade::A => RBEEncoder::new_a_grade(),
             QualityGrade::B => RBEEncoder::new_b_grade(),
-            QualityGrade::C => RBEEncoder::new_c_grade(),
+            QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
         };
         
-        // Up projection 압축
-        self.compress_up_projection(&encoder)?;
+        // up projection 압축 (hidden -> intermediate)
+        self.compress_up_projection(&mut encoder)?;
         
-        // Down projection 압축
-        self.compress_down_projection(&encoder)?;
+        // down projection 압축 (intermediate -> hidden)
+        self.compress_down_projection(&mut encoder)?;
         
         println!("FFN 초기화 완료!");
         Ok(())
     }
     
     /// Up projection 압축
-    fn compress_up_projection(&mut self, encoder: &RBEEncoder) -> Result<()> {
+    fn compress_up_projection(&mut self, encoder: &mut RBEEncoder) -> Result<()> {
         use rand::{thread_rng, Rng};
         use rand::distributions::Uniform;
         
@@ -181,7 +187,7 @@ impl RBEFFN {
     }
     
     /// Down projection 압축
-    fn compress_down_projection(&mut self, encoder: &RBEEncoder) -> Result<()> {
+    fn compress_down_projection(&mut self, encoder: &mut RBEEncoder) -> Result<()> {
         use rand::{thread_rng, Rng};
         use rand::distributions::Uniform;
         
@@ -339,73 +345,24 @@ impl RBEFFN {
 
 /// 사전 학습된 가중치에서 로드
 impl RBEFFN {
-    pub fn from_pretrained_weights(
-        up_weights: &[f32],
-        down_weights: &[f32],
-        config: RBEFFNConfig,
-    ) -> Result<Self> {
-        // 검증
-        let expected_up_size = config.hidden_dim * config.intermediate_dim;
-        let expected_down_size = config.intermediate_dim * config.hidden_dim;
-        
-        if up_weights.len() != expected_up_size {
-            bail!("Up projection weights size mismatch: expected {}, got {}", 
-                  expected_up_size, up_weights.len());
-        }
-        
-        if down_weights.len() != expected_down_size {
-            bail!("Down projection weights size mismatch: expected {}, got {}", 
-                  expected_down_size, down_weights.len());
-        }
-        
-        let mut ffn = Self::new(config.clone())?;
-        
-        // RBE 인코더 생성
-        let encoder = match config.quality_grade {
-            QualityGrade::S => RBEEncoder::new_s_grade(),
-            QualityGrade::A => RBEEncoder::new_a_grade(),
-            QualityGrade::B => RBEEncoder::new_b_grade(),
-            QualityGrade::C => RBEEncoder::new_c_grade(),
-        };
-        
-        println!("사전 학습된 FFN 가중치 압축 시작...");
-        
-        // Up projection 압축
-        ffn.compress_weights(&encoder, up_weights, true)?;
-        
-        // Down projection 압축
-        ffn.compress_weights(&encoder, down_weights, false)?;
-        
-        let (compressed_size, ratio) = ffn.memory_usage();
-        println!("FFN 압축 완료! 압축률: {:.1}:1, 압축 크기: {:.2} MB", 
-                 ratio, compressed_size as f32 / 1024.0 / 1024.0);
-        
-        Ok(ffn)
-    }
-    
-    /// 가중치 압축 헬퍼
-    fn compress_weights(
-        &mut self,
-        encoder: &RBEEncoder,
+    /// 특정 projection 압축 헬퍼
+    fn compress_projection(
         weights: &[f32],
-        is_up_projection: bool,
-    ) -> Result<()> {
-        let (rows, cols) = if is_up_projection {
-            (self.config.intermediate_dim, self.config.hidden_dim)
-        } else {
-            (self.config.hidden_dim, self.config.intermediate_dim)
-        };
-        
+        rows: usize,
+        cols: usize,
+        block_size: usize,
+        encoder: &mut RBEEncoder,
+    ) -> Result<Vec<HybridEncodedBlock>> {
         let mut blocks = Vec::new();
-        let blocks_per_row = (cols + self.config.block_size - 1) / self.config.block_size;
-        let blocks_per_col = (rows + self.config.block_size - 1) / self.config.block_size;
+        let blocks_per_row = (cols + block_size - 1) / block_size;
+        let blocks_per_col = (rows + block_size - 1) / block_size;
         
         for row_block in 0..blocks_per_col {
             for col_block in 0..blocks_per_row {
-                let row_start = row_block * self.config.block_size;
-                let row_end = ((row_block + 1) * self.config.block_size).min(rows);
-                let col_start = col_block * self.config.block_size;
-                let col_end = ((col_block + 1) * self.config.block_size).min(cols);
+                let row_start = row_block * block_size;
+                let row_end = ((row_block + 1) * block_size).min(rows);
+                let col_start = col_block * block_size;
+                let col_end = ((col_block + 1) * block_size).min(cols);
                 
                 let block_rows = row_end - row_start;
                 let block_cols = col_end - col_start;
@@ -426,12 +383,92 @@ impl RBEFFN {
             }
         }
         
-        if is_up_projection {
-            self.up_proj.blocks = blocks;
-        } else {
-            self.down_proj.blocks = blocks;
+        Ok(blocks)
+    }
+
+    /// 사전 학습된 가중치로부터 RBEFFN 생성
+    pub fn from_pretrained_weights(
+        up_weights: &[f32],
+        down_weights: &[f32],
+        config: RBEFFNConfig,
+    ) -> Result<Self> {
+        // 검증
+        let expected_up_size = config.hidden_dim * config.intermediate_dim;
+        let expected_down_size = config.intermediate_dim * config.hidden_dim;
+        
+        if up_weights.len() != expected_up_size {
+            bail!("Up projection weights size mismatch: expected {}, got {}", 
+                  expected_up_size, up_weights.len());
         }
         
-        Ok(())
+        if down_weights.len() != expected_down_size {
+            bail!("Down projection weights size mismatch: expected {}, got {}", 
+                  expected_down_size, down_weights.len());
+        }
+        
+        // RBE 인코더 생성
+        let mut encoder = match config.quality_grade {
+            QualityGrade::S => RBEEncoder::new_s_grade(),
+            QualityGrade::A => RBEEncoder::new_a_grade(),
+            QualityGrade::B => RBEEncoder::new_b_grade(),
+            QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
+        };
+        
+        println!("사전 학습된 FFN 가중치 압축 시작...");
+        
+        // up projection 압축
+        let up_blocks = Self::compress_projection(
+            up_weights,
+            config.hidden_dim,
+            config.intermediate_dim,
+            config.block_size,
+            &mut encoder,
+        )?;
+        
+        // down projection 압축
+        let down_blocks = Self::compress_projection(
+            down_weights,
+            config.intermediate_dim,
+            config.hidden_dim,
+            config.block_size,
+            &mut encoder,
+        )?;
+        
+        // RBELinear 생성
+        let up_proj = RBELinear::with_config(
+            up_blocks,
+            config.hidden_dim,
+            config.intermediate_dim,
+            None,
+            RBELinearConfig {
+                enable_parallel: config.enable_parallel,
+                cache_size: config.cache_size,
+            },
+        );
+        
+        let down_proj = RBELinear::with_config(
+            down_blocks,
+            config.intermediate_dim,
+            config.hidden_dim,
+            None,
+            RBELinearConfig {
+                enable_parallel: config.enable_parallel,
+                cache_size: config.cache_size,
+            },
+        );
+        
+        let ffn = Self {
+            up_proj,
+            down_proj,
+            activation: config.activation,
+            dropout: config.dropout,
+            config,
+        };
+        
+        let (compressed_size, ratio) = ffn.memory_usage();
+        println!("FFN 압축 완료! 압축률: {:.1}:1, 압축 크기: {:.2} MB", 
+                 ratio, compressed_size as f32 / 1024.0 / 1024.0);
+        
+        Ok(ffn)
     }
 } 

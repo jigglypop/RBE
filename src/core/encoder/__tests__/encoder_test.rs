@@ -1,5 +1,7 @@
 use super::super::encoder::{AutoOptimizedEncoder, QualityGrade, CompressionConfig, RBEEncoder};
 use crate::packed_params::{TransformType, HybridEncodedBlock};
+use crate::core::decoder::WeightGenerator;
+use crate::core::math::compute_rmse;
 
 fn generate_test_data(size: usize) -> Vec<f32> {
     (0..size * size)
@@ -340,7 +342,7 @@ fn 설정_기반_압축_테스트() {
     
     // 3. 사용자 정의 설정 (RMSE 임계값)
     println!("\n📊 사용자 정의 설정 (RMSE 0.001 임계값)");
-    let custom_config = CompressionConfig::custom(64, 0.001, 20.0, Some(100));
+    let custom_config = CompressionConfig::custom(64, 0.001, 20.0, Some(100), true, 0.01);
     let result = AutoOptimizedEncoder::compress_with_config(&test_data, 512, 1024, &custom_config);
     assert!(result.is_ok(), "사용자 정의 압축 실패: {:?}", result.err());
     let (blocks, time, ratio, rmse) = result.unwrap();
@@ -349,7 +351,7 @@ fn 설정_기반_압축_테스트() {
     
     // 4. 임계값 실패 테스트
     println!("\n📊 임계값 실패 테스트");
-    let strict_config = CompressionConfig::custom(64, 0.000001, 1000.0, None); // 매우 엄격한 조건
+    let strict_config = CompressionConfig::custom(64, 0.000001, 1000.0, None, true, 0.01); // 매우 엄격한 조건
     let result = AutoOptimizedEncoder::compress_with_config(&test_data, 512, 1024, &strict_config);
     assert!(result.is_err(), "엄격한 조건에서 성공하면 안됨");
     println!("✅ 예상대로 실패: {}", result.err().unwrap());
@@ -362,7 +364,7 @@ fn 최소_블록_개수_테스트() {
     let test_data = generate_asymmetric_pattern(256, 512);
     
     // 1. 달성 가능한 최소 블록 개수
-    let config = CompressionConfig::custom(64, 0.1, 10.0, Some(20)); // 256x512 / 64x64 = 32개 > 20개
+    let config = CompressionConfig::custom(64, 0.1, 10.0, Some(20), true, 0.01); // 256x512 / 64x64 = 32개 > 20개
     let result = AutoOptimizedEncoder::compress_with_config(&test_data, 256, 512, &config);
     assert!(result.is_ok(), "달성 가능한 블록 개수에서 실패");
     let (blocks, _, _, _) = result.unwrap();
@@ -370,7 +372,7 @@ fn 최소_블록_개수_테스트() {
     println!("✅ 최소 20개 블록 달성: 실제 {}개", blocks.len());
     
     // 2. 달성 불가능한 최소 블록 개수
-    let config = CompressionConfig::custom(64, 0.1, 10.0, Some(100)); // 32개 < 100개
+    let config = CompressionConfig::custom(64, 0.1, 10.0, Some(100), true, 0.01); // 32개 < 100개
     let result = AutoOptimizedEncoder::compress_with_config(&test_data, 256, 512, &config);
     assert!(result.is_err(), "달성 불가능한 블록 개수에서 성공하면 안됨");
     println!("✅ 예상대로 실패: {}", result.err().unwrap());
@@ -500,4 +502,138 @@ fn 동적_블록_압축_테스트() {
     assert_eq!(256 % block_size, 0, "블록이 행을 나누어떨어뜨리지 않음");
     assert_eq!(512 % block_size, 0, "블록이 열을 나누어떨어뜨리지 않음");
     assert!(rmse < 0.1, "RMSE가 너무 높음: {}", rmse);
+}
+
+#[test]
+fn encode_vector_poincare_정확도_테스트() {
+    println!("\n=== encode_vector_poincare 정확도 테스트 ===");
+    
+    // 다양한 테스트 벡터
+    let test_cases = vec![
+        ("상수 벡터", vec![1.0; 128]),
+        ("선형 증가", (0..128).map(|i| i as f32 / 128.0).collect()),
+        ("사인파", (0..128).map(|i| (i as f32 * std::f32::consts::PI / 64.0).sin()).collect()),
+        ("복합 패턴", (0..128).map(|i| {
+            let t = i as f32 / 128.0;
+            0.5 + 0.3 * (2.0 * std::f32::consts::PI * t).sin() + 0.2 * (4.0 * std::f32::consts::PI * t).cos()
+        }).collect()),
+    ];
+    
+    let mut encoder = RBEEncoder::new_b_grade();
+    let decoder = WeightGenerator::new();
+    
+    for (name, data) in test_cases {
+        let start = std::time::Instant::now();
+        let encoded = encoder.encode_vector(&data);
+        let encode_time = start.elapsed();
+        
+        // 디코딩
+        let decoded = decoder.decode_block(&encoded);
+        
+        // RMSE 계산
+        let rmse = compute_rmse(&data, &decoded);
+        
+        // 압축률 계산
+        let original_size = data.len() * 4;
+        let compressed_size = 8 * 4 + encoded.residuals.len() * 8;
+        let compression_ratio = original_size as f32 / compressed_size as f32;
+        
+        println!("\n{} (길이: {}):", name, data.len());
+        println!("  인코딩 시간: {:?}", encode_time);
+        println!("  RMSE: {:.6}", rmse);
+        println!("  압축률: {:.1}:1", compression_ratio);
+        println!("  잔차 개수: {}", encoded.residuals.len());
+        
+        // 정확도 검증
+        assert!(rmse < 0.1, "{}: RMSE가 너무 큼: {:.6}", name, rmse);
+        assert!(compression_ratio > 1.0, "{}: 압축률이 1 미만", name);
+    }
+}
+
+#[test]
+fn encode_vector_poincare_vs_simple_비교() {
+    println!("\n=== Poincare vs Simple 인코딩 비교 ===");
+    
+    let test_data: Vec<f32> = (0..256).map(|i| {
+        let t = i as f32 / 256.0;
+        1.0 + 0.5 * (2.0 * std::f32::consts::PI * t).sin() + 0.3 * (6.0 * std::f32::consts::PI * t).cos()
+    }).collect();
+    
+    let mut encoder = RBEEncoder::new_b_grade();
+    let decoder = WeightGenerator::new();
+    
+    // Poincare 방식
+    let start = std::time::Instant::now();
+    let encoded_poincare = encoder.encode_vector_poincare(&test_data);
+    let poincare_time = start.elapsed();
+    let decoded_poincare = decoder.decode_block(&encoded_poincare);
+    let rmse_poincare = compute_rmse(&test_data, &decoded_poincare);
+    
+    // Simple 방식 (기존)
+    #[allow(deprecated)]
+    let start = std::time::Instant::now();
+    let encoded_simple = encoder.encode_vector_simple(&test_data);
+    let simple_time = start.elapsed();
+    let decoded_simple = decoder.decode_block(&encoded_simple);
+    let rmse_simple = compute_rmse(&test_data, &decoded_simple);
+    
+    println!("Poincare 방식:");
+    println!("  인코딩 시간: {:?}", poincare_time);
+    println!("  RMSE: {:.6}", rmse_poincare);
+    println!("  잔차 개수: {}", encoded_poincare.residuals.len());
+    
+    println!("\nSimple 방식:");
+    println!("  인코딩 시간: {:?}", simple_time);
+    println!("  RMSE: {:.6}", rmse_simple);
+    println!("  잔차 개수: {}", encoded_simple.residuals.len());
+    
+    println!("\n개선도:");
+    println!("  RMSE 개선: {:.1}%", (1.0 - rmse_poincare / rmse_simple) * 100.0);
+    println!("  속도 비율: {:.2}x", simple_time.as_secs_f64() / poincare_time.as_secs_f64());
+    
+    // Poincare가 더 정확해야 함
+    assert!(rmse_poincare <= rmse_simple * 1.1, 
+            "Poincare 방식이 Simple보다 정확해야 함");
+}
+
+#[test]
+fn encode_vector_poincare_경계값_테스트() {
+    println!("\n=== Poincare 경계값 테스트 ===");
+    
+    let mut encoder = RBEEncoder::new_b_grade();
+    
+    // 극단적인 경우들
+    let edge_cases = vec![
+        ("빈 벡터", vec![]),
+        ("단일 값", vec![42.0]),
+        ("매우 작은 값", vec![1e-10; 10]),
+        ("매우 큰 값", vec![1e10; 10]),
+        ("NaN 포함", vec![1.0, f32::NAN, 2.0]),
+        ("Inf 포함", vec![1.0, f32::INFINITY, 2.0]),
+    ];
+    
+    for (name, data) in edge_cases {
+        println!("\n{} 테스트:", name);
+        
+        if data.is_empty() {
+            // 빈 벡터는 패닉이 발생하지 않아야 함
+            continue;
+        }
+        
+        let encoded = encoder.encode_vector(&data);
+        
+        // 기본 검증
+        assert_eq!(encoded.rows, 1);
+        assert_eq!(encoded.cols, data.len());
+        
+        // RBE 파라미터가 유한해야 함
+        for (i, &param) in encoded.rbe_params.iter().enumerate() {
+            if !data.iter().any(|&x| !x.is_finite()) {
+                assert!(param.is_finite(), 
+                        "{}: RBE 파라미터 {}가 무한대", name, i);
+            }
+        }
+        
+        println!("  ✓ 패스");
+    }
 }

@@ -9,8 +9,20 @@ pub mod embedding;
 pub mod layernorm;
 pub mod ffn;
 pub mod attention;
+pub mod dropout;
+pub mod softmax;
+pub mod rmsnorm;
+pub mod accuracy_utils;
+
+// candle 비교 테스트
+#[cfg(test)]
+pub mod candle_comparison_test;
 
 // tensor 모듈 제거 - WeightGenerator 직접 사용으로 대체
+
+// 재-export for convenience
+pub use linear::*;
+pub use model_tools::*;
 
 /// 두 벡터 간의 상대 오차 계산
 pub fn compute_relative_error(reference: &[f32], approximation: &[f32]) -> f32 {

@@ -8,6 +8,8 @@ edition = "2021"
 name = "test_memory_size"
 path = "src/test_memory_size.rs"
 
+
+
 [[example]]
 name = "korean_sllm_demo"
 path = "examples/korean_sllm_demo.rs"
@@ -15,6 +17,14 @@ path = "examples/korean_sllm_demo.rs"
 [[example]]
 name = "nlp_layers_demo"
 path = "examples/nlp_layers_demo.rs"
+
+[[example]]
+name = "test_performance"
+path = "examples/test_performance.rs"
+
+[[example]]
+name = "simple_accuracy_test"
+path = "examples/simple_accuracy_test.rs"
 
 [dependencies]
 # 기존 의존성들

@@ -1,7 +1,7 @@
 //! RBEEmbedding 레이어 테스트
 
 use crate::nlp::embedding::{RBEEmbedding, RBEEmbeddingConfig};
-use crate::core::encoder::QualityGrade;
+use crate::QualityGrade;
 use anyhow::Result;
 
 #[test]
@@ -119,8 +119,8 @@ fn 병렬처리_일관성_테스트() -> Result<()> {
     par_config.enable_parallel = true;
     let par_embedding = RBEEmbedding::from_pretrained_weights(
         &vec![0.0; base_config.vocab_size * base_config.embedding_dim],
-        &vec![0.0; base_config.max_position_embeddings * base_config.embedding_dim],
-        par_config
+        Some(&vec![0.0; base_config.max_position_embeddings * base_config.embedding_dim]),
+        par_config,
     )?;
     
     // 같은 입력에 대해 테스트
@@ -221,14 +221,13 @@ fn 사전학습_가중치_로드_테스트() -> Result<()> {
     // 로드
     let embedding = RBEEmbedding::from_pretrained_weights(
         &token_weights,
-        &position_weights,
-        config.clone()
+        Some(&position_weights),
+        config.clone(),
     )?;
     
-    // 순전파 테스트
+    // 캐시 효과 확인
     let token_ids = vec![0, 1, 2];
     let output = embedding.forward(&token_ids)?;
-    
     assert_eq!(output.len(), token_ids.len() * config.embedding_dim);
     
     // 첫 번째 토큰의 첫 번째 임베딩 값이 원본과 유사한지 확인

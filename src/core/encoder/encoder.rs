@@ -1,5 +1,6 @@
 use crate::core::{
     HybridEncodedBlock, ResidualCoefficient, TransformType,
+    math::{compute_rbe_basis, normalize_coords, compute_pixel_value, compute_rmse},
 };
 use crate::optimizers::{AdamState, RiemannianAdamState};
 use crate::decoder::WeightGenerator;
@@ -49,6 +50,8 @@ pub struct CompressionConfig {
     pub min_block_count: Option<usize>,     // 최소 블록 개수 (하드코딩 조정용)
     pub rmse_threshold: Option<f32>,        // RMSE 임계값 (0.001 같은 값)
     pub compression_ratio_threshold: Option<f32>, // 압축률 임계값 (최소 압축률)
+    pub enable_residual: bool,
+    pub residual_threshold: f32,
 }
 
 /// 통합된 RBE 인코더 (기존 AutoOptimizedEncoder + HybridEncoder)
@@ -57,6 +60,7 @@ pub struct RBEEncoder {
     pub transform_type: TransformType,
     // planner는 재사용 가능하므로 인코더가 소유하는 것이 효율적
     dct_planner_f32: DctPlanner<f32>,
+    config: CompressionConfig,
 }
 
 // 기존 AutoOptimizedEncoder는 호환성을 위해 타입 별칭으로 유지
@@ -77,6 +81,8 @@ impl CompressionConfig {
             min_block_count: None,
             rmse_threshold: None,
             compression_ratio_threshold: None,
+            enable_residual: false,
+            residual_threshold: 0.0,
         }
     }
     
@@ -91,6 +97,8 @@ impl CompressionConfig {
             min_block_count: None,
             rmse_threshold: Some(0.01),   // 0.00001 → 0.01 (현실적으로 조정)
             compression_ratio_threshold: Some(50.0),
+            enable_residual: false,
+            residual_threshold: 0.0,
         }
     }
     
@@ -105,6 +113,8 @@ impl CompressionConfig {
             min_block_count: None,
             rmse_threshold: Some(0.1),
             compression_ratio_threshold: Some(10.0),
+            enable_residual: false,
+            residual_threshold: 0.0,
         }
     }
     
@@ -113,7 +123,9 @@ impl CompressionConfig {
         block_size: usize,
         rmse_threshold: f32,
         compression_ratio: f32,
-        min_blocks: Option<usize>
+        min_blocks: Option<usize>,
+        enable_residual: bool,
+        residual_threshold: f32,
     ) -> Self {
         Self {
             block_size,
@@ -124,6 +136,8 @@ impl CompressionConfig {
             min_block_count: min_blocks,
             rmse_threshold: Some(rmse_threshold),
             compression_ratio_threshold: Some(compression_ratio),
+            enable_residual,
+            residual_threshold,
         }
     }
 }
@@ -135,6 +149,7 @@ impl RBEEncoder {
             k_coeffs,
             transform_type,
             dct_planner_f32: DctPlanner::new(),
+            config: CompressionConfig::default(),
         }
     }
     
@@ -251,15 +266,9 @@ impl RBEEncoder {
                 let a_matrix_rows: Vec<RowDVector<f32>> = (0..rows * cols).into_par_iter().map(|idx| {
                     let r = idx / cols;
                     let c = idx % cols;
-                    let x = if cols > 1 { (c as f32 / (cols - 1) as f32) * 2.0 - 1.0 } else { 0.0 };
-                    let y = if rows > 1 { (r as f32 / (rows - 1) as f32) * 2.0 - 1.0 } else { 0.0 };
-                    let d = (x * x + y * y).sqrt();
-                    let pi = std::f32::consts::PI;
-                    RowDVector::from_vec(vec![
-                        1.0, d, d * d, (pi * x).cos(), (pi * y).cos(),
-                        (2.0 * pi * x).cos(), (2.0 * pi * y).cos(),
-                        (pi * x).cos() * (pi * y).cos(),
-                    ])
+                    let (x, y) = normalize_coords(r, c, rows, cols);
+                    let basis = compute_rbe_basis(x, y);
+                    RowDVector::from_vec(basis.to_vec())
                 }).collect();
 
                 let new_a_matrix = Arc::new(DMatrix::from_rows(&a_matrix_rows));
@@ -2300,20 +2309,249 @@ impl RBEEncoder {
         
         prediction
     }
-}
 
-/// RMSE 계산 함수
-fn compute_rmse(actual: &[f32], predicted: &[f32]) -> f32 {
-    if actual.len() != predicted.len() {
-        return f32::MAX;
+    /// 1차원 벡터를 RBE로 압축 (임베딩 등에 사용)
+    pub fn encode_vector(&mut self, vector_data: &[f32]) -> HybridEncodedBlock {
+        self.encode_vector_poincare(vector_data)
     }
     
-    let sum_sq_error: f32 = actual.iter()
-        .zip(predicted.iter())
-        .map(|(a, p)| (a - p).powi(2))
-        .sum();
+    /// 푸앵카레 볼 기반 벡터 인코딩
+    pub fn encode_vector_poincare(&mut self, vector_data: &[f32]) -> HybridEncodedBlock {
+        let size = vector_data.len();
+        
+        // 1. 데이터 정규화 및 통계
+        let mean = vector_data.iter().sum::<f32>() / size as f32;
+        let variance = vector_data.iter()
+            .map(|&x| (x - mean).powi(2))
+            .sum::<f32>() / size as f32;
+        let std_dev = variance.sqrt();
+        
+        // 2. 데이터를 푸앵카레 볼로 매핑
+        // 정규화된 데이터를 [0, 1) 범위로 변환
+        let normalized: Vec<f32> = vector_data.iter()
+            .map(|&x| {
+                if std_dev > 1e-6 {
+                    ((x - mean) / (3.0 * std_dev)).tanh() * 0.5 + 0.5
+                } else {
+                    0.5
+                }
+            })
+            .collect();
+        
+        // 3. 푸앵카레 볼 파라미터 학습 (Adam 최적화)
+        let mut rbe_params = [0.0f32; 8];
+        let mut residual_coeffs = vec![0.0f32; self.k_coeffs.min(size / 4)];
+        
+        // 초기 파라미터 설정
+        rbe_params[0] = mean;
+        rbe_params[1] = std_dev;
+        
+        // Adam 상태
+        let mut m_rbe = vec![0.0f32; 8];
+        let mut v_rbe = vec![0.0f32; 8];
+        let mut m_res = vec![0.0f32; residual_coeffs.len()];
+        let mut v_res = vec![0.0f32; residual_coeffs.len()];
+        
+        const B1: f32 = 0.9;
+        const B2: f32 = 0.999;
+        const EPS: f32 = 1e-8;
+        let lr = 0.01;
+        
+        // 4. 최적화 루프
+        for step in 1..=100 {
+            // 순전파: 푸앵카레 볼 기저 함수 사용
+            let mut predicted = vec![0.0f32; size];
+            for i in 0..size {
+                let t = i as f32 / size.max(1) as f32;
+                
+                // 푸앵카레 볼 좌표 (r, θ)
+                let r = normalized[i].min(0.999); // 경계 보호
+                let theta = 2.0 * PI * t;
+                
+                // 푸앵카레 메트릭 가중치
+                let metric_factor = 1.0 / (1.0 - r * r).max(1e-6);
+                
+                // 기저 함수 값 계산
+                predicted[i] = rbe_params[0] 
+                    + rbe_params[1] * r * metric_factor
+                    + rbe_params[2] * (theta).cos()
+                    + rbe_params[3] * (theta).sin()
+                    + rbe_params[4] * (2.0 * theta).cos()
+                    + rbe_params[5] * (2.0 * theta).sin()
+                    + rbe_params[6] * r * (theta).cos() * metric_factor
+                    + rbe_params[7] * r * (theta).sin() * metric_factor;
+                
+                // 잔차 항 추가
+                for (k, &coeff) in residual_coeffs.iter().enumerate() {
+                    let basis = ((k + 1) as f32 * PI * t).sin();
+                    predicted[i] += coeff * basis;
+                }
+            }
+            
+            // 손실 계산
+            let mut loss = 0.0f32;
+            let mut grads_rbe = vec![0.0f32; 8];
+            let mut grads_res = vec![0.0f32; residual_coeffs.len()];
+            
+            for i in 0..size {
+                let error = predicted[i] - vector_data[i];
+                loss += error * error;
+                
+                let t = i as f32 / size.max(1) as f32;
+                let r = normalized[i].min(0.999);
+                let theta = 2.0 * PI * t;
+                let metric_factor = 1.0 / (1.0 - r * r).max(1e-6);
+                
+                // RBE 파라미터 그래디언트
+                grads_rbe[0] += error;
+                grads_rbe[1] += error * r * metric_factor;
+                grads_rbe[2] += error * (theta).cos();
+                grads_rbe[3] += error * (theta).sin();
+                grads_rbe[4] += error * (2.0 * theta).cos();
+                grads_rbe[5] += error * (2.0 * theta).sin();
+                grads_rbe[6] += error * r * (theta).cos() * metric_factor;
+                grads_rbe[7] += error * r * (theta).sin() * metric_factor;
+                
+                // 잔차 그래디언트
+                for (k, grad) in grads_res.iter_mut().enumerate() {
+                    let basis = ((k + 1) as f32 * PI * t).sin();
+                    *grad += error * basis;
+                }
+            }
+            
+            // 그래디언트 정규화
+            let n = size as f32;
+            for g in &mut grads_rbe { *g /= n; }
+            for g in &mut grads_res { *g /= n; }
+            
+            loss /= n;
+            
+            // Adam 업데이트
+            let beta1_t = B1.powi(step);
+            let beta2_t = B2.powi(step);
+            
+            // RBE 파라미터 업데이트
+            for i in 0..8 {
+                m_rbe[i] = B1 * m_rbe[i] + (1.0 - B1) * grads_rbe[i];
+                v_rbe[i] = B2 * v_rbe[i] + (1.0 - B2) * grads_rbe[i] * grads_rbe[i];
+                
+                let m_hat = m_rbe[i] / (1.0 - beta1_t);
+                let v_hat = v_rbe[i] / (1.0 - beta2_t);
+                
+                rbe_params[i] -= lr * m_hat / (v_hat.sqrt() + EPS);
+            }
+            
+            // 잔차 계수 업데이트
+            for i in 0..residual_coeffs.len() {
+                m_res[i] = B1 * m_res[i] + (1.0 - B1) * grads_res[i];
+                v_res[i] = B2 * v_res[i] + (1.0 - B2) * grads_res[i] * grads_res[i];
+                
+                let m_hat = m_res[i] / (1.0 - beta1_t);
+                let v_hat = v_res[i] / (1.0 - beta2_t);
+                
+                residual_coeffs[i] -= lr * m_hat / (v_hat.sqrt() + EPS);
+            }
+            
+            // 조기 종료
+            if loss < 1e-6 {
+                break;
+            }
+        }
+        
+        // 5. 유의미한 잔차만 저장
+        let residuals: Vec<ResidualCoefficient> = residual_coeffs.iter()
+            .enumerate()
+            .filter(|(_, &coeff)| coeff.abs() > 1e-4)
+            .map(|(i, &coeff)| ResidualCoefficient {
+                index: (0, i as u16),
+                value: coeff,
+            })
+            .collect();
+        
+        HybridEncodedBlock {
+            rbe_params,
+            residuals,
+            rows: 1,
+            cols: size,
+            transform_type: TransformType::Adaptive,
+        }
+    }
     
-    (sum_sq_error / actual.len() as f32).sqrt()
+    /// 기존 encode_vector 구현 (Deprecated - 호환성을 위해 유지)
+    #[deprecated(note = "Use encode_vector_poincare instead")]
+    pub fn encode_vector_simple(&mut self, vector_data: &[f32]) -> HybridEncodedBlock {
+        let size = vector_data.len();
+        
+        // RBE 기저 함수 계산 - 1차원에 최적화
+        let mut rbe_params = [0.0f32; 8];
+        
+        // 간단한 최적화: 평균과 분산 계산
+        let mean = vector_data.iter().sum::<f32>() / size as f32;
+        let variance = vector_data.iter()
+            .map(|&x| (x - mean).powi(2))
+            .sum::<f32>() / size as f32;
+        let std_dev = variance.sqrt();
+        
+        // 기본 파라미터 설정
+        rbe_params[0] = mean;
+        rbe_params[1] = std_dev;
+        
+        // 주파수 성분 분석 (간단한 푸리에 변환)
+        for k in 2..6 {
+            let freq = k - 2;
+            let mut cos_sum = 0.0;
+            let mut sin_sum = 0.0;
+            
+            for (i, &val) in vector_data.iter().enumerate() {
+                let phase = 2.0 * std::f32::consts::PI * freq as f32 * i as f32 / size as f32;
+                cos_sum += val * phase.cos();
+                sin_sum += val * phase.sin();
+            }
+            
+            rbe_params[k] = cos_sum / size as f32;
+            rbe_params[k + 1] = sin_sum / size as f32;
+        }
+        
+        // 잔차 계산 (선택적)
+        let residuals = if self.config.enable_residual {
+            let mut residual_values = Vec::new();
+            
+            // RBE 재구성
+            for i in 0..size {
+                let x = if size > 1 { (i as f32 / (size - 1) as f32) * 2.0 - 1.0 } else { 0.0 };
+                let pi = std::f32::consts::PI;
+                
+                let mut reconstructed = rbe_params[0];
+                reconstructed += rbe_params[1] * x;
+                reconstructed += rbe_params[2] * (pi * x).cos();
+                reconstructed += rbe_params[3] * (pi * x).sin();
+                reconstructed += rbe_params[4] * (2.0 * pi * x).cos();
+                reconstructed += rbe_params[5] * (2.0 * pi * x).sin();
+                
+                let residual = vector_data[i] - reconstructed;
+                if residual.abs() > self.config.residual_threshold {
+                    residual_values.push(ResidualCoefficient {
+                        index: (0, i as u16),
+                        value: residual,
+                    });
+                }
+            }
+            
+            residual_values
+        } else {
+            Vec::new()
+        };
+        
+        HybridEncodedBlock {
+            rbe_params,
+            residuals,
+            rows: 1,
+            cols: size,
+            transform_type: TransformType::Adaptive,
+        }
+    }
 }
+
+
 
  

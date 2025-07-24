@@ -48,23 +48,8 @@ pub struct MetricTensorBlock {
     pub residuals: Vec<ResidualCoefficient>,
 }
 
-/// μ-law 인코딩/디코딩
-mod mulaw {
-    const MU: f32 = 255.0;
-    
-    pub fn encode(x: f32) -> u8 {
-        let x_norm = x.clamp(-1.0, 1.0);
-        let sign = if x_norm >= 0.0 { 0u8 } else { 128u8 };
-        let compressed = (x_norm.abs().ln_1p() / (1.0 + MU).ln()) * 127.0;
-        sign | (compressed as u8)
-    }
-    
-    pub fn decode(byte: u8) -> f32 {
-        let sign = if byte & 128 != 0 { -1.0 } else { 1.0 };
-        let value = (byte & 127) as f32 / 127.0;
-        sign * ((1.0 + MU).powf(value) - 1.0) / MU
-    }
-}
+// 통합된 mulaw 모듈 사용
+use super::mulaw;
 
 /// 메트릭 텐서 인코더
 pub struct MetricTensorEncoder {
