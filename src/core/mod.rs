@@ -2,28 +2,22 @@
 //!
 //! 푸앵카레 볼 기반 리만 기저 인코딩의 핵심 구성 요소들
 
-pub mod optimizers;
-pub mod differential; // 새로운 통합 미분 시스템
 pub mod tensors;
+pub mod differential;
+pub mod optimizers;
 
-// packed_params is temporarily redirected to tensors for migration
-// TODO: Remove this after full migration
-pub mod packed_params {
-    pub use super::tensors::*;
-}
-
-// 주요 타입들 재수출 - 중복 방지를 위해 선택적으로 수출
+// 주요 타입들 재수출
+pub use tensors::{
+    packed_types::{Packed128, Packed64, CycleState, DecodedParams, BitGradientTracker},
+    hyperbolic_lut::HYPERBOLIC_LUT_DATA,
+};
 
 pub use differential::{
-    DifferentialSystem, UnifiedCycleDifferentialSystem, CycleState,
-    UnifiedForwardPass, ForwardConfig, ForwardMetrics,
-    UnifiedBackwardPass, BackwardConfig, GradientMetrics,
-    StateTransitionEngine, TransitionRule, StateTransitionMetrics,
-    DifferentialPhase, HyperbolicFunction,
-};
-pub use optimizers::{
-    AdamState, RiemannianAdamState,
-    OptimizerConfig, AdamConfig, RiemannianAdamConfig, OptimizerType,
+    cycle_system::UnifiedCycleDifferentialSystem,
+    state_transition::StateTransitionEngine,
 };
 
-// 각 모듈이 자체 테스트를 포함함
+pub use optimizers::{
+    BitAdamState, BitRiemannianAdamState,
+    OptimizerConfig, OptimizerType,
+};
