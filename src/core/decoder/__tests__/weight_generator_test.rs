@@ -1,5 +1,5 @@
 use crate::core::decoder::WeightGenerator;
-use crate::packed_params::{PoincarePackedBit128, PoincareQuadrant};
+use crate::core::packed_params::{PoincarePackedBit128, PoincareQuadrant};
 
 #[test]
 fn 가중치_생성기_생성_테스트() {

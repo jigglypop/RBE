@@ -3,46 +3,11 @@ name = "rbe_llm"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "download"
-path = "src/bin/download.rs"
+# Executables (commented out for now)
 
-[[bin]]
-name = "compress_model"
-path = "src/bin/compress_model.rs"
-
-[[bin]]
-name = "run"
-path = "src/bin/run.rs"
-
-[[bin]]
-name = "test_models"
-path = "src/bin/test_models.rs"
-
-[[bin]]
-name = "compress_multi"
-path = "src/bin/compress_multi.rs"
-
-[[bin]]
-name = "compress"
-path = "src/bin/compress.rs"
-
-# SLLM API 도구들
-[[bin]]
-name = "rbe-server"
-path = "src/bin/rbe_server.rs"
-
-[[bin]]
-name = "rbe-cli"
-path = "src/bin/rbe_cli.rs"
-
-[[bin]]
-name = "rbe-inference"
-path = "src/bin/rbe_inference.rs"
-
-[[bin]]
-name = "korean-rbe"
-path = "src/bin/korean_rbe.rs"
+# [[bin]]
+# name = "korean-rbe"
+# path = "src/bin/korean_rbe.rs"
 
 [dependencies]
 # 기존 의존성들

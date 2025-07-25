@@ -1,6 +1,6 @@
 //! 융합 순전파 (Fused Forward Pass) 구현
 
-use crate::packed_params::{PoincarePackedBit128, PoincareQuadrant};
+use crate::core::packed_params::{PoincarePackedBit128, PoincareQuadrant};
 use super::weight_generator::WeightGenerator;
 
 /// 융합 순전파 (Fused Forward Pass) 구현 (문서 3.4)

@@ -2,7 +2,7 @@
 
 use crate::core::decoder::{RBEModelLoader as ModelLoader, LoadedWeight};
 use crate::core::encoder::{ModelLayout, WeightInfo};
-use crate::packed_params::{HybridEncodedBlock, TransformType, ResidualCoefficient};
+use crate::core::packed_params::{HybridEncodedBlock, TransformType, ResidualCoefficient};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;

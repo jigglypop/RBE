@@ -3,7 +3,7 @@
 //! CycleDifferentialSystem과 완전 통합되어 35.4ns/op 성능을 달성하는
 //! 고성능 순전파 계산 시스템
 
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 use super::cycle_system::{UnifiedCycleDifferentialSystem, HyperbolicFunction};
 use std::collections::HashMap;
 

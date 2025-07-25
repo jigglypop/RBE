@@ -1,5 +1,5 @@
 use crate::core::generator::PoincareLearning;
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 use crate::core::math::AnalyticalGradient;
 use rand::thread_rng;
 use std::time::Instant;

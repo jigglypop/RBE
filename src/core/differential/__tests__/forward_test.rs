@@ -1,6 +1,6 @@
 use crate::core::differential::forward::*;
 use crate::core::differential::cycle_system::*;
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 
 #[test]
 fn test_unified_forward_pass_creation() {

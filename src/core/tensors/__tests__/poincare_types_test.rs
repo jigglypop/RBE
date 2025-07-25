@@ -1,4 +1,4 @@
-use crate::packed_params::{PoincarePackedBit128, PoincareQuadrant};
+use crate::core::packed_params::{PoincarePackedBit128, PoincareQuadrant};
 use rand::thread_rng;
 
 #[test]

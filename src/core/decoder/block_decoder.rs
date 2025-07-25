@@ -1,6 +1,6 @@
 //! 하이브리드 블록 디코딩 기능
 
-use crate::packed_params::{HybridEncodedBlock, TransformType};
+use crate::core::packed_params::{HybridEncodedBlock, TransformType};
 use nalgebra::{DMatrix, DVector};
 use ndarray::{Array, Array2};
 use rustdct::DctPlanner;

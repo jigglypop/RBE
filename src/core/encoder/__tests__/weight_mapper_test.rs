@@ -1,5 +1,5 @@
 use crate::core::encoder::weight_mapper::*;
-use crate::packed_params::TransformType;
+use crate::core::packed_params::TransformType;
 use std::path::PathBuf;
 use tempfile::TempDir;
 

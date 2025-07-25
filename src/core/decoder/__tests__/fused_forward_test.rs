@@ -1,5 +1,5 @@
 use crate::core::decoder::FusedForwardPass;
-use crate::packed_params::{PoincarePackedBit128, PoincareQuadrant};
+use crate::core::packed_params::{PoincarePackedBit128, PoincareQuadrant};
 
 #[test]
 fn 융합_순전파_생성_테스트() {

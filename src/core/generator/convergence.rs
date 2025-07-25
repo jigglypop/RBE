@@ -1,4 +1,4 @@
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 
 /// 4.5 수렴성 분석
 /// 

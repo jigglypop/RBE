@@ -54,7 +54,7 @@ impl DifferentialSystem {
     /// 통합 순전파: 35.4ns/op 성능
     pub fn unified_forward(
         &mut self,
-        packed: &crate::packed_params::Packed128,
+        packed: &crate::core::packed_params::Packed128,
         i: usize,
         j: usize,
         rows: usize,
@@ -72,7 +72,7 @@ impl DifferentialSystem {
         &mut self,
         target: &[f32],
         predicted: &[f32],
-        packed: &mut crate::packed_params::Packed128,
+        packed: &mut crate::core::packed_params::Packed128,
         rows: usize,
         cols: usize,
         learning_rate: f32,

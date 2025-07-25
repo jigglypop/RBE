@@ -4,7 +4,7 @@
 //! 로딩 시 메타데이터를 기반으로 정확한 가중치 복원을 담당
 
 use crate::core::encoder::RBEEncoder;
-use crate::packed_params::{TransformType, HybridEncodedBlock};
+use crate::core::packed_params::{TransformType, HybridEncodedBlock};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};

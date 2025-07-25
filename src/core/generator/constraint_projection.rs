@@ -1,4 +1,4 @@
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 
 /// 4.4.1 푸앵카레 볼 제약 투영
 /// 

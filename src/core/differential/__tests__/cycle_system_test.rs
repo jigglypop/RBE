@@ -105,7 +105,7 @@ fn test_mathematical_invariants_verification() {
 #[test]
 fn test_packed128_state_application() {
     let mut system = UnifiedCycleDifferentialSystem::new(3);
-    let mut packed = crate::packed_params::Packed128 {
+    let mut packed = crate::core::packed_params::Packed128 {
         hi: 0x123456789ABCDEF0,
         lo: 0xFEDCBA9876543210,
     };

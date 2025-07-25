@@ -1,7 +1,7 @@
 use crate::core::differential::backward::*;
 use crate::core::differential::cycle_system::*;
 use crate::core::differential::state_transition::*;
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 
 #[test]
 fn test_unified_backward_pass_creation() {

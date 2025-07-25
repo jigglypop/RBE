@@ -3,7 +3,7 @@
 //! 35.4ns/op 극한 성능과 0.000000 오차 완벽 정확도를 달성한
 //! 11비트 미분 사이클의 업그레이드 버전
 
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 use std::collections::HashMap;
 
 /// 11비트 미분 사이클의 상태 정의 (기존과 동일)
