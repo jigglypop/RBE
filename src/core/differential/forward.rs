@@ -69,7 +69,7 @@ impl BitForwardPass {
             bit_tracker: BitGradientTracker::new(1024),
         }
     }
-
+    
     /// **핵심 메서드**: 비트 도메인 초고속 순전파 (30,904+ epoch/s)
     pub fn bit_forward_ultra_fast(
         &mut self,
@@ -128,7 +128,7 @@ impl BitForwardPass {
         
         results
     }
-
+    
     /// 11비트 사이클 최적화된 순전파 (간소화)
     pub fn bit_forward_with_cycle_optimization(
         &mut self,
@@ -161,7 +161,7 @@ impl BitForwardPass {
         
         self.bit_forward_ultra_fast(&optimized_packed, i, j, rows, cols)
     }
-
+    
     /// 11비트 사이클 상태 최적화 (간소화)
     fn optimize_cycle_state(&self, cycle: CycleState) -> CycleState {
         // 비트 레벨 최적화: XOR, AND, OR 연산으로 최적 패턴 찾기
@@ -186,7 +186,7 @@ impl BitForwardPass {
         
         best_cycle
     }
-
+    
     /// 고정소수점 변환 (Q16.16)
     fn f32_to_fixed_point(value: f32) -> u32 {
         (value * 65536.0) as u32
@@ -195,7 +195,7 @@ impl BitForwardPass {
     fn fixed_point_to_f32(fixed: u32) -> f32 {
         fixed as f32 / 65536.0
     }
-
+    
     /// 성능 메트릭 조회
     pub fn get_performance_metrics(&self) -> &BitForwardMetrics {
         &self.performance_metrics
@@ -208,7 +208,7 @@ impl BitForwardPass {
         let hit_rate = self.performance_metrics.bit_cache_hit_rate;
         (bit_cache_size, cycle_cache_size, hit_rate)
     }
-
+    
     /// 캐시 초기화 (메모리 관리)
     pub fn clear_cache(&mut self) {
         self.bit_cache.clear();
