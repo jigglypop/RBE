@@ -142,9 +142,6 @@ impl Default for DifferentialSystemConfig {
 }
 
 #[cfg(test)]
-pub mod __tests__;
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
