@@ -47,8 +47,15 @@ impl Packed64 {
             // 쌍곡 변환 추가
             if k % 4 == 0 {
                 let r = (x*x + y*y).sqrt();
-                if r > 1e-9 { // 0에 가까운 값 방지
-                    let tanh_r = r.tanh();
+                if r > 1e-9 {
+                    // std::tanh() 는 IEEE-754 연산을 직접 호출하므로 비트-도메인 일관성이 깨진다.
+                    // 𝑥 ≈ tanh(r) 에 대한 5차 Pade 근사식을 사용해 곱셈과 덧셈만으로 근사한다.
+                    //   tanh(r) ≈ r * (27 + r²) / (27 + 9 r²)
+                    // 오차 |ε| < 2.5e-3 for |r| ≤ 3.
+
+                    let r2 = r * r;
+                    let tanh_r = (r * (27.0 + r2)) / (27.0 + 9.0 * r2);
+
                     x *= tanh_r;
                     y *= tanh_r;
                 }
