@@ -1,353 +1,271 @@
-//! 비트 도메인 푸앵카레볼 Adam 최적화기
-//! 모든 미분, adam 연산은 비트 상태에서 수행
+//! BitAdam 옵티마이저 - 정밀 수학적 구현
+//! 
+//! Adaptive Moment Estimation (Adam)을 RBE 시스템에 적용
+//! 정확한 수학적 그래디언트와 적응적 학습률을 사용
 
-use crate::core::tensors::packed_types::*;
-use std::collections::HashMap;
+use crate::core::tensors::{Packed128, DecodedParams};
 
-/// 비트 도메인 Adam 상태 - 11비트 미분 사이클 시스템 기반
+/// BitAdam 옵티마이저 상태
+/// Adam 알고리즘의 1차/2차 모멘트를 유지하며 적응적 학습률 제공
 #[derive(Debug, Clone)]
 pub struct BitAdamState {
-    /// 128비트 packed 모멘텀 상태
-    pub momentum_state: Packed128,
-    /// 11비트 사이클 상태들
-    pub m_cycle: CycleState,  // 1차 모멘텀 사이클
-    pub v_cycle: CycleState,  // 2차 모멘텀 사이클
-    /// 비트 인코딩된 하이퍼파라미터 
-    pub beta1_bits: u32,      // Q16.16 고정소수점
-    pub beta2_bits: u32,      // Q16.16 고정소수점  
-    pub epsilon_bits: u32,    // Q16.16 고정소수점
-    pub t: u16,               // 시간 스텝 (16비트)
-    /// 비트 그래디언트 추적
-    pub bit_tracker: BitGradientTracker,
-    /// 상태 전이 캐시 (성능 최적화)
-    transition_cache: HashMap<u64, (CycleState, CycleState)>,
+    // Adam 하이퍼파라미터
+    beta1: f32,         // 1차 모멘트 지수이동평균 계수 (기본 0.9)
+    beta2: f32,         // 2차 모멘트 지수이동평균 계수 (기본 0.999)
+    epsilon: f32,       // 수치 안정성을 위한 작은 값 (기본 1e-8)
+    
+    // 모멘트 상태
+    m_r: f32,           // r에 대한 1차 모멘트
+    v_r: f32,           // r에 대한 2차 모멘트
+    m_theta: f32,       // θ에 대한 1차 모멘트
+    v_theta: f32,       // θ에 대한 2차 모멘트
+    
+    // 시간 스텝
+    t: u32,             // 업데이트 횟수
+    
+    // 옵션
+    use_riemannian: bool,   // 리만 기하학 적용 여부
+    use_amsgrad: bool,      // AMSGrad 변형 사용 여부
+    vmax_r: f32,            // AMSGrad용 최대 2차 모멘트 (r)
+    vmax_theta: f32,        // AMSGrad용 최대 2차 모멘트 (θ)
+}
+
+impl BitAdamState {
+    pub fn new() -> Self {
+        Self {
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            m_r: 0.0,
+            v_r: 0.0,
+            m_theta: 0.0,
+            v_theta: 0.0,
+            t: 0,
+            use_riemannian: false,
+            use_amsgrad: false,
+            vmax_r: 0.0,
+            vmax_theta: 0.0,
+        }
+    }
+    
+    pub fn with_config(beta1: f32, beta2: f32, epsilon: f32, use_riemannian: bool) -> Self {
+        Self {
+            beta1,
+            beta2,
+            epsilon,
+            m_r: 0.0,
+            v_r: 0.0,
+            m_theta: 0.0,
+            v_theta: 0.0,
+            t: 0,
+            use_riemannian,
+            use_amsgrad: false,
+            vmax_r: 0.0,
+            vmax_theta: 0.0,
+        }
+    }
+    
+    /// 정확한 수학적 그래디언트를 사용한 Adam 업데이트
+    pub fn bit_update(
+        &mut self,
+        packed: &mut Packed128,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+        target: f32,
+        learning_rate: f32,
+    ) {
+        // 고정소수점 버전 사용
+        self.bit_update_fixed_point(packed, i, j, rows, cols, target, learning_rate);
+    }
+
+    /// 고정소수점 연산을 사용한 정밀한 Adam 업데이트
+    pub fn bit_update_fixed_point(
+        &mut self,
+        packed: &mut Packed128,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+        target: f32,
+        learning_rate: f32,
+    ) {
+        self.t += 1;
+        
+        // 1. 정확한 그래디언트 계산
+        let (grad_r, grad_theta, predicted) = if self.use_riemannian {
+            // 리만 자연 그래디언트
+            let (gr, gt) = packed.compute_riemannian_gradients(i, j, rows, cols, target, false);
+            let pred = packed.fused_forward(i, j, rows, cols);
+            (gr, gt, pred)
+        } else {
+            // 유클리드 그래디언트
+            packed.compute_gradients(i, j, rows, cols, target, false)
+        };
+        
+        // 2. 1차 모멘트 업데이트 (지수이동평균)
+        self.m_r = self.beta1 * self.m_r + (1.0 - self.beta1) * grad_r;
+        self.m_theta = self.beta1 * self.m_theta + (1.0 - self.beta1) * grad_theta;
+        
+        // 3. 2차 모멘트 업데이트 (지수이동평균)
+        self.v_r = self.beta2 * self.v_r + (1.0 - self.beta2) * grad_r.powi(2);
+        self.v_theta = self.beta2 * self.v_theta + (1.0 - self.beta2) * grad_theta.powi(2);
+        
+        // 4. AMSGrad 변형 (선택적)
+        let (v_r_used, v_theta_used) = if self.use_amsgrad {
+            self.vmax_r = self.vmax_r.max(self.v_r);
+            self.vmax_theta = self.vmax_theta.max(self.v_theta);
+            (self.vmax_r, self.vmax_theta)
+        } else {
+            (self.v_r, self.v_theta)
+        };
+        
+        // 5. 편향 보정 (Bias correction)
+        let bias_correction1 = 1.0 - self.beta1.powi(self.t as i32);
+        let bias_correction2 = 1.0 - self.beta2.powi(self.t as i32);
+        
+        let m_hat_r = self.m_r / bias_correction1;
+        let m_hat_theta = self.m_theta / bias_correction1;
+        
+        let v_hat_r = v_r_used / bias_correction2;
+        let v_hat_theta = v_theta_used / bias_correction2;
+        
+        // 6. Adam 그래디언트 계산
+        let adam_grad_r = m_hat_r / (v_hat_r.sqrt() + self.epsilon);
+        let adam_grad_theta = m_hat_theta / (v_hat_theta.sqrt() + self.epsilon);
+        
+        // 7. 고정소수점 업데이트 (정밀도 손실 없음)
+        packed.update_gradients_fixed_point(adam_grad_r, adam_grad_theta, learning_rate);
+        
+        // 8. 11비트 사이클 업데이트
+        let total_gradient_magnitude = (grad_r.abs() + grad_theta.abs()) / 2.0;
+        packed.apply_cycle_gradient(total_gradient_magnitude);
+        
+        // 디버깅 정보 (선택적)
+        if self.t % 100 == 0 {
+            let params = packed.decode();
+            println!("Epoch {}: r={:.6}, theta={:.6}, pred={:.6}, target={:.6}, loss={:.6}",
+                     self.t, params.r_fp32, params.theta_fp32, predicted, target, (predicted - target).abs());
+        }
+    }
+
+    /// 정확한 수학적 그래디언트를 사용한 Adam 업데이트 (이전 버전)
+    pub fn bit_update_old(
+        &mut self,
+        packed: &mut Packed128,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+        target: f32,
+        learning_rate: f32,
+    ) {
+        self.t += 1;
+        
+        // 1. 정확한 그래디언트 계산
+        let (grad_r, grad_theta) = if self.use_riemannian {
+            // 리만 자연 그래디언트
+            packed.compute_riemannian_gradients(i, j, rows, cols, target, false) // L2 손실 사용
+        } else {
+            // 유클리드 그래디언트
+            let (gr, gt, _) = packed.compute_gradients(i, j, rows, cols, target, false); // L2 손실 사용
+            (gr, gt)
+        };
+        
+        // 2. 1차 모멘트 업데이트 (지수이동평균)
+        self.m_r = self.beta1 * self.m_r + (1.0 - self.beta1) * grad_r;
+        self.m_theta = self.beta1 * self.m_theta + (1.0 - self.beta1) * grad_theta;
+        
+        // 3. 2차 모멘트 업데이트 (지수이동평균)
+        self.v_r = self.beta2 * self.v_r + (1.0 - self.beta2) * grad_r.powi(2);
+        self.v_theta = self.beta2 * self.v_theta + (1.0 - self.beta2) * grad_theta.powi(2);
+        
+        // 4. AMSGrad 변형 (선택적)
+        let (v_r_used, v_theta_used) = if self.use_amsgrad {
+            self.vmax_r = self.vmax_r.max(self.v_r);
+            self.vmax_theta = self.vmax_theta.max(self.v_theta);
+            (self.vmax_r, self.vmax_theta)
+        } else {
+            (self.v_r, self.v_theta)
+        };
+        
+        // 5. 편향 보정 (Bias correction)
+        let bias_correction1 = 1.0 - self.beta1.powi(self.t as i32);
+        let bias_correction2 = 1.0 - self.beta2.powi(self.t as i32);
+        
+        let m_hat_r = self.m_r / bias_correction1;
+        let m_hat_theta = self.m_theta / bias_correction1;
+        
+        let v_hat_r = v_r_used / bias_correction2;
+        let v_hat_theta = v_theta_used / bias_correction2;
+        
+        // 6. Adam 업데이트 규칙
+        let mut params = packed.decode();
+        
+        params.r_fp32 -= learning_rate * m_hat_r / (v_hat_r.sqrt() + self.epsilon);
+        params.theta_fp32 -= learning_rate * m_hat_theta / (v_hat_theta.sqrt() + self.epsilon);
+        
+        // 7. 범위 제약
+        params.r_fp32 = params.r_fp32.clamp(0.0, 0.999999);
+        params.theta_fp32 = params.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
+        
+        // 8. 업데이트된 파라미터 적용
+        packed.update_from_continuous(&params);
+    }
+    
+    /// 간단한 인터페이스 (이전 버전과의 호환성)
+    pub fn bit_update_simple(
+        &mut self,
+        packed: &mut Packed128,
+        predicted: f32,
+        target: f32,
+        learning_rate: f32,
+    ) {
+        // 더미 좌표로 호출 (실제로는 사용하지 않는 것을 권장)
+        self.bit_update(packed, 0, 0, 1, 1, target, learning_rate);
+    }
+    
+    /// 옵티마이저 상태 초기화
+    pub fn reset(&mut self) {
+        self.m_r = 0.0;
+        self.v_r = 0.0;
+        self.m_theta = 0.0;
+        self.v_theta = 0.0;
+        self.t = 0;
+        self.vmax_r = 0.0;
+        self.vmax_theta = 0.0;
+    }
+    
+    /// AMSGrad 변형 활성화/비활성화
+    pub fn set_amsgrad(&mut self, use_amsgrad: bool) {
+        self.use_amsgrad = use_amsgrad;
+    }
+    
+    /// 현재 옵티마이저 상태 정보 반환
+    pub fn get_state_info(&self) -> (u32, f32, f32, f32, f32) {
+        (self.t, self.m_r, self.v_r, self.m_theta, self.v_theta)
+    }
+    
+    /// 적응적 학습률 계산 (디버깅용)
+    pub fn get_adaptive_lr(&self, base_lr: f32) -> (f32, f32) {
+        let bias_correction1 = 1.0 - self.beta1.powi(self.t.max(1) as i32);
+        let bias_correction2 = 1.0 - self.beta2.powi(self.t.max(1) as i32);
+        
+        let m_hat_r = self.m_r / bias_correction1;
+        let m_hat_theta = self.m_theta / bias_correction1;
+        let v_hat_r = self.v_r / bias_correction2;
+        let v_hat_theta = self.v_theta / bias_correction2;
+        
+        let lr_r = base_lr * m_hat_r.abs() / (v_hat_r.sqrt() + self.epsilon);
+        let lr_theta = base_lr * m_hat_theta.abs() / (v_hat_theta.sqrt() + self.epsilon);
+        
+        (lr_r, lr_theta)
+    }
 }
 
 impl Default for BitAdamState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl BitAdamState {
-    pub fn new() -> Self {
-        let mut state = Self {
-            momentum_state: Packed128::default(),
-            m_cycle: CycleState::from_bits(0x100), // 초기 사이클 상태
-            v_cycle: CycleState::from_bits(0x200), // 다른 초기 상태
-            beta1_bits: Self::f32_to_q16(0.9),
-            beta2_bits: Self::f32_to_q16(0.999),
-            epsilon_bits: Self::f32_to_q16(1e-8),
-            t: 0,
-            bit_tracker: BitGradientTracker::new(1),
-            transition_cache: HashMap::new(),
-        };
-        
-        // 초기 사이클 상태 설정
-        state.momentum_state.set_cycle_state(state.m_cycle);
-        state
-    }
-    
-    pub fn with_config(beta1: f32, beta2: f32, epsilon: f32) -> Self {
-        let mut state = Self {
-            momentum_state: Packed128::default(),
-            m_cycle: CycleState::from_bits(0x100),
-            v_cycle: CycleState::from_bits(0x200),
-            beta1_bits: Self::f32_to_q16(beta1),
-            beta2_bits: Self::f32_to_q16(beta2),
-            epsilon_bits: Self::f32_to_q16(epsilon),
-            t: 0,
-            bit_tracker: BitGradientTracker::new(1),
-            transition_cache: HashMap::new(),
-        };
-        
-        state.momentum_state.set_cycle_state(state.m_cycle);
-        state
-    }
-    
-    /// f32를 Q16.16 고정소수점으로 변환
-    #[inline]
-    fn f32_to_q16(val: f32) -> u32 {
-        (val * 65536.0) as u32
-    }
-    
-    /// Q16.16을 f32로 변환  
-    #[inline]
-    fn q16_to_f32(bits: u32) -> f32 {
-        (bits as i32) as f32 / 65536.0
-    }
-    
-    /// 비트 도메인 곱셈 (고정소수점)
-    #[inline]
-    fn bit_multiply(a_bits: u32, b_bits: u32) -> u32 {
-        let result = ((a_bits as u64) * (b_bits as u64)) >> 16;
-        result as u32
-    }
-    
-    /// 비트 도메인 덧셈 (오버플로 방지)
-    #[inline]
-    fn bit_add(a_bits: u32, b_bits: u32) -> u32 {
-        a_bits.saturating_add(b_bits)
-    }
-    
-    /// 비트 도메인 뺄셈
-    #[inline]
-    fn bit_sub(a_bits: u32, b_bits: u32) -> u32 {
-        a_bits.saturating_sub(b_bits)
-    }
-    
-    /// **핵심: 비트 상태 미분 계산**
-    /// 11비트 사이클 시스템을 활용한 그래디언트 계산
-    fn compute_bit_gradient(&mut self, packed: &Packed128, i: usize, j: usize, 
-                           target: f32, rows: usize, cols: usize) -> (u32, CycleState) {
-        // 1. 현재 출력 계산
-        let current_output = packed.fused_forward(i, j, rows, cols);
-        
-        // 2. 오차 계산 (Q16.16)
-        let error = target - current_output;
-        let error_bits = Self::f32_to_q16(error);
-        
-        // 3. 오차를 11비트 사이클 상태로 변환
-        let error_cycle = CycleState::from_bits((error_bits >> 5) as u16 & 0x7FF);
-        
-        // 4. 현재 사이클과 오차 사이클의 전이 계산
-        let current_cycle = packed.get_cycle_state();
-        let gradient_cycle = current_cycle.apply_transition(&error_cycle);
-        
-        // 5. 좌표 기반 추가 전이 (위치 정보 인코딩)
-        let coord_hash = ((i * 0x9E3779B9) ^ (j * 0x517CC1B7)) as u16 & 0x7FF;
-        let coord_cycle = CycleState::from_bits(coord_hash);
-        let final_gradient_cycle = gradient_cycle.apply_transition(&coord_cycle);
-        
-        // 6. 사이클 상태를 그래디언트 크기로 변환
-        let gradient_magnitude = Self::cycle_to_gradient_magnitude(&final_gradient_cycle);
-        
-        (gradient_magnitude, final_gradient_cycle)
-    }
-    
-    /// 사이클 상태를 그래디언트 크기로 변환
-    fn cycle_to_gradient_magnitude(cycle: &CycleState) -> u32 {
-        let bits = cycle.to_bits();
-        
-        // 11비트를 분해하여 그래디언트 크기 계산
-        let func_idx = (bits >> 8) & 0x7;  // 함수 선택
-        let cycle_pos = (bits >> 4) & 0xF; // 사이클 위치  
-        let modulation = bits & 0xF;       // 변조 파라미터
-        
-        // 함수별 가중치 (쌍곡함수 특성 반영)
-        let func_weight = match func_idx {
-            0 => 1.0,    // sinh
-            1 => 0.8,    // cosh
-            2 => 1.2,    // tanh  
-            3 => 1.5,    // sech²
-            _ => 1.0,
-        };
-        
-        // 사이클 위치와 변조를 조합하여 최종 크기 계산
-        let base_magnitude = (cycle_pos as f32 + modulation as f32 * 0.1) * func_weight;
-        Self::f32_to_q16(base_magnitude * 0.01) // 적절한 스케일링
-    }
-    
-    /// **핵심: 비트 도메인 Adam 업데이트**
-    /// 모든 연산이 비트 상태에서 수행됨
-    pub fn bit_update(&mut self, packed: &mut Packed128, i: usize, j: usize, 
-                     target: f32, learning_rate: f32, rows: usize, cols: usize) {
-        // 1. 비트 상태 미분 계산
-        let (grad_bits, grad_cycle) = self.compute_bit_gradient(packed, i, j, target, rows, cols);
-        
-        // 2. 그래디언트가 0에 가까우면 조기 종료
-        if grad_bits < 100 { // 임계값 (Q16.16)
-            return;
-        }
-        
-        self.t = self.t.saturating_add(1);
-        
-        // 3. 11비트 사이클 전이를 통한 모멘텀 업데이트
-        let one_minus_beta1 = Self::bit_sub(Self::f32_to_q16(1.0), self.beta1_bits);
-        let one_minus_beta2 = Self::bit_sub(Self::f32_to_q16(1.0), self.beta2_bits);
-        
-        // 4. 1차 모멘텀 업데이트 (비트 도메인)
-        // m = beta1 * m + (1 - beta1) * g
-        let current_m_bits = self.momentum_state.hi as u32;
-        let beta1_m = Self::bit_multiply(self.beta1_bits, current_m_bits);
-        let grad_term = Self::bit_multiply(one_minus_beta1, grad_bits);
-        let new_m_bits = Self::bit_add(beta1_m, grad_term);
-        
-        // 5. 2차 모멘텀 업데이트 (비트 도메인)  
-        // v = beta2 * v + (1 - beta2) * g²
-        let current_v_bits = self.momentum_state.lo as u32;
-        let beta2_v = Self::bit_multiply(self.beta2_bits, current_v_bits);
-        let grad_squared = Self::bit_multiply(grad_bits, grad_bits);
-        let grad2_term = Self::bit_multiply(one_minus_beta2, grad_squared);
-        let new_v_bits = Self::bit_add(beta2_v, grad2_term);
-        
-        // 6. 모멘텀 상태를 Packed128에 저장
-        self.momentum_state.hi = (self.momentum_state.hi & 0xFFFFFFFF00000000) | (new_m_bits as u64);
-        self.momentum_state.lo = (self.momentum_state.lo & 0xFFFFFFFF00000000) | (new_v_bits as u64);
-        
-        // 7. 사이클 상태 전이 적용
-        self.m_cycle = self.m_cycle.apply_transition(&grad_cycle);
-        self.v_cycle = self.v_cycle.apply_transition(&grad_cycle);
-        
-        // 8. 편향 보정 (비트 도메인)
-        let beta1_power = self.bit_power(self.beta1_bits, self.t);
-        let beta2_power = self.bit_power(self.beta2_bits, self.t);
-        
-        let beta1_complement = Self::bit_sub(Self::f32_to_q16(1.0), beta1_power);
-        let beta2_complement = Self::bit_sub(Self::f32_to_q16(1.0), beta2_power);
-        
-        if beta1_complement < 100 || beta2_complement < 100 {
-            return; // 보정 계수가 너무 작음
-        }
-        
-        // 9. m_hat, v_hat 계산 (고정소수점 나눗셈)
-        let m_hat_bits = self.bit_divide(new_m_bits, beta1_complement);
-        let v_hat_bits = self.bit_divide(new_v_bits, beta2_complement);
-        
-        // 10. 업데이트 크기 계산
-        let v_sqrt_bits = self.bit_sqrt(v_hat_bits);
-        let denom_bits = Self::bit_add(v_sqrt_bits, self.epsilon_bits);
-        
-        if denom_bits < self.epsilon_bits * 2 {
-            return;
-        }
-        
-        let lr_bits = Self::f32_to_q16(learning_rate);
-        let update_numerator = Self::bit_multiply(lr_bits, m_hat_bits);
-        let update_bits = self.bit_divide(update_numerator, denom_bits);
-        
-        // 11. 비트 상태 전이를 통한 최종 업데이트 적용
-        let update_f32 = -Self::q16_to_f32(update_bits); // 음의 그래디언트 방향
-        packed.apply_state_transition(update_f32, i, j);
-        
-        // 12. 새로운 사이클 상태 설정
-        let combined_cycle = self.m_cycle.apply_transition(&self.v_cycle);
-        packed.set_cycle_state(combined_cycle);
-        
-        // 13. 의존성 등록 (그래디언트 추적)
-        let updated_state = *packed;
-        self.bit_tracker.register_dependency(0, &self.momentum_state, &updated_state);
-    }
-    
-    /// 비트 도메인 거듭제곱 (이진 거듭제곱법)
-    fn bit_power(&self, base_bits: u32, exp: u16) -> u32 {
-        if exp == 0 { return Self::f32_to_q16(1.0); }
-        if exp == 1 { return base_bits; }
-        
-        let mut result = Self::f32_to_q16(1.0);
-        let mut base = base_bits;
-        let mut exponent = exp;
-        
-        while exponent > 0 {
-            if exponent & 1 == 1 {
-                result = Self::bit_multiply(result, base);
-            }
-            base = Self::bit_multiply(base, base);
-            exponent >>= 1;
-        }
-        
-        result
-    }
-    
-    /// 비트 도메인 나눗셈 (고정소수점)
-    fn bit_divide(&self, numerator: u32, denominator: u32) -> u32 {
-        if denominator == 0 { return 0; }
-        
-        // Q16.16 나눗셈: (a << 16) / b
-        let extended_num = (numerator as u64) << 16;
-        (extended_num / denominator as u64) as u32
-    }
-    
-    /// 비트 도메인 제곱근 (뉴턴-랩슨 근사)
-    fn bit_sqrt(&self, value_bits: u32) -> u32 {
-        if value_bits == 0 { return 0; }
-        if value_bits == Self::f32_to_q16(1.0) { return Self::f32_to_q16(1.0); }
-        
-        // 초기 추정값
-        let mut x = value_bits >> 1;
-        
-        // 2회 뉴턴-랩슨 반복
-        for _ in 0..2 {
-            let x_squared = Self::bit_multiply(x, x);
-            if x > 0 {
-                let error = Self::bit_sub(value_bits, x_squared);
-                let correction = self.bit_divide(error, x * 2);
-                x = Self::bit_add(x, correction);
-            }
-        }
-        
-        x
-    }
-    
-    /// 배치 업데이트 (다중 좌표)
-    pub fn batch_update(&mut self, packed: &mut Packed128, coordinates: &[(usize, usize)], 
-                       targets: &[f32], learning_rate: f32, rows: usize, cols: usize) {
-        assert_eq!(coordinates.len(), targets.len());
-        
-        for (&(i, j), &target) in coordinates.iter().zip(targets.iter()) {
-            self.bit_update(packed, i, j, target, learning_rate, rows, cols);
-        }
-    }
-    
-    /// 상태 초기화
-    pub fn reset(&mut self) {
-        self.momentum_state = Packed128::default();
-        self.m_cycle = CycleState::from_bits(0x100);
-        self.v_cycle = CycleState::from_bits(0x200);
-        self.t = 0;
-        self.bit_tracker = BitGradientTracker::new(1);
-        self.transition_cache.clear();
-        
-        self.momentum_state.set_cycle_state(self.m_cycle);
-    }
-    
-    /// 수렴 여부 확인 (비트 도메인)
-    pub fn is_converged(&self, threshold_bits: u32) -> bool {
-        let m_magnitude = self.momentum_state.hi as u32;
-        let v_magnitude = self.momentum_state.lo as u32;
-        
-        m_magnitude < threshold_bits && v_magnitude < threshold_bits
-    }
-    
-    /// 현재 상태 정보 반환
-    pub fn get_state_info(&self) -> (u16, CycleState, CycleState, u32, u32) {
-        (
-            self.t,
-            self.m_cycle,
-            self.v_cycle,
-            self.momentum_state.hi as u32,
-            self.momentum_state.lo as u32,
-        )
-    }
-    
-    /// 비트 도메인 성능 측정
-    pub fn benchmark_bit_operations(iterations: usize) {
-        use std::time::Instant;
-        
-        println!("=== 비트 도메인 Adam 성능 측정 ===");
-        
-        let mut optimizer = Self::new();
-        let mut packed = Packed128::random(&mut rand::thread_rng());
-        
-        let start = Instant::now();
-        
-        for i in 0..iterations {
-            let target = (i as f32 % 100.0) * 0.01;
-            let row = i % 50;
-            let col = (i * 7) % 75;
-            
-            optimizer.bit_update(&mut packed, row, col, target, 0.001, 50, 75);
-        }
-        
-        let elapsed = start.elapsed();
-        let ns_per_op = elapsed.as_nanos() as f64 / iterations as f64;
-        
-        println!("비트 Adam 업데이트: {:.1} ns/op ({:.1} MHz)", 
-                ns_per_op, 1000.0 / ns_per_op);
-        
-        let (t, m_cycle, v_cycle, m_bits, v_bits) = optimizer.get_state_info();
-        println!("최종 상태: t={}, m_cycle={:011b}, v_cycle={:011b}", 
-                t, m_cycle.to_bits(), v_cycle.to_bits());
-        println!("모멘텀: m={}, v={}", m_bits, v_bits);
     }
 } 

@@ -322,23 +322,8 @@ impl Packed128 {
     
     /// 순수 비트 도메인 fused forward
     pub fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
-        // 11비트 사이클 상태
-        let cycle_state = self.get_cycle_state();
-        let active_func = cycle_state.get_active_function();
-        let cycle_pos = cycle_state.get_cycle_position();
-        
-        // 기본 CORDIC 가중치
-        let base_weight = Packed64 { rotations: self.hi & 0x1FFFFFFFFFFFFF }
-            .compute_weight(i, j, rows, cols);
-        
-        // 비트 패턴 변조 (순수 비트 연산)
-        let pattern_bits = (self.hi >> 20) & 0x1FFF;
-        let modulation = Self::bit_pattern_modulation(pattern_bits, i, j, cycle_pos);
-        
-        // 쌍곡함수 LUT 적용
-        let func_output = Self::apply_hyperbolic_lut(active_func, base_weight, modulation);
-        
-        func_output
+        // 새로운 푸앵카레볼 기하학 버전 사용
+        self.fused_forward_poincare(i, j, rows, cols)
     }
     
     /// 비트 패턴 변조 (곱셈 없이)
@@ -401,6 +386,21 @@ impl Packed128 {
         let lo = (r_q32 << 32) | (theta_q32 & 0xFFFFFFFF);
         
         Packed128 { hi, lo }
+    }
+
+    /// 디코딩된 연속 파라미터(r, θ)를 사용하여 현재 `Packed128`의 `lo` 필드를 업데이트합니다.
+    /// `hi` 필드에 저장된 `CycleState`는 변경하지 않습니다.
+    pub fn update_from_continuous(&mut self, params: &DecodedParams) {
+        // f32 → Q32.32 변환
+        let r_clamped = params.r_fp32.clamp(0.0, 0.999999);
+        let r_q32 = ((r_clamped as f64) * 4294967296.0) as u64;
+
+        // theta를 [0, 2π) 범위로 정규화
+        let theta_norm = params.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
+        let theta_q32 = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 4294967296.0) as u64;
+
+        // 양자화된 값을 u64로 패킹하여 `lo` 필드에 저장
+        self.lo = (r_q32 << 32) | (theta_q32 & 0xFFFFFFFF);
     }
     
     pub fn random(rng: &mut impl Rng) -> Self {
@@ -628,7 +628,223 @@ impl Packed128 {
         println!("최종 성능: {:.1} MHz ({} operations in {:.2}s)", 
                 final_ops_per_sec / 1_000_000.0, operation_count, final_elapsed.as_secs_f64());
     }
-}
+
+    /// 정확한 수학적 그래디언트 계산
+    /// fused_forward: f(r,θ) = tanh(r) * sin(θ + k*π) where k = func_output
+    /// 
+    /// Returns: (grad_r, grad_theta, func_output_k)
+    pub fn compute_gradients(
+        &self, 
+        i: usize, 
+        j: usize, 
+        rows: usize, 
+        cols: usize,
+        target: f32,
+        use_l1: bool,
+    ) -> (f32, f32, f32) {
+        // 1. 현재 예측값 (새로운 푸앵카레볼 순전파 사용)
+        let predicted = self.fused_forward_poincare(i, j, rows, cols);
+        
+        // 2. 현재 r, theta 값
+        let params = self.decode();
+        let r = params.r_fp32.min(0.999);
+        let theta = params.theta_fp32;
+        
+        // 3. 손실 함수의 미분 (tanh 미분 포함)
+        let grad_of_loss = if use_l1 {
+            if predicted >= target { 1.0 } else { -1.0 }
+        } else {
+            2.0 * (predicted - target)
+        };
+        // 연쇄 법칙: d(loss)/d(params) = d(loss)/d(pred) * d(pred)/d(pre_activation) * d(pre_activation)/d(params)
+        // d(pred)/d(pre_activation) = 1 - tanh^2(pre_activation) = 1 - pred^2
+        let loss_grad = grad_of_loss * (1.0 - predicted.powi(2));
+        
+        // 4. 푸앵카레볼 기하학에 따른 그래디언트
+        // d = 2 * arctanh(r)에 대한 미분
+        let d = if r < 0.999 {
+            2.0 * r.atanh()
+        } else {
+            2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
+        };
+        
+        // 11비트 사이클 정보
+        let cycle_state = self.get_cycle_state();
+        let cycle_func = cycle_state.get_active_function();
+        let cycle_pos = cycle_state.get_cycle_position() as f32 / 2048.0;
+        
+        // 쌍곡함수의 미분
+        let (func_value, func_deriv) = match cycle_func % 4 {
+            0 => (d.sinh(), d.cosh()),           // sinh → cosh
+            1 => (d.cosh(), d.sinh()),           // cosh → sinh
+            2 => {
+                let tanh_d = d.tanh();
+                (tanh_d, 1.0 - tanh_d * tanh_d)  // tanh → sech²
+            }
+            3 => {
+                let sech_d = 1.0 / d.cosh();
+                let sech2 = sech_d * sech_d;
+                (sech2, -2.0 * sech2 * d.tanh()) // sech² → -2sech²tanh
+            }
+            _ => (d.tanh(), 1.0 - d.tanh() * d.tanh()),
+        };
+        
+        // 각도 성분
+        let phi = theta + cycle_pos * std::f32::consts::PI;
+        let angular_component = phi.sin();
+        let angular_deriv = phi.cos();
+        
+        // ∂f/∂d = func_deriv * angular_component
+        // ∂d/∂r = 2/(1-r²)
+        let dd_dr = 2.0 / ((1.0 - r * r).max(1e-6));
+        let df_dr = loss_grad * func_deriv * angular_component * dd_dr;
+        
+        // ∂f/∂θ = func_value * angular_deriv
+        let df_dtheta = loss_grad * func_value * angular_deriv;
+        
+        (df_dr, df_dtheta, predicted)
+    }
+    
+    /// 리만 기하학을 적용한 자연 그래디언트 계산
+    /// 푸앵카레 볼 메트릭: ds² = 4/(1-r²)² (dr² + r²dθ²)
+    pub fn compute_riemannian_gradients(
+        &self,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+        target: f32,
+        use_l1: bool,
+    ) -> (f32, f32) {
+        let (grad_r_euclidean, grad_theta_euclidean, _) = 
+            self.compute_gradients(i, j, rows, cols, target, use_l1);
+        
+        let params = self.decode();
+        let r = params.r_fp32;
+        
+        // 리만 메트릭 역행렬 성분
+        // g^{rr} = (1-r²)²/4, g^{θθ} = (1-r²)²/(4r²)
+        let one_minus_r2 = (1.0 - r * r).max(1e-6); // 수치 안정성
+        let metric_factor = one_minus_r2 * one_minus_r2 / 4.0;
+        
+        // 리만 그래디언트 = 메트릭 역행렬 * 유클리드 그래디언트
+        let grad_r_riemannian = metric_factor * grad_r_euclidean;
+        let grad_theta_riemannian = metric_factor / (r * r).max(1e-6) * grad_theta_euclidean;
+        
+        // 그래디언트 클리핑 (폭발 방지)
+        let max_grad = 10.0;
+        let grad_r_clipped = grad_r_riemannian.clamp(-max_grad, max_grad);
+        let grad_theta_clipped = grad_theta_riemannian.clamp(-max_grad, max_grad);
+        
+        (grad_r_clipped, grad_theta_clipped)
+    }
+    
+    /// 현재 상태에서의 예측값과 손실 계산
+    pub fn forward_with_loss(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32) -> (f32, f32) {
+        let predicted = self.fused_forward(i, j, rows, cols);
+        let loss = (predicted - target).abs(); // L1 loss
+        (predicted, loss)
+    }
+
+    /// 정밀도 손실 없는 고정소수점 그래디언트 업데이트
+    pub fn update_gradients_fixed_point(&mut self, grad_r: f32, grad_theta: f32, lr: f32) {
+        // Q32.32 형식으로 직접 연산
+        let lr_q32 = ((lr as f64) * 4294967296.0) as i64;
+        let grad_r_q32 = ((grad_r as f64) * 4294967296.0) as i64;
+        // theta 그래디언트는 [0, 2π) → [0, 1) 정규화 필요
+        let grad_theta_normalized = grad_theta / (2.0 * std::f32::consts::PI);
+        let grad_theta_q32 = ((grad_theta_normalized as f64) * 4294967296.0) as i64;
+        
+        // 현재 값 추출 (변환 없이)
+        let r_q32 = (self.lo >> 32) as i64;
+        let theta_q32 = (self.lo & 0xFFFFFFFF) as i64;
+        
+        // 고정소수점 곱셈과 뺄셈
+        let new_r_q64 = r_q32 - ((lr_q32 * grad_r_q32) >> 32);
+        let new_theta_q64 = theta_q32 - ((lr_q32 * grad_theta_q32) >> 32);
+        
+        // 범위 제약 (Q32.32 형식 유지)
+        let r_max_q32 = ((0.999999 * 4294967296.0) as i64);
+        let new_r_clamped = new_r_q64.clamp(0, r_max_q32) as u64;
+        
+        // theta는 [0, 1)로 순환 (정규화된 범위)
+        let one_q32 = 4294967296i64; // 1.0 in Q32.32
+        let new_theta_mod = new_theta_q64.rem_euclid(one_q32) as u64;
+        
+        // 직접 업데이트
+        self.lo = (new_r_clamped << 32) | new_theta_mod;
+    }
+    
+    /// 11비트 사이클 그래디언트 적용 - 개선된 버전
+    pub fn apply_cycle_gradient(&mut self, gradient: f32) {
+        let cycle_state = self.get_cycle_state();
+        let transition_threshold = 0.001; // 10배 낮춘 임계값
+        
+        if gradient.abs() > transition_threshold {
+            // 가변폭 전이: 그래디언트 크기에 비례
+            let current_bits = cycle_state.to_bits();
+            let delta = ((gradient.abs() * 10000.0).min(7.0) as u16); // 0-7 범위
+            
+            let new_bits = if gradient > 0.0 {
+                // 순방향 전이: 다음 쌍곡함수로 (가변폭)
+                (current_bits + delta) & 0x7FF
+            } else {
+                // 역방향 전이: 이전 쌍곡함수로 (가변폭)
+                (current_bits.wrapping_sub(delta)) & 0x7FF
+            };
+            
+            let new_cycle = CycleState::from_bits(new_bits);
+            self.set_cycle_state(new_cycle);
+        }
+    }
+    
+    /// 진짜 푸앵카레볼 기하학을 사용한 순전파
+    pub fn fused_forward_poincare(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        // 1. 연속 파라미터 디코딩
+        let params = self.decode();
+        let r = params.r_fp32.min(0.999); // 수치 안정성
+        let theta = params.theta_fp32;
+        
+        // 2. 푸앵카레볼 → 쌍곡 거리 변환
+        // d = 2 * arctanh(r)
+        let hyperbolic_distance = if r < 0.999 {
+            2.0 * r.atanh()
+        } else {
+            // r이 1에 가까울 때 근사
+            2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
+        };
+        
+        // 3. 11비트 사이클 상태로 변조
+        let cycle_state = self.get_cycle_state();
+        let cycle_func = cycle_state.get_active_function();
+        let cycle_pos = cycle_state.get_cycle_position() as f32 / 2048.0;
+        
+        // 4. 위치 기반 변조 계산
+        let pos_hash = ((i * 31 + j * 17) % 256) as f32 / 256.0;
+        let spatial_modulation = (pos_hash * 2.0 * std::f32::consts::PI).sin();
+        
+        // 5. 쌍곡함수 적용 (11비트 사이클에 따라)
+        let func_value = match cycle_func % 4 {
+            0 => hyperbolic_distance.sinh(),  // sinh
+            1 => hyperbolic_distance.cosh(),  // cosh  
+            2 => hyperbolic_distance.tanh(),  // tanh
+            3 => {
+                let cosh_val = hyperbolic_distance.cosh();
+                1.0 / (cosh_val * cosh_val)    // sech²
+            }
+            _ => hyperbolic_distance.tanh(),
+        };
+        
+        // 6. 각도 성분 결합 (푸앵카레볼의 회전)
+        let angular_component = (theta + cycle_pos * std::f32::consts::PI).sin();
+        
+        // 7. 최종 출력 (쌍곡 기하학적 결합)
+        let output = func_value * angular_component * (1.0 + spatial_modulation * 0.1);
+        
+        // 8. 출력 정규화
+        output.tanh()
+    }
+} 
 
 /// 종합 성능 리포트 생성
 pub fn generate_comprehensive_report() {
