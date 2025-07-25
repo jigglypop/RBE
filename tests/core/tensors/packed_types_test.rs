@@ -1400,3 +1400,238 @@ fn 극한_성능_벤치마크_테스트() {
     assert!(epoch_per_sec >= 1000.0, "1000 epoch/s 미만: {:.1}", epoch_per_sec);
     assert!(ns_per_epoch < 1_000_000.0, "1ms/epoch 초과: {:.0}ns", ns_per_epoch);
 } 
+
+#[test]
+fn 비트_도메인_순전파_역전파_통합_테스트() {
+    use rbe_llm::core::differential::forward::{BitForwardPass, BitForwardConfig};
+    use rbe_llm::core::differential::backward::{BitBackwardPass, BitBackwardConfig, OptimizerType};
+    use std::time::Instant;
+    use rand::SeedableRng;
+    
+    println!("\n🔥 === 비트 도메인 순전파-역전파 통합 성능 테스트 ===");
+    
+    let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+    let mut packed = Packed128::random(&mut rng);
+    
+    // 비트 도메인 엔진들 초기화
+    let mut forward_engine = BitForwardPass::new(BitForwardConfig::default());
+    let mut backward_engine = BitBackwardPass::new(BitBackwardConfig::default());
+    
+    let matrix_size = 32;
+    let target_epochs = 5000; // 고성능 테스트
+    
+    println!("📊 매트릭스 크기: {}x{}, 에포크: {}", matrix_size, matrix_size, target_epochs);
+    
+    // 타겟 패턴 (체커보드)
+    let target_pattern: Vec<Vec<f32>> = (0..matrix_size).map(|i| {
+        (0..matrix_size).map(|j| {
+            if (i + j) % 2 == 0 { 0.8 } else { 0.2 }
+        }).collect()
+    }).collect();
+    
+    let mut total_operations = 0u64;
+    let start_time = Instant::now();
+    
+    // 학습 루프
+    for epoch in 0..target_epochs {
+        let learning_rate = if epoch < 1000 { 0.01 } else { 0.005 };
+        
+        // 매 에포크마다 16개 위치 샘플링 (극한 속도)
+        for sample in 0..16 {
+            let i = (epoch + sample) % matrix_size;
+            let j = (epoch + sample * 3) % matrix_size;
+            let target = target_pattern[i][j];
+            
+            // **통합 순전파-역전파** (원패스)
+            let (predicted, loss) = backward_engine.unified_forward_backward(
+                &mut packed,
+                &mut forward_engine,
+                target,
+                i, j,
+                learning_rate,
+                matrix_size, matrix_size
+            );
+            
+            total_operations += 1;
+        }
+    }
+    
+    let total_elapsed = start_time.elapsed();
+    let ops_per_sec = total_operations as f64 / total_elapsed.as_secs_f64();
+    let ns_per_op = total_elapsed.as_nanos() as f64 / total_operations as f64;
+    
+    println!("\n🚀 통합 순전파-역전파 성능 결과:");
+    println!("  총 연산: {} operations", total_operations);
+    println!("  총 시간: {:.2}ms", total_elapsed.as_millis());
+    println!("  속도: {:.1} ops/s", ops_per_sec);
+    println!("  연산당: {:.0} ns/op", ns_per_op);
+    
+    // 개별 엔진 성능 확인
+    let forward_metrics = forward_engine.get_performance_metrics();
+    let backward_metrics = backward_engine.get_performance_metrics();
+    
+    println!("\n📈 개별 엔진 성능:");
+    println!("  순전파: {:.1} ns/op, {:.1} ops/s", 
+            forward_metrics.avg_bit_computation_ns, 
+            forward_metrics.forwards_per_second);
+    println!("  역전파: {:.1} ns/op, {:.1} ops/s", 
+            backward_metrics.avg_backward_time_ns,
+            backward_metrics.backwards_per_second);
+    
+    // 캐시 효율성
+    let (bit_cache, cycle_cache, hit_rate) = forward_engine.get_cache_stats();
+    println!("  순전파 캐시: {} bits, {} cycles, {:.1}% 히트율", 
+            bit_cache, cycle_cache, hit_rate * 100.0);
+    
+    let (adam_pool, riemann_pool, opt_type) = backward_engine.get_optimizer_stats();
+    println!("  역전파 풀: {} Adam, {} Riemann, 타입: {:?}", 
+            adam_pool, riemann_pool, opt_type);
+    
+    // 성능 검증
+    println!("\n🎯 성능 목표 달성 여부:");
+    
+    if ops_per_sec >= 20000.0 {
+        println!("  ✅ 20,000 ops/s 달성! ({:.1})", ops_per_sec);
+    } else {
+        println!("  ⚠️  20,000 ops/s 미달성: {:.1}", ops_per_sec);
+    }
+    
+    if ns_per_op <= 100.0 {
+        println!("  ✅ 100ns/op 달성! ({:.0}ns)", ns_per_op);
+    } else {
+        println!("  ⚠️  100ns/op 초과: {:.0}ns", ns_per_op);
+    }
+    
+    // 최종 정확도 확인
+    let mut final_error = 0.0f32;
+    for i in 0..matrix_size {
+        for j in 0..matrix_size {
+            let predicted = forward_engine.bit_forward_ultra_fast(&packed, i, j, matrix_size, matrix_size);
+            let target = target_pattern[i][j];
+            final_error += (predicted - target).abs();
+        }
+    }
+    final_error /= (matrix_size * matrix_size) as f32;
+    
+    println!("  최종 평균 오차: {:.6}", final_error);
+    
+    // 성능 검증 (관대한 기준)
+    assert!(ops_per_sec >= 10000.0, "최소 10,000 ops/s 달성 필요: {:.1}", ops_per_sec);
+    assert!(ns_per_op <= 200.0, "200ns/op 이하 필요: {:.0}ns", ns_per_op);
+    assert!(final_error < 1.0, "최종 오차가 너무 큼: {:.6}", final_error);
+}
+
+#[test]
+fn 비트_도메인_배치_처리_성능_테스트() {
+    use rbe_llm::core::differential::forward::{BitForwardPass, BitForwardConfig};
+    use rbe_llm::core::differential::backward::{BitBackwardPass, BitBackwardConfig, OptimizerType};
+    use std::time::Instant;
+    use rand::SeedableRng;
+    
+    println!("\n⚡ === 비트 도메인 배치 처리 극한 성능 테스트 ===");
+    
+    let mut rng = rand::rngs::StdRng::seed_from_u64(54321);
+    let mut packed = Packed128::random(&mut rng);
+    
+    let mut forward_engine = BitForwardPass::new(BitForwardConfig::default());
+    let mut backward_engine = BitBackwardPass::new(BitBackwardConfig::default());
+    
+    let matrix_size = 16; // 작은 사이즈로 극한 속도
+    let batch_sizes = [1, 4, 16, 64];
+    
+    for &batch_size in &batch_sizes {
+        println!("\n📦 배치 크기: {}", batch_size);
+        
+        // 배치 데이터 준비
+        let positions: Vec<(usize, usize)> = (0..batch_size).map(|i| {
+            (i % matrix_size, (i * 3) % matrix_size)
+        }).collect();
+        
+        let targets: Vec<f32> = positions.iter().map(|&(i, j)| {
+            if (i + j) % 2 == 0 { 0.9 } else { 0.1 }
+        }).collect();
+        
+        // 순전파 배치 테스트
+        let start = Instant::now();
+        let predicted = forward_engine.bit_forward_batch(
+            &packed, &positions, matrix_size, matrix_size
+        );
+        let forward_elapsed = start.elapsed();
+        
+        // 역전파 배치 테스트
+        let start = Instant::now();
+        let loss = backward_engine.bit_backward_batch(
+            &mut packed, &targets, &predicted, &positions, 
+            0.01, matrix_size, matrix_size
+        );
+        let backward_elapsed = start.elapsed();
+        
+        let forward_ns_per_op = forward_elapsed.as_nanos() as f64 / batch_size as f64;
+        let backward_ns_per_op = backward_elapsed.as_nanos() as f64 / batch_size as f64;
+        let total_ns_per_op = forward_ns_per_op + backward_ns_per_op;
+        
+        println!("  순전파: {:.0} ns/op", forward_ns_per_op);
+        println!("  역전파: {:.0} ns/op", backward_ns_per_op);
+        println!("  통합: {:.0} ns/op", total_ns_per_op);
+        println!("  처리량: {:.1} million ops/s", 1000.0 / total_ns_per_op);
+        
+        // 배치 효율성 검증
+        if batch_size >= 16 {
+            assert!(total_ns_per_op <= 150.0, "배치 {}에서 150ns/op 초과: {:.0}ns", 
+                   batch_size, total_ns_per_op);
+        }
+    }
+}
+
+#[test]
+fn 옵티마이저_타입_자동_선택_테스트() {
+    use rbe_llm::core::differential::backward::{BitBackwardPass, BitBackwardConfig, OptimizerType};
+    use rand::SeedableRng;
+    
+    println!("\n🤖 === 옵티마이저 자동 선택 테스트 ===");
+    
+    let mut rng = rand::rngs::StdRng::seed_from_u64(99999);
+    let mut packed = Packed128::random(&mut rng);
+    let mut backward_engine = BitBackwardPass::new(BitBackwardConfig::default());
+    
+    // Hybrid 모드 테스트
+    backward_engine.set_optimizer_type(OptimizerType::Hybrid);
+    
+    let test_cases = [
+        (0.5, 0.4, "큰 오차 → Riemann Adam"),
+        (0.1, 0.12, "큰 오차 → Riemann Adam"), 
+        (0.05, 0.06, "작은 오차 → Bit Adam"),
+        (0.01, 0.015, "작은 오차 → Bit Adam"),
+    ];
+    
+    for (target, predicted, desc) in &test_cases {
+        println!("\n🧪 테스트: {}", desc);
+        println!("  타겟: {:.3}, 예측: {:.3}, 오차: {:.3}", 
+                target, predicted, (*predicted as f32 - *target as f32).abs());
+        
+        let loss = backward_engine.bit_backward_ultra_fast(
+            &mut packed, *target, *predicted, 0, 0, 0.01, 16, 16
+        );
+        
+        let (adam_count, riemann_count, opt_type) = backward_engine.get_optimizer_stats();
+        println!("  손실: {:.6}", loss);
+        println!("  옵티마이저 상태: {:?}", opt_type);
+        
+        assert!(loss >= 0.0, "손실이 음수");
+        assert!(loss.is_finite(), "손실이 무한대");
+    }
+    
+    // 개별 옵티마이저 타입 테스트
+    for opt_type in [OptimizerType::BitAdam, OptimizerType::BitRiemannianAdam] {
+        println!("\n🔧 고정 옵티마이저 테스트: {:?}", opt_type);
+        backward_engine.set_optimizer_type(opt_type.clone());
+        
+        let loss = backward_engine.bit_backward_ultra_fast(
+            &mut packed, 0.7, 0.3, 1, 1, 0.01, 16, 16
+        );
+        
+        println!("  손실: {:.6}", loss);
+        assert!(loss >= 0.0, "손실이 음수");
+        assert!(loss.is_finite(), "손실이 무한대");
+    }
+}

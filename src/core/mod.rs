@@ -6,18 +6,19 @@ pub mod tensors;
 pub mod differential;
 pub mod optimizers;
 
-// 주요 타입들 재수출
 pub use tensors::{
     packed_types::{Packed128, Packed64, CycleState, DecodedParams, BitGradientTracker},
     hyperbolic_lut::HYPERBOLIC_LUT_DATA,
 };
 
 pub use differential::{
-    cycle_system::UnifiedCycleDifferentialSystem,
-    state_transition::StateTransitionEngine,
+    BitForwardPass as UnifiedForwardPass, 
+    BitBackwardPass as UnifiedBackwardPass,
+    DifferentialSystem, DifferentialMetrics,
+    OptimizerType,
 };
 
 pub use optimizers::{
     BitAdamState, BitRiemannianAdamState,
-    OptimizerConfig, OptimizerType,
+    OptimizerConfig, OptimizerType as OptType,
 };
