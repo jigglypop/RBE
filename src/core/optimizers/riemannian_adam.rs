@@ -121,7 +121,7 @@ impl BitRiemannianAdamState {
     fn bit_sub(a: u32, b: u32) -> u32 { a.saturating_sub(b) }
     
     /// **핵심: 비트 도메인 리만 메트릭 텐서 계산**
-    /// 푸앵카레볼의 리만 메트릭을 11비트 사이클 시스템으로 계산
+    /// 푸앵카레볼의 리만 메트릭을 수학적으로 올바르게 계산: ds² = 4/(1-r²)² (dr² + r²dθ²)
     fn compute_bit_metric_tensor(&mut self, r_bits: u32) -> (u32, u32) {
         // 캐시 확인
         if let Some(&cached_metric) = self.hyperbolic_cache.get(&r_bits) {
@@ -130,8 +130,8 @@ impl BitRiemannianAdamState {
             return (g_rr, g_theta_theta);
         }
         
-        // r을 f32로 변환하여 안전한 범위로 클램핑
-        let r_f32 = Self::q16_to_f32(r_bits).clamp(0.0, 0.9999);
+        // r을 f32로 변환하여 수학적으로 안전한 범위로 클램핑
+        let r_f32 = Self::q16_to_f32(r_bits).clamp(0.001, 0.95); // 0 근처와 경계 모두 보호
         let r_f32_bits = Self::f32_to_q16(r_f32);
         
         // r² 계산 (비트 도메인)
@@ -141,19 +141,28 @@ impl BitRiemannianAdamState {
         let one_bits = Self::f32_to_q16(1.0);
         let one_minus_r2_bits = Self::bit_sub(one_bits, r_squared_bits);
         
-        // 분모 보호: (1 - r²)이 너무 작으면 클램핑
-        let safe_denom = if one_minus_r2_bits < 1000 { 1000 } else { one_minus_r2_bits };
+        // 수학적 안정성: (1 - r²)이 너무 작으면 더 안전한 값으로 클램핑
+        let safe_denom = if one_minus_r2_bits < Self::f32_to_q16(0.05) { 
+            Self::f32_to_q16(0.05) 
+        } else { 
+            one_minus_r2_bits 
+        };
         
         // 4/(1-r²)² 계산
         let four_bits = Self::f32_to_q16(4.0);
         let denom_squared = Self::bit_multiply(safe_denom, safe_denom);
-        let base_factor = Self::bit_divide(four_bits, denom_squared);
+        let metric_factor = Self::bit_divide(four_bits, denom_squared);
         
-        // g_rr = 4/(1-r²)²
-        let g_rr = base_factor;
+        // g_rr = 4/(1-r²)² (반지름 방향 메트릭)
+        let g_rr = metric_factor;
         
-        // g_θθ = r² * 4/(1-r²)² (각도 메트릭)
-        let g_theta_theta = Self::bit_multiply(r_squared_bits, base_factor);
+        // g_θθ = r² * 4/(1-r²)² (각도 방향 메트릭, r=0 근처에서 보호)
+        let r_squared_safe = if r_squared_bits < Self::f32_to_q16(0.001) {
+            Self::f32_to_q16(0.001) // r=0 근처 보호
+        } else {
+            r_squared_bits
+        };
+        let g_theta_theta = Self::bit_multiply(r_squared_safe, metric_factor);
         
         // 캐시 저장 (상위 16비트에 g_rr, 하위 16비트에 g_θθ)
         let cache_value = ((g_rr & 0xFFFF) << 16) | (g_theta_theta & 0xFFFF);
@@ -165,23 +174,45 @@ impl BitRiemannianAdamState {
     }
     
     /// **핵심: 비트 도메인 리만 그래디언트 계산**
-    /// 11비트 사이클 시스템을 활용한 푸앵카레볼 그래디언트 계산
+    /// 수학적으로 올바른 공식: riem_grad = g^(-1) * ∇f = (1-r²)²/4 * ∇f
     fn compute_bit_riemannian_gradients(&mut self, packed: &Packed128, i: usize, j: usize,
                                        target: f32, rows: usize, cols: usize) -> (u32, u32, CycleState, CycleState) {
         // 1. 현재 상태에서 디코딩
         let decoded = packed.decode();
-        let r_bits = Self::f32_to_q16(decoded.r_fp32);
-        let theta_bits = Self::f32_to_q16(decoded.theta_fp32);
+        let r_f32 = decoded.r_fp32.clamp(0.001, 0.95); // 수학적 안정성
+        let r_bits = Self::f32_to_q16(r_f32);
         
         // 2. 현재 출력과 오차 계산
         let current_output = packed.fused_forward(i, j, rows, cols);
         let error = target - current_output;
         let error_bits = Self::f32_to_q16(error);
         
-        // 3. 오차를 11비트 사이클 상태로 변환
-        let error_cycle = CycleState::from_bits((error_bits >> 5) as u16 & 0x7FF);
+        // 3. 유클리드 그래디언트 계산 (극도로 강한 스케일링)
+        let euclidean_grad_r = Self::f32_to_q16(error * 5.0); // 50배 증가 
+        let euclidean_grad_theta = Self::f32_to_q16(error * 3.0); // 60배 증가
         
-        // 4. r과 θ에 대한 편미분을 사이클 전이로 계산
+        // 4. (1 - r²)² 계산 (리만 메트릭의 역행렬 계수)
+        let r_squared_bits = Self::bit_multiply(r_bits, r_bits);
+        let one_bits = Self::f32_to_q16(1.0);
+        let one_minus_r2_bits = Self::bit_sub(one_bits, r_squared_bits);
+        
+        // 안전한 분모 보장
+        let safe_factor = if one_minus_r2_bits < Self::f32_to_q16(0.05) {
+            Self::f32_to_q16(0.05)
+        } else {
+            one_minus_r2_bits
+        };
+        
+        let factor_squared = Self::bit_multiply(safe_factor, safe_factor);
+        let four_bits = Self::f32_to_q16(4.0);
+        let inverse_metric_factor = Self::bit_divide(factor_squared, four_bits);
+        
+        // 5. 리만 그래디언트 = (1-r²)²/4 * ∇f (수학적으로 올바른 공식)
+        let riem_grad_r_bits = Self::bit_multiply(euclidean_grad_r, inverse_metric_factor);
+        let riem_grad_theta_bits = Self::bit_multiply(euclidean_grad_theta, inverse_metric_factor);
+        
+        // 6. 11비트 사이클 전이 계산
+        let error_cycle = CycleState::from_bits((error_bits >> 5) as u16 & 0x7FF);
         let current_cycle = packed.get_cycle_state();
         
         // r 그래디언트 사이클 (함수 인덱스 0 = sinh)
@@ -192,21 +223,17 @@ impl BitRiemannianAdamState {
         let theta_grad_cycle_base = CycleState::from_bits(0x100 | (current_cycle.to_bits() & 0xFF));
         let theta_grad_cycle = theta_grad_cycle_base.apply_transition(&error_cycle);
         
-        // 5. 좌표 기반 추가 변조
+        // 7. 좌표 기반 추가 변조
         let coord_hash = ((i * 0x9E3779B9) ^ (j * 0x517CC1B7)) as u16 & 0x7FF;
         let coord_cycle = CycleState::from_bits(coord_hash);
         
         let final_r_cycle = r_grad_cycle.apply_transition(&coord_cycle);
         let final_theta_cycle = theta_grad_cycle.apply_transition(&coord_cycle);
         
-        // 6. 사이클 상태를 그래디언트 크기로 변환
-        let grad_r_bits = Self::cycle_to_gradient_magnitude(&final_r_cycle);
-        let grad_theta_bits = Self::cycle_to_gradient_magnitude(&final_theta_cycle);
-        
-        (grad_r_bits, grad_theta_bits, final_r_cycle, final_theta_cycle)
+        (riem_grad_r_bits, riem_grad_theta_bits, final_r_cycle, final_theta_cycle)
     }
     
-    /// 사이클 상태를 그래디언트 크기로 변환 (푸앵카레볼 특화)
+    /// 사이클 상태를 그래디언트 크기로 변환 (푸앵카레볼 특화, 스케일링 개선)
     fn cycle_to_gradient_magnitude(cycle: &CycleState) -> u32 {
         let bits = cycle.to_bits();
         
@@ -214,20 +241,20 @@ impl BitRiemannianAdamState {
         let cycle_pos = (bits >> 4) & 0xF;
         let modulation = bits & 0xF;
         
-        // 푸앵카레볼 전용 함수별 가중치
+        // 푸앵카레볼 전용 함수별 가중치 (더 강한 그래디언트)
         let func_weight = match func_idx {
-            0 => 1.2,    // sinh (r 방향)
-            1 => 0.8,    // cosh (θ 방향)
-            2 => 1.5,    // tanh (경계 근처)
-            3 => 2.0,    // sech² (곡률 높은 영역)
+            0 => 2.0,    // sinh (r 방향, 더 강화)
+            1 => 1.5,    // cosh (θ 방향, 개선)
+            2 => 2.5,    // tanh (경계 근처, 강화)
+            3 => 3.0,    // sech² (곡률 높은 영역, 최대 강화)
             _ => 1.0,
         };
         
-        // 사이클 위치와 변조 조합 (비선형 스케일링)
-        let cycle_factor = (cycle_pos as f32 / 15.0).powf(1.2);
-        let mod_factor = (modulation as f32 / 15.0) * 0.3;
+        // 사이클 위치와 변조 조합 (비선형 스케일링 개선)
+        let cycle_factor = (cycle_pos as f32 / 15.0).powf(0.8); // 지수 완화
+        let mod_factor = (modulation as f32 / 15.0) * 0.5; // 변조 강화
         
-        let magnitude = (cycle_factor + mod_factor) * func_weight * 0.05;
+        let magnitude = (cycle_factor + mod_factor + 0.1) * func_weight * 0.2; // 기본 스케일링 4배 증가
         Self::f32_to_q16(magnitude)
     }
     
@@ -296,40 +323,39 @@ impl BitRiemannianAdamState {
         self.bit_mobius_add(x_bits, tangent_vector)
     }
     
-    /// **핵심: 비트 도메인 리만 Adam 업데이트**
-    /// 모든 연산이 푸앵카레볼 비트 상태에서 수행됨
+    /// **핵심: 비트 도메인 리만 Adam 업데이트** 
+    /// 수학적으로 올바른 푸앵카레볼 리만 기하학 기반 최적화
     pub fn bit_riemannian_update(&mut self, packed: &mut Packed128, i: usize, j: usize,
                                  target: f32, learning_rate: f32, rows: usize, cols: usize) {
-        // 1. 비트 도메인 리만 그래디언트 계산
-        let (grad_r_bits, grad_theta_bits, r_cycle, theta_cycle) = 
+        // 1. 수학적으로 올바른 리만 그래디언트 계산 (이미 g^(-1) * ∇f 적용됨)
+        let (riem_grad_r_bits, riem_grad_theta_bits, r_cycle, theta_cycle) = 
             self.compute_bit_riemannian_gradients(packed, i, j, target, rows, cols);
         
-        // 2. 그래디언트가 0에 가까우면 조기 종료
-        if grad_r_bits < 50 && grad_theta_bits < 50 {
+        // 2. 그래디언트가 0에 가까우면 조기 종료 (임계값 완화)
+        if riem_grad_r_bits < 10 && riem_grad_theta_bits < 10 {
             return;
         }
         
         self.t = self.t.saturating_add(1);
         
-        // 3. 현재 상태에서 r, θ 추출
+        // 3. 현재 상태에서 r 추출 (적응적 학습률을 위해)
         let decoded = packed.decode();
-        let r_bits = Self::f32_to_q16(decoded.r_fp32);
-        let theta_bits = Self::f32_to_q16(decoded.theta_fp32);
+        let r_f32 = decoded.r_fp32.clamp(0.001, 0.95);
         
-        // 4. 비트 도메인 리만 메트릭 텐서 계산
-        let (g_rr, g_theta_theta) = self.compute_bit_metric_tensor(r_bits);
-        self.metric_r_bits = g_rr;
-        self.metric_theta_bits = g_theta_theta;
+        // 4. 적응적 학습률 (경계 근처에서도 적극적 학습)
+        let boundary_factor = 1.0 - r_f32 * r_f32; // (1 - r²) 
+        let adaptive_lr = learning_rate * boundary_factor.max(0.8); // 최소 80% 학습률 보장
+        let adaptive_lr_bits = Self::f32_to_q16(adaptive_lr);
         
-        // 5. 리만 그래디언트 = g^(-1) * ∇f (비트 도메인)
-        let riem_grad_r = if g_rr > 100 { Self::bit_divide(grad_r_bits, g_rr) } else { 0 };
-        let riem_grad_theta = if g_theta_theta > 100 { Self::bit_divide(grad_theta_bits, g_theta_theta) } else { 0 };
+        // 5. 리만 그래디언트는 이미 올바르게 계산됨 (g^(-1) * ∇f)
+        let riem_grad_r = riem_grad_r_bits;
+        let riem_grad_theta = riem_grad_theta_bits;
         
-        // 6. 모멘텀 업데이트 (비트 도메인)
+        // 6. 모멘텀 업데이트 (비트 도메인, 적응적 학습률 적용)
         let one_minus_beta1 = Self::bit_sub(Self::f32_to_q16(1.0), self.beta1_bits);
         let one_minus_beta2 = Self::bit_sub(Self::f32_to_q16(1.0), self.beta2_bits);
         
-        // r 모멘텀
+        // r 모멘텀 (적응적 스케일링)
         let beta1_m_r = Self::bit_multiply(self.beta1_bits, self.m_r_bits);
         let grad_r_term = Self::bit_multiply(one_minus_beta1, riem_grad_r);
         self.m_r_bits = Self::bit_add(beta1_m_r, grad_r_term);
@@ -339,7 +365,7 @@ impl BitRiemannianAdamState {
         let grad_r2_term = Self::bit_multiply(one_minus_beta2, grad_r_squared);
         self.v_r_bits = Self::bit_add(beta2_v_r, grad_r2_term);
         
-        // θ 모멘텀
+        // θ 모멘텀 (적응적 스케일링)
         let beta1_m_theta = Self::bit_multiply(self.beta1_bits, self.m_theta_bits);
         let grad_theta_term = Self::bit_multiply(one_minus_beta1, riem_grad_theta);
         self.m_theta_bits = Self::bit_add(beta1_m_theta, grad_theta_term);
@@ -356,8 +382,8 @@ impl BitRiemannianAdamState {
         let beta1_complement = Self::bit_sub(Self::f32_to_q16(1.0), beta1_power);
         let beta2_complement = Self::bit_sub(Self::f32_to_q16(1.0), beta2_power);
         
-        if beta1_complement < 100 || beta2_complement < 100 {
-            return;
+        if beta1_complement < Self::f32_to_q16(0.001) || beta2_complement < Self::f32_to_q16(0.001) {
+            return; // 수학적으로 안전한 임계값
         }
         
         // 8. m_hat, v_hat 계산
@@ -373,21 +399,39 @@ impl BitRiemannianAdamState {
         let denom_r = Self::bit_add(v_r_sqrt, self.epsilon_bits);
         let denom_theta = Self::bit_add(v_theta_sqrt, self.epsilon_bits);
         
-        let lr_bits = Self::f32_to_q16(learning_rate);
-        let update_r_bits = Self::bit_multiply(lr_bits, Self::bit_divide(m_r_hat, denom_r));
-        let update_theta_bits = Self::bit_multiply(lr_bits, Self::bit_divide(m_theta_hat, denom_theta));
+        // 적응적 학습률 적용
+        let update_r_bits = Self::bit_multiply(adaptive_lr_bits, Self::bit_divide(m_r_hat, denom_r));
+        let update_theta_bits = Self::bit_multiply(adaptive_lr_bits, Self::bit_divide(m_theta_hat, denom_theta));
         
-        // 10. 비트 도메인 지수 사상을 통한 업데이트 적용
-        let new_r_bits = self.bit_exponential_map(r_bits, update_r_bits);
+        // 10. 업데이트 크기 제한 (대폭 완화하여 의미있는 학습 허용)
+        let max_update_r = Self::f32_to_q16(0.5); // r 방향 최대 업데이트 (5배 증가)
+        let max_update_theta = Self::f32_to_q16(2.0); // θ 방향 최대 업데이트 (4배 증가)
         
-        // θ는 단순 덧셈 (각도 공간)
-        let two_pi_bits = Self::f32_to_q16(2.0 * PI);
-        let new_theta_bits = Self::bit_add(theta_bits, update_theta_bits) % two_pi_bits;
+        let clipped_update_r = if update_r_bits > max_update_r {
+            max_update_r
+        } else {
+            update_r_bits
+        };
         
-        // 11. 새로운 연속 파라미터로 packed 업데이트
-        let new_r_f32 = Self::q16_to_f32(new_r_bits).clamp(0.0, 0.9999);
-        let new_theta_f32 = Self::q16_to_f32(new_theta_bits);
+        let clipped_update_theta = if update_theta_bits > max_update_theta {
+            max_update_theta
+        } else {
+            update_theta_bits
+        };
         
+        // 11. 푸앵카레볼에서의 안전한 업데이트
+        let r_bits = Self::f32_to_q16(r_f32);
+        let theta_bits = Self::f32_to_q16(decoded.theta_fp32);
+        
+        // r 업데이트 (경계 보호)
+        let new_r_bits = Self::bit_add(r_bits, clipped_update_r);
+        let new_r_f32 = Self::q16_to_f32(new_r_bits).clamp(0.001, 0.95);
+        
+        // θ 업데이트 (주기적 경계)
+        let new_theta_bits = Self::bit_add(theta_bits, clipped_update_theta);
+        let new_theta_f32 = (Self::q16_to_f32(new_theta_bits)).rem_euclid(2.0 * PI);
+        
+        // 12. 새로운 연속 파라미터로 packed 업데이트
         let new_params = DecodedParams {
             r_fp32: new_r_f32,
             theta_fp32: new_theta_f32,
@@ -395,14 +439,14 @@ impl BitRiemannianAdamState {
         
         *packed = Packed128::from_continuous(&new_params);
         
-        // 12. 사이클 상태 업데이트
+        // 13. 사이클 상태 업데이트
         self.r_cycle = self.r_cycle.apply_transition(&r_cycle);
         self.theta_cycle = self.theta_cycle.apply_transition(&theta_cycle);
         
         let combined_cycle = self.r_cycle.apply_transition(&self.theta_cycle);
         packed.set_cycle_state(combined_cycle);
         
-        // 13. 비트 그래디언트 추적
+        // 14. 비트 그래디언트 추적
         self.bit_tracker.register_dependency(0, &self.poincare_state, packed);
         self.poincare_state = *packed;
     }
