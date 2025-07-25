@@ -1,2 +1,3 @@
 pub mod core;
-pub mod nlp; 
+pub use core::*;
+// pub mod nlp; 
