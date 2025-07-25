@@ -131,16 +131,12 @@ impl BitAdamState {
         let v_hat_r = v_r_used / bias_correction2;
         let v_hat_theta = v_theta_used / bias_correction2;
         
-        // 6. Adam 그래디언트 계산
-        let adam_grad_r = m_hat_r / (v_hat_r.sqrt() + self.epsilon);
-        let adam_grad_theta = m_hat_theta / (v_hat_theta.sqrt() + self.epsilon);
+        // 6. Adam 업데이트 계산
+        let update_r = learning_rate * m_hat_r / (v_hat_r.sqrt() + self.epsilon);
+        let update_theta = learning_rate * m_hat_theta / (v_hat_theta.sqrt() + self.epsilon);
         
-        // 7. 고정소수점 업데이트 (정밀도 손실 없음)
-        packed.update_gradients_fixed_point(adam_grad_r, adam_grad_theta, learning_rate);
-        
-        // 8. 11비트 사이클 업데이트
-        let total_gradient_magnitude = (grad_r.abs() + grad_theta.abs()) / 2.0;
-        packed.apply_cycle_gradient(total_gradient_magnitude);
+        // 7. 파라미터 업데이트
+        packed.update_with_riemannian_grad(update_r, update_theta, learning_rate);
         
         // 디버깅 정보 (선택적)
         if self.t % 100 == 0 {

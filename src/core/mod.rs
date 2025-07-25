@@ -6,7 +6,7 @@ pub mod optimizers;
 // pub mod transform;
 
 // 핵심 타입들 re-export
-pub use tensors::{Packed128, CycleState, DecodedParams, BitTensor, BitGradientTracker};
+pub use tensors::{Packed128, DecodedParams, BitTensor, BitGradientTracker};
 pub use optimizers::{BitAdamState, BitRiemannianAdamState, OptimizerType};
 // pub use differential::{DifferentialSystem, BitForwardPass, BitBackwardPass};
 // pub use transform::{TransformStats, ModelLoader, WeightCompressor, WeightDecompressor};

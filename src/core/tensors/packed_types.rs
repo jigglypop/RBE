@@ -4,68 +4,6 @@ use rand::Rng;
 use std::collections::HashMap;
 use super::hyperbolic_lut::HYPERBOLIC_LUT_DATA;
 
-/// 11비트 미분 사이클 상태
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CycleState {
-    bits: u16, // 11비트만 사용
-}
-
-impl CycleState {
-    pub fn new(bits: u16) -> Self {
-        Self { bits: bits & 0x7FF } // 11비트 마스킹
-    }
-    
-    pub fn from_bits(bits: u16) -> Self {
-        Self::new(bits)
-    }
-    
-    pub fn to_bits(&self) -> u16 {
-        self.bits
-    }
-    
-    /// 비트 전이 함수 - 쌍곡함수 미분 관계를 비트 패턴으로 인코딩
-    pub fn apply_transition(&self, other: &CycleState) -> CycleState {
-        let mut result = 0u16;
-        // 11비트를 3개 그룹으로 분할
-        // [10:8] - 쌍곡함수 선택 (sinh, cosh, tanh, sech²)
-        // [7:4] - 미분 사이클 위치
-        // [3:0] - 변조 파라미터
-        
-        let func_bits = (self.bits >> 8) & 0x7;
-        let cycle_bits = (self.bits >> 4) & 0xF;
-        let mod_bits = self.bits & 0xF;
-        let other_cycle = (other.bits >> 4) & 0xF;
-        let other_mod = other.bits & 0xF;
-        // 쌍곡함수 미분 사이클
-        // sinh' = cosh, cosh' = sinh, tanh' = sech², sech²' = -2tanh·sech²
-        let new_func = match func_bits {
-            0 => 1,  // sinh → cosh
-            1 => 0,  // cosh → sinh
-            2 => 3,  // tanh → sech²
-            3 => 2,  // sech² → tanh (부호는 mod_bits에서 처리)
-            4 => 5,  // 추가 함수들
-            5 => 6,
-            6 => 7,
-            7 => 4,
-            _ => 0,
-        };
-        // 사이클 진행 (XOR 기반)
-        let new_cycle = cycle_bits ^ other_cycle;
-        // 변조 파라미터 업데이트 (AND + rotate)
-        let new_mod = ((mod_bits & other_mod) << 1) | ((mod_bits & other_mod) >> 3);
-        result = (new_func << 8) | (new_cycle << 4) | (new_mod & 0xF);
-        CycleState::new(result)
-    }
-    /// 활성 쌍곡함수 인덱스 반환
-    pub fn get_active_function(&self) -> usize {
-        ((self.bits >> 8) & 0x7) as usize
-    }
-    /// 미분 사이클 위치 반환
-    pub fn get_cycle_position(&self) -> usize {
-        ((self.bits >> 4) & 0xF) as usize
-    }
-}
-
 /// 비트 텐서 - 순수 비트 도메인 연산
 #[derive(Debug, Clone)]
 pub struct BitTensor {
@@ -109,33 +47,30 @@ impl BitGradientTracker {
     pub fn register_dependency(&mut self, idx: usize, input: &Packed128, output: &Packed128) {
         // Hi 필드 비트별 그래디언트 계산
         for bit_pos in 0..64 {
-            let input_bit = (input.hi >> bit_pos) & 1;
-            let output_bit = (output.hi >> bit_pos) & 1;
+            let input_bit = (input.r_data >> bit_pos) & 1;
+            let output_bit = (output.r_data >> bit_pos) & 1;
             
             // XOR 연산의 비트 그래디언트
             self.bit_grads[idx][bit_pos] = if input_bit != output_bit { 255 } else { 0 };
         }
         
         // Lo 필드 그래디언트 (고정소수점)
-        let r_input = (input.lo >> 32) as u32;
-        let r_output = (output.lo >> 32) as u32;
+        let r_input = (input.r_data >> 32) as u32;
+        let r_output = (output.r_data >> 32) as u32;
         let grad = ((r_output.wrapping_sub(r_input) >> 24) & 0xFF) as u8;
         self.bit_grads[idx][64] = grad;
     }
 }
 
-/// 64-bit Packed Poincaré 시드 표현 (비트 도메인 CORDIC)
+/// 128-bit Packed Poincaré 시드 표현 (각 파라미터당 64비트 정밀도)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Packed64 {
-    pub rotations: u64,  // CORDIC 회전 시퀀스
+pub struct Packed128 {
+    pub r_data: u64,     // r 파라미터 전용 64비트 (Q64 고정소수점)
+    pub theta_data: u64, // theta 파라미터 전용 64비트 (Q64 고정소수점)
 }
 
-/// 128-bit 시드 (11비트 사이클 시스템 통합)
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Packed128 {
-    pub hi: u64,   // [63:53] 11비트 사이클 상태 | [52:0] CORDIC 및 상태
-    pub lo: u64,   // 연속 파라미터 (고정소수점 Q32.32)
-}
+/// 64비트는 이제 더 이상 사용하지 않지만 호환성을 위해 별칭으로 유지
+pub type Packed64 = Packed128;
 
 /// 연속 파라미터 디코딩
 #[derive(Debug, Clone, Default)]
@@ -170,9 +105,9 @@ pub const CORDIC_ANGLES_Q32: [u32; 20] = [
 
 
 
-impl Packed64 {
-    pub fn new(rotations: u64) -> Self {
-        Packed64 { rotations }
+impl Packed128 {
+    pub fn new(r_data: u64, theta_data: u64) -> Self {
+        Packed128 { r_data, theta_data }
     }
 
     /// 순수 비트 도메인 CORDIC 가중치 계산
@@ -196,7 +131,7 @@ impl Packed64 {
         
         // 비트 도메인 CORDIC 회전
         for k in 0..20 {
-            let sigma = if (self.rotations >> k) & 1 == 1 { 1 } else { -1 };
+            let sigma = if (self.r_data >> k) & 1 == 1 { 1 } else { -1 };
             
             // 쌍곡 CORDIC (k=4,13에서 반복)
             let (x_shift, y_shift) = if k == 4 || k == 13 {
@@ -284,42 +219,6 @@ impl Packed64 {
 }
 
 impl Packed128 {
-    /// 11비트 사이클 상태 추출
-    pub fn get_cycle_state(&self) -> CycleState {
-        CycleState::from_bits(((self.hi >> 53) & 0x7FF) as u16)
-    }
-    
-    /// 11비트 사이클 상태 설정
-    pub fn set_cycle_state(&mut self, state: CycleState) {
-        self.hi = (self.hi & !(0x7FF << 53)) | ((state.to_bits() as u64) << 53);
-    }
-    
-    /// 상태 전이 적용 (순수 비트 연산)
-    pub fn apply_state_transition(&mut self, error: f32, i: usize, j: usize) {
-        // 에러를 11비트로 양자화 (고정소수점)
-        let error_fixed = (error * 1024.0) as i32;
-        let error_bits = ((error_fixed + 1024).clamp(0, 2047) as u16) & 0x7FF;
-        let error_state = CycleState::from_bits(error_bits);
-        
-        // 현재 사이클 상태
-        let current_state = self.get_cycle_state();
-        
-        // 좌표 기반 전이 상태 (해시)
-        let coord_bits = (((i * 0x9E3779B9) ^ (j * 0x517CC1B7)) & 0x7FF) as u16;
-        let coord_state = CycleState::from_bits(coord_bits);
-        
-        // 상태 전이 적용
-        let new_state = current_state.apply_transition(&error_state)
-                                    .apply_transition(&coord_state);
-        
-        self.set_cycle_state(new_state);
-        
-        // 하위 비트 확산 (비트 회전)
-        let spread = new_state.to_bits() as u64;
-        let rotated = (spread << 20) | (spread >> 44);
-        self.hi ^= rotated & 0x1FFFFFFFFFFFFF;
-    }
-    
     /// 순수 비트 도메인 fused forward
     pub fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
         // 새로운 푸앵카레볼 기하학 버전 사용
@@ -360,59 +259,44 @@ impl Packed128 {
         (result_fixed as f32) / 65536.0
     }
     
-    // 기존 메서드들 유지
+    // 기존 메서드들 유지 - 새로운 64비트 정밀도로 업데이트
     pub fn decode(&self) -> DecodedParams {
-        // lo 필드는 Q32.32 고정소수점
-        let r_q32 = (self.lo >> 32) as u32;
-        let theta_q32 = self.lo as u32;
-        
-        // Q32.32 → f32 변환
-        let r_fp32 = (r_q32 as f32) / 4294967296.0;
-        let theta_fp32 = (theta_q32 as f32) / 4294967296.0 * 2.0 * std::f32::consts::PI;
+        // Q64 → f32 변환 (극도로 높은 정밀도)
+        let r_fp32 = (self.r_data as f64 / 18446744073709551616.0) as f32; // 2^64
+        let theta_fp32 = (self.theta_data as f64 / 18446744073709551616.0 * 2.0 * std::f64::consts::PI) as f32;
         
         DecodedParams { r_fp32, theta_fp32 }
     }
     
     pub fn from_continuous(p: &DecodedParams) -> Self {
-        // f32 → Q32.32 변환 (정밀도 개선)
+        // f32 → Q64 변환 (극도로 높은 정밀도)
         let r_clamped = p.r_fp32.clamp(0.0, 0.999999);
-        let r_q32 = ((r_clamped as f64) * 4294967296.0) as u64;
+        let r_data = ((r_clamped as f64) * 18446744073709551616.0) as u64; // 2^64
         
         // theta를 [0, 2π) 범위로 정규화
         let theta_norm = p.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
-        let theta_q32 = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 4294967296.0) as u64;
+        let theta_data = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 18446744073709551616.0) as u64;
         
-        let hi = 0; // 초기 상태
-        let lo = (r_q32 << 32) | (theta_q32 & 0xFFFFFFFF);
-        
-        Packed128 { hi, lo }
+        Packed128 { r_data, theta_data }
     }
 
-    /// 디코딩된 연속 파라미터(r, θ)를 사용하여 현재 `Packed128`의 `lo` 필드를 업데이트합니다.
-    /// `hi` 필드에 저장된 `CycleState`는 변경하지 않습니다.
+    /// 디코딩된 연속 파라미터(r, θ)를 사용하여 현재 `Packed128`을 업데이트합니다.
     pub fn update_from_continuous(&mut self, params: &DecodedParams) {
-        // f32 → Q32.32 변환
+        // f32 → Q64 변환
         let r_clamped = params.r_fp32.clamp(0.0, 0.999999);
-        let r_q32 = ((r_clamped as f64) * 4294967296.0) as u64;
+        self.r_data = ((r_clamped as f64) * 18446744073709551616.0) as u64;
 
         // theta를 [0, 2π) 범위로 정규화
         let theta_norm = params.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
-        let theta_q32 = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 4294967296.0) as u64;
-
-        // 양자화된 값을 u64로 패킹하여 `lo` 필드에 저장
-        self.lo = (r_q32 << 32) | (theta_q32 & 0xFFFFFFFF);
+        self.theta_data = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 18446744073709551616.0) as u64;
     }
     
     pub fn random(rng: &mut impl Rng) -> Self {
         let mut seed = Self::default();
         
-        // 모든 비트 랜덤 초기화
-        seed.hi = rng.gen();
-        seed.lo = rng.gen();
-        
-        // 11비트 사이클 상태도 랜덤
-        let cycle_bits = rng.gen::<u16>() & 0x7FF;
-        seed.set_cycle_state(CycleState::from_bits(cycle_bits));
+        // 각 파라미터를 독립적으로 랜덤 초기화
+        seed.r_data = rng.gen();
+        seed.theta_data = rng.gen();
         
         seed
     }
@@ -471,7 +355,7 @@ impl Packed128 {
             let error = (i as f32 % 100.0) * 0.01 - 0.5;
             let row = i % 50;
             let col = (i * 3) % 75;
-            packed_mut.apply_state_transition(error, row, col);
+            // packed_mut.apply_state_transition(error, row, col); // Removed 11-bit cycle transition
         }
         
         let elapsed = start.elapsed();
@@ -555,16 +439,12 @@ impl Packed128 {
         
         // 구조체 크기 정보
         println!("데이터 구조 크기:");
-        println!("  CycleState: {} bytes", std::mem::size_of::<CycleState>());
-        println!("  Packed64: {} bytes", std::mem::size_of::<Packed64>());
-        println!("  Packed128: {} bytes", std::mem::size_of::<Self>());
+        println!("  Packed128: {} bytes", std::mem::size_of::<Packed128>());
         println!("  BitGradientTracker: {} bytes", std::mem::size_of::<BitGradientTracker>());
         
         // 메모리 정렬
         println!("메모리 정렬:");
-        println!("  CycleState: {} bytes", std::mem::align_of::<CycleState>());
-        println!("  Packed64: {} bytes", std::mem::align_of::<Packed64>());
-        println!("  Packed128: {} bytes", std::mem::align_of::<Self>());
+        println!("  Packed128: {} bytes", std::mem::align_of::<Packed128>());
         
         // 캐시 라인 효율성 (64바이트 가정)
         let cache_line_size = 64;
@@ -629,10 +509,10 @@ impl Packed128 {
                 final_ops_per_sec / 1_000_000.0, operation_count, final_elapsed.as_secs_f64());
     }
 
-    /// 정확한 수학적 그래디언트 계산
-    /// fused_forward: f(r,θ) = tanh(r) * sin(θ + k*π) where k = func_output
+    /// 간단한 수학적 그래디언트 계산 (11비트 제거)
+    /// fused_forward: f(r,θ) = tanh(2*arctanh(r)) * sin(θ)
     /// 
-    /// Returns: (grad_r, grad_theta, func_output_k)
+    /// Returns: (grad_r, grad_theta, predicted)
     pub fn compute_gradients(
         &self, 
         i: usize, 
@@ -642,81 +522,7 @@ impl Packed128 {
         target: f32,
         use_l1: bool,
     ) -> (f32, f32, f32) {
-        // 1. 현재 예측값 (새로운 푸앵카레볼 순전파 사용)
-        let predicted = self.fused_forward_poincare(i, j, rows, cols);
-        
-        // 2. 현재 r, theta 값
-        let params = self.decode();
-        let r = params.r_fp32.min(0.999);
-        let theta = params.theta_fp32;
-        
-        // 3. 손실 함수의 미분 (tanh 미분 포함)
-        let grad_of_loss = if use_l1 {
-            if predicted >= target { 1.0 } else { -1.0 }
-        } else {
-            2.0 * (predicted - target)
-        };
-        // 연쇄 법칙: d(loss)/d(params) = d(loss)/d(pred) * d(pred)/d(pre_activation) * d(pre_activation)/d(params)
-        // d(pred)/d(pre_activation) = 1 - tanh^2(pre_activation) = 1 - pred^2
-        let loss_grad = grad_of_loss * (1.0 - predicted.powi(2));
-        
-        // 4. 푸앵카레볼 기하학에 따른 그래디언트
-        // d = 2 * arctanh(r)에 대한 미분
-        let d = if r < 0.999 {
-            2.0 * r.atanh()
-        } else {
-            2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
-        };
-        
-        // 11비트 사이클 정보
-        let cycle_state = self.get_cycle_state();
-        let cycle_func = cycle_state.get_active_function();
-        let cycle_pos = cycle_state.get_cycle_position() as f32 / 2048.0;
-        
-        // 쌍곡함수의 미분
-        let (func_value, func_deriv) = match cycle_func % 4 {
-            0 => (d.sinh(), d.cosh()),           // sinh → cosh
-            1 => (d.cosh(), d.sinh()),           // cosh → sinh
-            2 => {
-                let tanh_d = d.tanh();
-                (tanh_d, 1.0 - tanh_d * tanh_d)  // tanh → sech²
-            }
-            3 => {
-                let sech_d = 1.0 / d.cosh();
-                let sech2 = sech_d * sech_d;
-                (sech2, -2.0 * sech2 * d.tanh()) // sech² → -2sech²tanh
-            }
-            _ => (d.tanh(), 1.0 - d.tanh() * d.tanh()),
-        };
-        
-        // 각도 성분
-        let phi = theta + cycle_pos * std::f32::consts::PI;
-        let angular_component = phi.sin();
-        let angular_deriv = phi.cos();
-        
-        // ∂f/∂d = func_deriv * angular_component
-        // ∂d/∂r = 2/(1-r²)
-        let dd_dr = 2.0 / ((1.0 - r * r).max(1e-6));
-        let df_dr = loss_grad * func_deriv * angular_component * dd_dr;
-        
-        // ∂f/∂θ = func_value * angular_deriv
-        let df_dtheta = loss_grad * func_value * angular_deriv;
-        
-        (df_dr, df_dtheta, predicted)
-    }
-    
-    /// 리만 기하학을 적용한 자연 그래디언트 계산
-    /// 푸앵카레 볼 메트릭: ds² = 4/(1-r²)² (dr² + r²dθ²)
-    pub fn compute_riemannian_gradients(
-        &self,
-        i: usize,
-        j: usize,
-        rows: usize,
-        cols: usize,
-        target: f32,
-        use_l1: bool,
-    ) -> (f32, f32) {
-        // 1. 현재 예측값 (새로운 푸앵카레볼 순전파 사용)
+        // 1. 현재 예측값
         let predicted = self.fused_forward_poincare(i, j, rows, cols);
         
         // 2. 현재 r, theta 값
@@ -730,64 +536,84 @@ impl Packed128 {
         } else {
             2.0 * (predicted - target)
         };
-        // 연쇄 법칙: d(loss)/d(pred) * d(pred)/d(pre_activation)
-        // d(pred)/d(pre_activation) = 1 - tanh^2(pre_activation) = 1 - pred^2
         let loss_grad = grad_of_loss * (1.0 - predicted.powi(2));
         
-        // 4. 쌍곡 기하학 관련 계산
-        // d = 2 * arctanh(r)
+        // 4. 푸앵카레볼 기하학에 따른 그래디언트
         let d = if r < 0.999 {
             2.0 * r.atanh()
         } else {
             2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
         };
         
-        // 11비트 사이클 정보
-        let cycle_state = self.get_cycle_state();
-        let cycle_func = cycle_state.get_active_function();
-        let cycle_pos = cycle_state.get_cycle_position() as f32 / 2048.0;
+        // 단순화: tanh와 sin만 사용
+        let func_value = d.tanh();
+        let func_deriv = 1.0 - func_value * func_value;
+        let angular_component = theta.sin();
+        let angular_deriv = theta.cos();
         
-        // 쌍곡함수의 미분
-        let (func_value, func_deriv) = match cycle_func % 4 {
-            0 => (d.sinh(), d.cosh()),
-            1 => (d.cosh(), d.sinh()),
-            2 => {
-                let tanh_d = d.tanh();
-                (tanh_d, 1.0 - tanh_d * tanh_d)
-            }
-            3 => {
-                let sech_d = 1.0 / d.cosh();
-                let sech2 = sech_d * sech_d;
-                (sech2, -2.0 * sech2 * d.tanh())
-            }
-            _ => (d.tanh(), 1.0 - d.tanh() * d.tanh()),
+        // ∂f/∂r = loss_grad * func_deriv * angular_component * (2/(1-r²))
+        let dd_dr = 2.0 / ((1.0 - r * r).max(1e-6));
+        let df_dr = loss_grad * func_deriv * angular_component * dd_dr;
+        
+        // ∂f/∂θ = loss_grad * func_value * angular_deriv
+        let df_dtheta = loss_grad * func_value * angular_deriv;
+        
+        (df_dr, df_dtheta, predicted)
+    }
+    
+    /// 리만 기하학을 적용한 자연 그래디언트 계산 (11비트 제거)
+    /// 푸앵카레 볼 메트릭: ds² = 4/(1-r²)² (dr² + r²dθ²)
+    pub fn compute_riemannian_gradients(
+        &self,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+        target: f32,
+        use_l1: bool,
+    ) -> (f32, f32) {
+        // 1. 현재 예측값
+        let predicted = self.fused_forward_poincare(i, j, rows, cols);
+        
+        // 2. 현재 r, theta 값
+        let params = self.decode();
+        let r = params.r_fp32.min(0.999);
+        let theta = params.theta_fp32;
+        
+        // 3. 손실 함수의 미분
+        let grad_of_loss = if use_l1 {
+            if predicted >= target { 1.0 } else { -1.0 }
+        } else {
+            2.0 * (predicted - target)
+        };
+        let loss_grad = grad_of_loss * (1.0 - predicted.powi(2));
+        
+        // 4. 쌍곡 기하학 계산
+        let d = if r < 0.999 {
+            2.0 * r.atanh()
+        } else {
+            2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
         };
         
-        // 각도 성분
-        let phi = theta + cycle_pos * std::f32::consts::PI;
-        let angular_component = phi.sin();
-        let angular_deriv = phi.cos();
+        // 단순화된 쌍곡함수
+        let func_value = d.tanh();
+        let func_deriv = 1.0 - func_value * func_value;
+        let angular_component = theta.sin();
+        let angular_deriv = theta.cos();
 
         // 5. 리만 그래디언트의 안정적인 계산
-        // 유클리드 그래디언트의 폭발 가능성 있는 부분을 분석적으로 상쇄
         let one_minus_r2 = (1.0 - r * r).max(1e-6);
 
-        // grad_r = g^{rr} * ∂L/∂r = ((1-r²)²/4) * (∂L/∂f * ∂f/∂d * ∂d/∂r)
-        // ∂d/∂r = 2/(1-r²) 이므로, 상쇄하면...
-        // grad_r = ((1-r²)²/4) * (∂L/∂f * ∂f/∂d) * (2/(1-r²))
-        // grad_r = (1-r²)/2 * (∂L/∂f * ∂f/∂d)
+        // 그래디언트 계산 (경계 근처에서 안정화)
         let grad_r_riemannian = (one_minus_r2 / 2.0) * loss_grad * func_deriv * angular_component;
-
-        // grad_θ = g^{θθ} * ∂L/∂θ = ((1-r²)²/(4r²)) * (∂L/∂f * ∂f/∂θ)
         let grad_theta_riemannian = (one_minus_r2.powi(2) / (4.0 * r.powi(2)).max(1e-9)) * loss_grad * func_value * angular_deriv;
         
-        // 6. 동적 그래디언트 클리핑 및 경계 감쇠 - 개선된 버전
-        // r 값과 그래디언트 부호에 따라 클리핑 강도를 조절하여 안정성 확보
-        let mut boundary_damping = (1.0 - r.powi(4)).max(0.01); // r이 클수록 감쇠가 강해짐
+        // 6. 동적 그래디언트 클리핑 및 경계 감쇠
+        let mut boundary_damping = (1.0 - r.powi(4)).max(0.01);
         
-        // 경계 근처에서 r을 밀어내는 그래디언트(grad_r > 0)는 약화시킴
+        // 경계 근처에서 r을 밀어내는 그래디언트는 약화
         if r > 0.95 && grad_r_riemannian > 0.0 {
-            boundary_damping *= (1.0 - (r - 0.95) * 20.0).max(0.01); // 선형 감쇠
+            boundary_damping *= (1.0 - (r - 0.95) * 20.0).max(0.01);
         }
 
         let max_grad_r = 1.0 * boundary_damping;
@@ -805,7 +631,7 @@ impl Packed128 {
         
         // r 업데이트 (경계 고려) - update_r에는 이미 학습률이 적용되어 있음
         let new_r = params.r_fp32 - update_r;
-        params.r_fp32 = new_r.clamp(0.0, 0.999); // 1에 매우 가까워지지 않도록 함
+        params.r_fp32 = new_r.clamp(1e-6, 0.999); // 0이 되는 것을 방지
         
         // theta 업데이트 (순환 구조) - update_theta에도 이미 학습률이 적용되어 있음
         params.theta_fp32 = (params.theta_fp32 - update_theta).rem_euclid(2.0 * std::f32::consts::PI);
@@ -813,109 +639,34 @@ impl Packed128 {
         self.update_from_continuous(&params);
     }
 
-    /// 현재 상태에서의 예측값과 손실 계산
-    pub fn forward_with_loss(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32) -> (f32, f32) {
-        let predicted = self.fused_forward(i, j, rows, cols);
-        let loss = (predicted - target).abs(); // L1 loss
-        (predicted, loss)
-    }
-
-    /// 정밀도 손실 없는 고정소수점 그래디언트 업데이트
-    pub fn update_gradients_fixed_point(&mut self, grad_r: f32, grad_theta: f32, lr: f32) {
-        // Q32.32 형식으로 직접 연산
-        let lr_q32 = ((lr as f64) * 4294967296.0) as i64;
-        let grad_r_q32 = ((grad_r as f64) * 4294967296.0) as i64;
-        // theta 그래디언트는 [0, 2π) → [0, 1) 정규화 필요
-        let grad_theta_normalized = grad_theta / (2.0 * std::f32::consts::PI);
-        let grad_theta_q32 = ((grad_theta_normalized as f64) * 4294967296.0) as i64;
-        
-        // 현재 값 추출 (변환 없이)
-        let r_q32 = (self.lo >> 32) as i64;
-        let theta_q32 = (self.lo & 0xFFFFFFFF) as i64;
-        
-        // 고정소수점 곱셈과 뺄셈
-        let new_r_q64 = r_q32 - ((lr_q32 * grad_r_q32) >> 32);
-        let new_theta_q64 = theta_q32 - ((lr_q32 * grad_theta_q32) >> 32);
-        
-        // 범위 제약 (Q32.32 형식 유지)
-        let r_max_q32 = ((0.999999 * 4294967296.0) as i64);
-        let new_r_clamped = new_r_q64.clamp(0, r_max_q32) as u64;
-        
-        // theta는 [0, 1)로 순환 (정규화된 범위)
-        let one_q32 = 4294967296i64; // 1.0 in Q32.32
-        let new_theta_mod = new_theta_q64.rem_euclid(one_q32) as u64;
-        
-        // 직접 업데이트
-        self.lo = (new_r_clamped << 32) | new_theta_mod;
-    }
-    
-    /// 11비트 사이클 그래디언트 적용 - 개선된 버전
-    pub fn apply_cycle_gradient(&mut self, gradient: f32) {
-        let cycle_state = self.get_cycle_state();
-        let transition_threshold = 0.001; // 10배 낮춘 임계값
-        
-        if gradient.abs() > transition_threshold {
-            // 가변폭 전이: 그래디언트 크기에 비례
-            let current_bits = cycle_state.to_bits();
-            let delta = ((gradient.abs() * 10000.0).min(7.0) as u16); // 0-7 범위
-            
-            let new_bits = if gradient > 0.0 {
-                // 순방향 전이: 다음 쌍곡함수로 (가변폭)
-                (current_bits + delta) & 0x7FF
-            } else {
-                // 역방향 전이: 이전 쌍곡함수로 (가변폭)
-                (current_bits.wrapping_sub(delta)) & 0x7FF
-            };
-            
-            let new_cycle = CycleState::from_bits(new_bits);
-            self.set_cycle_state(new_cycle);
-        }
-    }
-    
-    /// 진짜 푸앵카레볼 기하학을 사용한 순전파
-    pub fn fused_forward_poincare(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+    /// 간단한 푸앵카레볼 순전파 (11비트 사이클 제거)
+    pub fn fused_forward_poincare(&self, i: usize, j: usize, _rows: usize, _cols: usize) -> f32 {
         // 1. 연속 파라미터 디코딩
         let params = self.decode();
-        let r = params.r_fp32.min(0.999); // 수치 안정성
+        let r = params.r_fp32.min(0.999);
         let theta = params.theta_fp32;
         
         // 2. 푸앵카레볼 → 쌍곡 거리 변환
-        // d = 2 * arctanh(r)
-        let hyperbolic_distance = if r < 0.999 {
+        let d = if r < 0.999 {
             2.0 * r.atanh()
         } else {
-            // r이 1에 가까울 때 근사
             2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
         };
         
-        // 3. 11비트 사이클 상태로 변조
-        let cycle_state = self.get_cycle_state();
-        let cycle_func = cycle_state.get_active_function();
-        let cycle_pos = cycle_state.get_cycle_position() as f32 / 2048.0;
-        
-        // 4. 위치 기반 변조 계산
+        // 3. 위치 기반 변조
         let pos_hash = ((i * 31 + j * 17) % 256) as f32 / 256.0;
         let spatial_modulation = (pos_hash * 2.0 * std::f32::consts::PI).sin();
         
-        // 5. 쌍곡함수 적용 (11비트 사이클에 따라)
-        let func_value = match cycle_func % 4 {
-            0 => hyperbolic_distance.sinh(),  // sinh
-            1 => hyperbolic_distance.cosh(),  // cosh  
-            2 => hyperbolic_distance.tanh(),  // tanh
-            3 => {
-                let cosh_val = hyperbolic_distance.cosh();
-                1.0 / (cosh_val * cosh_val)    // sech²
-            }
-            _ => hyperbolic_distance.tanh(),
-        };
+        // 4. 단순화된 함수: tanh만 사용
+        let func_value = d.tanh();
         
-        // 6. 각도 성분 결합 (푸앵카레볼의 회전)
-        let angular_component = (theta + cycle_pos * std::f32::consts::PI).sin();
+        // 5. 각도 성분
+        let angular_component = theta.sin();
         
-        // 7. 최종 출력 (쌍곡 기하학적 결합)
+        // 6. 최종 출력
         let output = func_value * angular_component * (1.0 + spatial_modulation * 0.1);
         
-        // 8. 출력 정규화
+        // 7. 출력 정규화
         output.tanh()
     }
 } 

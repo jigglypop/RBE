@@ -203,13 +203,6 @@ impl BitRiemannianAdamState {
         // 7. 새로운 직접 업데이트 방식 적용
         packed.update_with_riemannian_grad(update_r, update_theta, learning_rate);
         
-        // 8. 11비트 사이클 업데이트 - 스케줄 기반으로 재설계
-        // 100 스텝마다 한 번씩만 사이클 전환하여 안정성 확보
-        if self.t % 100 == 0 && self.t > 0 {
-            let gradient_magnitude = (grad_r_clipped.abs() + grad_theta_clipped.abs()) / 2.0;
-            packed.apply_cycle_gradient(gradient_magnitude);
-        }
-        
         // 디버깅 (40 스텝마다)
         if self.t % 40 == 39 {
             let predicted = packed.fused_forward_poincare(i, j, rows, cols);

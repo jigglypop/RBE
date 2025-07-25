@@ -7,7 +7,7 @@ pub mod core;
 
 pub use core::{
     // 비트 도메인 텐서 타입들
-    Packed128, CycleState, DecodedParams, BitTensor, BitGradientTracker,
+    Packed128, DecodedParams, BitTensor, BitGradientTracker,
     // 비트 도메인 미분 시스템
     // BitForwardPass, BitBackwardPass, DifferentialSystem,
     // 최적화기
