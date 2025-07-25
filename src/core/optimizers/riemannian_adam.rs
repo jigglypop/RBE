@@ -160,37 +160,30 @@ impl BitRiemannianAdamState {
     ) {
         self.t += 1;
         
-        // 1. 유클리드 그래디언트 계산
-        let (grad_r_euclidean, grad_theta_euclidean, predicted) = 
-            packed.compute_gradients(i, j, rows, cols, target, false);
-        
-        // 2. 현재 파라미터
-        let params = packed.decode();
-        let r = params.r_fp32.clamp(0.0, 0.999);
-        let theta = params.theta_fp32;
-        
-        // 3. 리만 그래디언트 변환
-        let grad_r = self.compute_riemannian_gradient(grad_r_euclidean, r, true);
-        let grad_theta = self.compute_riemannian_gradient(grad_theta_euclidean, r, false);
-        
-        // 4. 그래디언트 클리핑
+        // 1. 안정화된 리만 그래디언트를 직접 계산 (핵심 변경)
+        // 기존의 불안정한 유클리드->리만 변환 대신, packed_types에 구현된 안정적인 함수를 직접 호출
+        let (grad_r, grad_theta) =
+            packed.compute_riemannian_gradients(i, j, rows, cols, target, false);
+
+        // 2. 그래디언트 클리핑
+        // packed_types에서 이미 동적 클리핑이 적용되었지만, 추가적인 안전장치로 최대값을 제한할 수 있음
         let grad_r_clipped = grad_r.clamp(-self.clip_grad, self.clip_grad);
         let grad_theta_clipped = grad_theta.clamp(-self.clip_grad, self.clip_grad);
         
-        // 5. Adam 모멘트 업데이트
+        // 3. Adam 모멘트 업데이트
         self.m_r = self.beta1 * self.m_r + (1.0 - self.beta1) * grad_r_clipped;
         self.m_theta = self.beta1 * self.m_theta + (1.0 - self.beta1) * grad_theta_clipped;
         
         self.v_r = self.beta2 * self.v_r + (1.0 - self.beta2) * grad_r_clipped.powi(2);
         self.v_theta = self.beta2 * self.v_theta + (1.0 - self.beta2) * grad_theta_clipped.powi(2);
         
-        // 6. AMSGrad (선택적)
+        // 4. AMSGrad (선택적)
         if self.use_amsgrad {
             self.vmax_r = self.vmax_r.max(self.v_r);
             self.vmax_theta = self.vmax_theta.max(self.v_theta);
         }
         
-        // 7. 편향 보정
+        // 5. 편향 보정
         let bias_correction1 = 1.0 - self.beta1.powi(self.t as i32);
         let bias_correction2 = 1.0 - self.beta2.powi(self.t as i32);
         
@@ -203,32 +196,26 @@ impl BitRiemannianAdamState {
         let v_hat_r = v_to_use_r / bias_correction2;
         let v_hat_theta = v_to_use_theta / bias_correction2;
         
-        // 8. Adam 업데이트 방향 계산
+        // 6. Adam 업데이트 방향 계산
         let update_r = learning_rate * m_hat_r / (v_hat_r.sqrt() + self.epsilon);
         let update_theta = learning_rate * m_hat_theta / (v_hat_theta.sqrt() + self.epsilon);
         
-        // 9. 푸앵카레볼에서의 업데이트
-        // r 방향: 지수 사상 사용
-        let new_r = self.exponential_map(r, -update_r);
+        // 7. 새로운 직접 업데이트 방식 적용
+        packed.update_with_riemannian_grad(update_r, update_theta, learning_rate);
         
-        // θ 방향: 유클리드 업데이트 (각도이므로)
-        let new_theta = (theta - update_theta).rem_euclid(2.0 * PI);
+        // 8. 11비트 사이클 업데이트 - 스케줄 기반으로 재설계
+        // 100 스텝마다 한 번씩만 사이클 전환하여 안정성 확보
+        if self.t % 100 == 0 && self.t > 0 {
+            let gradient_magnitude = (grad_r_clipped.abs() + grad_theta_clipped.abs()) / 2.0;
+            packed.apply_cycle_gradient(gradient_magnitude);
+        }
         
-        // 10. 업데이트된 파라미터 적용
-        let new_params = DecodedParams {
-            r_fp32: new_r,
-            theta_fp32: new_theta,
-        };
-        packed.update_from_continuous(&new_params);
-        
-        // 11. 11비트 사이클 업데이트
-        let gradient_magnitude = (grad_r_clipped.abs() + grad_theta_clipped.abs()) / 2.0;
-        packed.apply_cycle_gradient(gradient_magnitude);
-        
-        // 디버깅 (100 스텝마다)
-        if self.t % 100 == 0 {
+        // 디버깅 (40 스텝마다)
+        if self.t % 40 == 39 {
+            let predicted = packed.fused_forward_poincare(i, j, rows, cols);
+            let params = packed.decode();
             println!("RiemannianAdam[{}]: r={:.6}, θ={:.6}, pred={:.6}, target={:.6}, loss={:.6}",
-                     self.t, new_r, new_theta, predicted, target, (predicted - target).abs());
+                     self.t + 1, params.r_fp32, params.theta_fp32, predicted, target, (predicted - target).abs());
         }
     }
     
@@ -276,7 +263,7 @@ impl BitRiemannianAdamState {
     
     /// Q16.16 고정소수점 변환 (호환성)
     pub fn f32_to_q16(val: f32) -> u32 {
-        (val * 65536.0) as u32
+        (val * 65536.0) as i32 as u32
     }
     
     pub fn q16_to_f32(bits: u32) -> f32 {

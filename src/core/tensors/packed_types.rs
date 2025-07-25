@@ -716,29 +716,103 @@ impl Packed128 {
         target: f32,
         use_l1: bool,
     ) -> (f32, f32) {
-        let (grad_r_euclidean, grad_theta_euclidean, _) = 
-            self.compute_gradients(i, j, rows, cols, target, use_l1);
+        // 1. 현재 예측값 (새로운 푸앵카레볼 순전파 사용)
+        let predicted = self.fused_forward_poincare(i, j, rows, cols);
         
+        // 2. 현재 r, theta 값
         let params = self.decode();
-        let r = params.r_fp32;
+        let r = params.r_fp32.min(0.999);
+        let theta = params.theta_fp32;
         
-        // 리만 메트릭 역행렬 성분
-        // g^{rr} = (1-r²)²/4, g^{θθ} = (1-r²)²/(4r²)
-        let one_minus_r2 = (1.0 - r * r).max(1e-6); // 수치 안정성
-        let metric_factor = one_minus_r2 * one_minus_r2 / 4.0;
+        // 3. 손실 함수의 미분
+        let grad_of_loss = if use_l1 {
+            if predicted >= target { 1.0 } else { -1.0 }
+        } else {
+            2.0 * (predicted - target)
+        };
+        // 연쇄 법칙: d(loss)/d(pred) * d(pred)/d(pre_activation)
+        // d(pred)/d(pre_activation) = 1 - tanh^2(pre_activation) = 1 - pred^2
+        let loss_grad = grad_of_loss * (1.0 - predicted.powi(2));
         
-        // 리만 그래디언트 = 메트릭 역행렬 * 유클리드 그래디언트
-        let grad_r_riemannian = metric_factor * grad_r_euclidean;
-        let grad_theta_riemannian = metric_factor / (r * r).max(1e-6) * grad_theta_euclidean;
+        // 4. 쌍곡 기하학 관련 계산
+        // d = 2 * arctanh(r)
+        let d = if r < 0.999 {
+            2.0 * r.atanh()
+        } else {
+            2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
+        };
         
-        // 그래디언트 클리핑 (폭발 방지)
-        let max_grad = 10.0;
-        let grad_r_clipped = grad_r_riemannian.clamp(-max_grad, max_grad);
-        let grad_theta_clipped = grad_theta_riemannian.clamp(-max_grad, max_grad);
+        // 11비트 사이클 정보
+        let cycle_state = self.get_cycle_state();
+        let cycle_func = cycle_state.get_active_function();
+        let cycle_pos = cycle_state.get_cycle_position() as f32 / 2048.0;
         
+        // 쌍곡함수의 미분
+        let (func_value, func_deriv) = match cycle_func % 4 {
+            0 => (d.sinh(), d.cosh()),
+            1 => (d.cosh(), d.sinh()),
+            2 => {
+                let tanh_d = d.tanh();
+                (tanh_d, 1.0 - tanh_d * tanh_d)
+            }
+            3 => {
+                let sech_d = 1.0 / d.cosh();
+                let sech2 = sech_d * sech_d;
+                (sech2, -2.0 * sech2 * d.tanh())
+            }
+            _ => (d.tanh(), 1.0 - d.tanh() * d.tanh()),
+        };
+        
+        // 각도 성분
+        let phi = theta + cycle_pos * std::f32::consts::PI;
+        let angular_component = phi.sin();
+        let angular_deriv = phi.cos();
+
+        // 5. 리만 그래디언트의 안정적인 계산
+        // 유클리드 그래디언트의 폭발 가능성 있는 부분을 분석적으로 상쇄
+        let one_minus_r2 = (1.0 - r * r).max(1e-6);
+
+        // grad_r = g^{rr} * ∂L/∂r = ((1-r²)²/4) * (∂L/∂f * ∂f/∂d * ∂d/∂r)
+        // ∂d/∂r = 2/(1-r²) 이므로, 상쇄하면...
+        // grad_r = ((1-r²)²/4) * (∂L/∂f * ∂f/∂d) * (2/(1-r²))
+        // grad_r = (1-r²)/2 * (∂L/∂f * ∂f/∂d)
+        let grad_r_riemannian = (one_minus_r2 / 2.0) * loss_grad * func_deriv * angular_component;
+
+        // grad_θ = g^{θθ} * ∂L/∂θ = ((1-r²)²/(4r²)) * (∂L/∂f * ∂f/∂θ)
+        let grad_theta_riemannian = (one_minus_r2.powi(2) / (4.0 * r.powi(2)).max(1e-9)) * loss_grad * func_value * angular_deriv;
+        
+        // 6. 동적 그래디언트 클리핑 및 경계 감쇠 - 개선된 버전
+        // r 값과 그래디언트 부호에 따라 클리핑 강도를 조절하여 안정성 확보
+        let mut boundary_damping = (1.0 - r.powi(4)).max(0.01); // r이 클수록 감쇠가 강해짐
+        
+        // 경계 근처에서 r을 밀어내는 그래디언트(grad_r > 0)는 약화시킴
+        if r > 0.95 && grad_r_riemannian > 0.0 {
+            boundary_damping *= (1.0 - (r - 0.95) * 20.0).max(0.01); // 선형 감쇠
+        }
+
+        let max_grad_r = 1.0 * boundary_damping;
+        let max_grad_theta = 2.0 * boundary_damping;
+        
+        let grad_r_clipped = grad_r_riemannian.clamp(-max_grad_r, max_grad_r);
+        let grad_theta_clipped = grad_theta_riemannian.clamp(-max_grad_theta, max_grad_theta);
+
         (grad_r_clipped, grad_theta_clipped)
     }
     
+    /// 리만 그래디언트를 사용하여 파라미터를 직접 업데이트 (안정화 버전)
+    pub fn update_with_riemannian_grad(&mut self, update_r: f32, update_theta: f32, _lr: f32) {
+        let mut params = self.decode();
+        
+        // r 업데이트 (경계 고려) - update_r에는 이미 학습률이 적용되어 있음
+        let new_r = params.r_fp32 - update_r;
+        params.r_fp32 = new_r.clamp(0.0, 0.999); // 1에 매우 가까워지지 않도록 함
+        
+        // theta 업데이트 (순환 구조) - update_theta에도 이미 학습률이 적용되어 있음
+        params.theta_fp32 = (params.theta_fp32 - update_theta).rem_euclid(2.0 * std::f32::consts::PI);
+
+        self.update_from_continuous(&params);
+    }
+
     /// 현재 상태에서의 예측값과 손실 계산
     pub fn forward_with_loss(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32) -> (f32, f32) {
         let predicted = self.fused_forward(i, j, rows, cols);
