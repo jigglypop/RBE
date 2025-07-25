@@ -26,7 +26,6 @@ impl CycleState {
     /// 비트 전이 함수 - 쌍곡함수 미분 관계를 비트 패턴으로 인코딩
     pub fn apply_transition(&self, other: &CycleState) -> CycleState {
         let mut result = 0u16;
-        
         // 11비트를 3개 그룹으로 분할
         // [10:8] - 쌍곡함수 선택 (sinh, cosh, tanh, sech²)
         // [7:4] - 미분 사이클 위치
@@ -35,11 +34,8 @@ impl CycleState {
         let func_bits = (self.bits >> 8) & 0x7;
         let cycle_bits = (self.bits >> 4) & 0xF;
         let mod_bits = self.bits & 0xF;
-        
-        let other_func = (other.bits >> 8) & 0x7;
         let other_cycle = (other.bits >> 4) & 0xF;
         let other_mod = other.bits & 0xF;
-        
         // 쌍곡함수 미분 사이클
         // sinh' = cosh, cosh' = sinh, tanh' = sech², sech²' = -2tanh·sech²
         let new_func = match func_bits {
@@ -53,22 +49,17 @@ impl CycleState {
             7 => 4,
             _ => 0,
         };
-        
         // 사이클 진행 (XOR 기반)
         let new_cycle = cycle_bits ^ other_cycle;
-        
         // 변조 파라미터 업데이트 (AND + rotate)
         let new_mod = ((mod_bits & other_mod) << 1) | ((mod_bits & other_mod) >> 3);
-        
         result = (new_func << 8) | (new_cycle << 4) | (new_mod & 0xF);
         CycleState::new(result)
     }
-    
     /// 활성 쌍곡함수 인덱스 반환
     pub fn get_active_function(&self) -> usize {
         ((self.bits >> 8) & 0x7) as usize
     }
-    
     /// 미분 사이클 위치 반환
     pub fn get_cycle_position(&self) -> usize {
         ((self.bits >> 4) & 0xF) as usize
@@ -244,6 +235,21 @@ impl Packed64 {
     
     /// 비트 연산 전용 atan2 (Q16.16)
     pub fn bit_atan2_q16(y: i32, x: i32) -> i32 {
+        // 특수 케이스 처리
+        if x == 0 && y == 0 {
+            return 0;
+        }
+        
+        // x가 양수이고 y가 0인 경우
+        if y == 0 {
+            if x > 0 {
+                return 0; // 0도
+            } else {
+                return 0x6487; // 180도 (π in Q16)
+            }
+        }
+        
+        // y가 0이 아닌 경우의 일반적인 처리
         let mut angle = 0i32;
         let mut xi = x;
         let mut yi = y;
@@ -252,20 +258,18 @@ impl Packed64 {
         if xi < 0 {
             if yi >= 0 {
                 angle = 0x3243F6A8; // π in Q32
-                xi = -xi;
-                yi = -yi;
             } else {
                 angle = -0x3243F6A8; // -π
-                xi = -xi;
-                yi = -yi;
             }
+            xi = -xi;
+            yi = -yi;
         }
         
         // CORDIC 벡터링 모드
-        for i in 0..20 {
-            let di = if yi < 0 { -1 } else { 1 };
-            let xi_new = xi - di * (yi >> i);
-            let yi_new = yi + di * (xi >> i);
+        for i in 0..20.min(CORDIC_ANGLES_Q32.len()) {
+            let di: i32 = if yi < 0 { -1 } else { 1 };
+            let xi_new = xi.saturating_sub(di.saturating_mul((yi >> i) as i32));
+            let yi_new = yi.saturating_add(di.saturating_mul((xi >> i) as i32));
             
             // 안전한 연산을 위해 wrapping_sub 사용
             let angle_delta = di.wrapping_mul(CORDIC_ANGLES_Q32[i] as i32);
@@ -340,17 +344,19 @@ impl Packed128 {
     /// 비트 패턴 변조 (곱셈 없이)
     pub fn bit_pattern_modulation(pattern: u64, i: usize, j: usize, cycle: usize) -> f32 {
         // MurmurHash 스타일 믹싱
-        let mut h = pattern ^ ((i as u64) * 0x9E3779B97F4A7C15);
-        h ^= (j as u64) * 0x94D049BB133111EB;
-        h ^= (cycle as u64) * 0xBF58476D1CE4E5B9;
+        let mut h = pattern ^ ((i as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        h ^= (j as u64).wrapping_mul(0x94D049BB133111EB);
+        h ^= (cycle as u64).wrapping_mul(0xBF58476D1CE4E5B9);
         
-        // 비트 개수 + 회전
-        let count1 = h.count_ones();
-        let count2 = (h.rotate_left(17)).count_ones();
-        let count3 = (h.rotate_right(31)).count_ones();
+        // 추가 믹싱으로 더 균등한 분포 생성
+        h = h ^ (h >> 33);
+        h = h.wrapping_mul(0xff51afd7ed558ccd);
+        h = h ^ (h >> 33);
+        h = h.wrapping_mul(0xc4ceb9fe1a85ec53);
+        h = h ^ (h >> 33);
         
-        // [0, 1] 범위로 정규화
-        ((count1 + count2 + count3) as f32) / 192.0
+        // 상위 32비트를 사용하여 [0, 1] 범위로 변환
+        (h >> 32) as f32 / 4294967296.0
     }
     
     /// 쌍곡함수 LUT 적용 (실제 룩업)
@@ -383,9 +389,13 @@ impl Packed128 {
     }
     
     pub fn from_continuous(p: &DecodedParams) -> Self {
-        // f32 → Q32.32 변환
-        let r_q32 = (p.r_fp32.clamp(0.0, 0.9999) * 4294967296.0) as u64;
-        let theta_q32 = ((p.theta_fp32 / (2.0 * std::f32::consts::PI)).fract() * 4294967296.0) as u64;
+        // f32 → Q32.32 변환 (정밀도 개선)
+        let r_clamped = p.r_fp32.clamp(0.0, 0.999999);
+        let r_q32 = ((r_clamped as f64) * 4294967296.0) as u64;
+        
+        // theta를 [0, 2π) 범위로 정규화
+        let theta_norm = p.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
+        let theta_q32 = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 4294967296.0) as u64;
         
         let hi = 0; // 초기 상태
         let lo = (r_q32 << 32) | (theta_q32 & 0xFFFFFFFF);
@@ -423,4 +433,222 @@ impl AnalyticalGradient for Packed128 {
         // Placeholder implementation
         0.0
     }
+} 
+
+/// 성능 측정 및 정확도 검증 함수들
+impl Packed128 {
+    /// 연산 속도 벤치마크 - 실제 ns/op 측정
+    pub fn benchmark_speed(iterations: usize) {
+        use std::time::Instant;
+        let mut rng = rand::thread_rng();
+        
+        println!("=== 비트 도메인 푸앵카레볼 성능 측정 ===");
+        println!("반복 횟수: {}", iterations);
+        
+        // 1. fused_forward 속도 측정
+        let packed = Self::random(&mut rng);
+        let start = Instant::now();
+        let mut sum = 0.0f32;
+        
+        for i in 0..iterations {
+            let row = i % 100;
+            let col = (i * 7) % 150;
+            sum += packed.fused_forward(row, col, 100, 150);
+        }
+        
+        let elapsed = start.elapsed();
+        let ns_per_op = elapsed.as_nanos() as f64 / iterations as f64;
+        
+        println!("fused_forward 속도: {:.1} ns/op ({:.1} MHz)", ns_per_op, 1000.0 / ns_per_op);
+        println!("처리량: {:.1} million ops/sec", 1000.0 / ns_per_op);
+        println!("결과 합계: {:.6} (최적화 방지)", sum);
+        
+        // 2. 상태 전이 속도 측정
+        let mut packed_mut = Self::random(&mut rng);
+        let start = Instant::now();
+        
+        for i in 0..iterations {
+            let error = (i as f32 % 100.0) * 0.01 - 0.5;
+            let row = i % 50;
+            let col = (i * 3) % 75;
+            packed_mut.apply_state_transition(error, row, col);
+        }
+        
+        let elapsed = start.elapsed();
+        let ns_per_transition = elapsed.as_nanos() as f64 / iterations as f64;
+        
+        println!("상태전이 속도: {:.1} ns/op ({:.1} MHz)", ns_per_transition, 1000.0 / ns_per_transition);
+        
+        // 3. 압축률 측정 (기존 f32 대비)
+        let original_size = 100 * 150 * 4; // f32 배열 크기
+        let compressed_size = std::mem::size_of::<Self>(); // 128bit
+        let compression_ratio = original_size as f64 / compressed_size as f64;
+        
+        println!("압축률: {:.1}:1 ({} bytes -> {} bytes)", 
+                compression_ratio, original_size, compressed_size);
+    }
+    
+    /// 정확도 측정 - RMSE 및 오차 분석
+    pub fn measure_accuracy(samples: usize) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        
+        println!("\n=== 정확도 분석 ===");
+        println!("샘플 수: {}", samples);
+        
+        let mut total_error = 0.0f64;
+        let mut max_error = 0.0f32;
+        let mut error_distribution = [0u32; 10]; // 오차 분포 (0.1 단위)
+        
+        // 연속 파라미터 왕복 변환 정확도
+        for _ in 0..samples {
+            let r_original = rng.gen::<f32>() * 0.99;
+            let theta_original = rng.gen::<f32>() * 2.0 * std::f32::consts::PI;
+            
+            let params = DecodedParams { 
+                r_fp32: r_original, 
+                theta_fp32: theta_original 
+            };
+            
+            let packed = Self::from_continuous(&params);
+            let decoded = packed.decode();
+            
+            // 오차 계산
+            let r_error = (decoded.r_fp32 - r_original).abs();
+            let theta_diff = (decoded.theta_fp32 - theta_original).abs();
+            let theta_error = theta_diff.min(2.0 * std::f32::consts::PI - theta_diff);
+            
+            let combined_error = (r_error + theta_error * 0.1).sqrt();
+            total_error += combined_error as f64;
+            
+            if combined_error > max_error {
+                max_error = combined_error;
+            }
+            
+            // 오차 분포 기록
+            let bucket = (combined_error * 100.0) as usize;
+            if bucket < error_distribution.len() {
+                error_distribution[bucket] += 1;
+            }
+        }
+        
+        let rmse = (total_error / samples as f64).sqrt();
+        
+        println!("RMSE: {:.6}", rmse);
+        println!("최대 오차: {:.6}", max_error);
+        println!("평균 오차: {:.6}", total_error / samples as f64);
+        
+        // 오차 분포 출력
+        println!("오차 분포:");
+        for (i, &count) in error_distribution.iter().enumerate() {
+            let percentage = count as f64 / samples as f64 * 100.0;
+            if percentage > 0.1 {
+                println!("  {:.1}-{:.1}%: {:.1}% ({} samples)", 
+                        i as f64 * 0.01, (i + 1) as f64 * 0.01, percentage, count);
+            }
+        }
+    }
+    
+    /// 메모리 사용량 및 캐시 효율성 분석
+    pub fn analyze_memory_efficiency() {
+        println!("\n=== 메모리 효율성 분석 ===");
+        
+        // 구조체 크기 정보
+        println!("데이터 구조 크기:");
+        println!("  CycleState: {} bytes", std::mem::size_of::<CycleState>());
+        println!("  Packed64: {} bytes", std::mem::size_of::<Packed64>());
+        println!("  Packed128: {} bytes", std::mem::size_of::<Self>());
+        println!("  BitGradientTracker: {} bytes", std::mem::size_of::<BitGradientTracker>());
+        
+        // 메모리 정렬
+        println!("메모리 정렬:");
+        println!("  CycleState: {} bytes", std::mem::align_of::<CycleState>());
+        println!("  Packed64: {} bytes", std::mem::align_of::<Packed64>());
+        println!("  Packed128: {} bytes", std::mem::align_of::<Self>());
+        
+        // 캐시 라인 효율성 (64바이트 가정)
+        let cache_line_size = 64;
+        let structs_per_cache_line = cache_line_size / std::mem::size_of::<Self>();
+        println!("캐시 라인당 구조체 수: {}", structs_per_cache_line);
+        
+        // 대량 데이터 처리 시뮬레이션
+        let matrix_size = 1000;
+        let total_elements = matrix_size * matrix_size;
+        let traditional_memory = total_elements * 4; // f32
+        let compressed_memory = std::mem::size_of::<Self>(); // 단일 시드
+        
+        println!("{}x{} 행렬 메모리 사용량:", matrix_size, matrix_size);
+        println!("  기존 방식: {:.1} MB", traditional_memory as f64 / 1_048_576.0);
+        println!("  RBE 방식: {:.1} KB", compressed_memory as f64 / 1024.0);
+        println!("  메모리 절약률: {:.1}%", 
+                (1.0 - compressed_memory as f64 / traditional_memory as f64) * 100.0);
+    }
+    
+    /// 실시간 성능 모니터링
+    pub fn realtime_performance_monitor(duration_secs: u64) {
+        use std::time::{Instant, Duration};
+        use rand::Rng;
+        
+        println!("\n=== 실시간 성능 모니터링 ({} 초) ===", duration_secs);
+        
+        let mut rng = rand::thread_rng();
+        let packed = Self::random(&mut rng);
+        let start_time = Instant::now();
+        let duration = Duration::from_secs(duration_secs);
+        
+        let mut operation_count = 0u64;
+        let mut last_report = Instant::now();
+        let report_interval = Duration::from_millis(500);
+        
+        while start_time.elapsed() < duration {
+            // 다양한 연산 수행
+            for _ in 0..1000 {
+                let i = rng.gen_range(0..100);
+                let j = rng.gen_range(0..100);
+                let _result = packed.fused_forward(i, j, 100, 100);
+                operation_count += 1;
+            }
+            
+            // 주기적 리포트
+            if last_report.elapsed() >= report_interval {
+                let elapsed = start_time.elapsed();
+                let ops_per_sec = operation_count as f64 / elapsed.as_secs_f64();
+                let ns_per_op = elapsed.as_nanos() as f64 / operation_count as f64;
+                
+                println!("[{:.1}s] {:.1} MHz, {:.1} ns/op, {} ops", 
+                        elapsed.as_secs_f64(), ops_per_sec / 1_000_000.0, ns_per_op, operation_count);
+                
+                last_report = Instant::now();
+            }
+        }
+        
+        let final_elapsed = start_time.elapsed();
+        let final_ops_per_sec = operation_count as f64 / final_elapsed.as_secs_f64();
+        
+        println!("최종 성능: {:.1} MHz ({} operations in {:.2}s)", 
+                final_ops_per_sec / 1_000_000.0, operation_count, final_elapsed.as_secs_f64());
+    }
+}
+
+/// 종합 성능 리포트 생성
+pub fn generate_comprehensive_report() {
+    println!("██████████████████████████████████████████████████████████");
+    println!("██  RBE 푸앵카레볼 비트도메인 성능 종합 리포트          ██");
+    println!("██████████████████████████████████████████████████████████");
+    
+    // 속도 측정
+    Packed128::benchmark_speed(1_000_000);
+    
+    // 정확도 측정  
+    Packed128::measure_accuracy(10_000);
+    
+    // 메모리 효율성
+    Packed128::analyze_memory_efficiency();
+    
+    // 실시간 모니터링 (3초간)
+    Packed128::realtime_performance_monitor(3);
+    
+    println!("\n██████████████████████████████████████████████████████████");
+    println!("██  리포트 완료                                        ██");
+    println!("██████████████████████████████████████████████████████████");
 } 
