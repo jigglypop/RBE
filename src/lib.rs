@@ -1,23 +1,24 @@
-//! RBE (Riemannian Basis Encoding) 라이브러리
+//! RBE-LLM: 리만 기저 인코딩 기반 언어 모델 라이브러리
 //!
-//! 푸앵카레 볼 기반 리만 기저 인코딩으로 극한 압축과 성능을 달성하는 라이브러리
+//! 푸앵카레 볼 기하학과 CORDIC 알고리즘을 결합한 압축 시스템
 
 pub mod core;
 
 pub use core::{
-    // 텐서 및 데이터 구조
-    Packed128, Packed64, CycleState, DecodedParams, BitGradientTracker,
-    HYPERBOLIC_LUT_DATA,
+    // 비트 도메인 텐서 타입들
+    Packed128, CycleState, DecodedParams, BitTensor, BitGradientTracker,
     // 비트 도메인 미분 시스템
-    UnifiedForwardPass, UnifiedBackwardPass, DifferentialSystem, DifferentialMetrics,
+    BitForwardPass, BitBackwardPass, DifferentialSystem,
     // 최적화기
-    BitAdamState, BitRiemannianAdamState, OptimizerConfig,
+    BitAdamState, BitRiemannianAdamState, OptimizerType,
+    // 변환 시스템
+    TransformStats, ModelLoader, WeightCompressor, WeightDecompressor,
 };
 
-// 편의 타입 별칭들
+// 편의 타입 별칭
 pub type Packed = Packed128;
 pub type BitOptimizer = BitAdamState;
 pub type RiemannianOptimizer = BitRiemannianAdamState;
-pub type ForwardEngine = UnifiedForwardPass;
-pub type BackwardEngine = UnifiedBackwardPass;
+pub type ForwardEngine = BitForwardPass;
+pub type BackwardEngine = BitBackwardPass;
  

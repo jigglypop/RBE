@@ -1,24 +1,12 @@
-//! # RBE 핵심 라이브러리 모듈
-//!
-//! 푸앵카레 볼 기반 리만 기저 인코딩의 핵심 구성 요소들
+//! RBE 코어 모듈 - 비트 도메인 푸앵카레볼 구현
 
 pub mod tensors;
-pub mod differential;
 pub mod optimizers;
+pub mod differential;
+pub mod transform;
 
-pub use tensors::{
-    packed_types::{Packed128, Packed64, CycleState, DecodedParams, BitGradientTracker},
-    hyperbolic_lut::HYPERBOLIC_LUT_DATA,
-};
-
-pub use differential::{
-    BitForwardPass as UnifiedForwardPass, 
-    BitBackwardPass as UnifiedBackwardPass,
-    DifferentialSystem, DifferentialMetrics,
-    OptimizerType,
-};
-
-pub use optimizers::{
-    BitAdamState, BitRiemannianAdamState,
-    OptimizerConfig, OptimizerType as OptType,
-};
+// 핵심 타입들 re-export
+pub use tensors::{Packed128, CycleState, DecodedParams, BitTensor, BitGradientTracker};
+pub use optimizers::{BitAdamState, BitRiemannianAdamState, OptimizerType};
+pub use differential::{DifferentialSystem, BitForwardPass, BitBackwardPass};
+pub use transform::{TransformStats, ModelLoader, WeightCompressor, WeightDecompressor};
