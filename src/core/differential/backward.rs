@@ -318,7 +318,7 @@ impl BitBackwardPass {
             self.optimizer_integration.active_optimizer_type.clone(),
         )
     }
-
+    
     /// 캐시 초기화
     pub fn clear_cache(&mut self) {
         self.bit_gradient_cache.clear();

@@ -3,6 +3,7 @@
 //! 푸앵카레 볼 기하학과 CORDIC 알고리즘을 결합한 압축 시스템
 
 pub mod core;
+pub mod nlp;
 
 pub use core::{
     // 비트 도메인 텐서 타입들
@@ -14,6 +15,9 @@ pub use core::{
     // 변환 시스템
     TransformStats, ModelLoader, WeightCompressor, WeightDecompressor,
 };
+
+// nlp 모듈 re-export
+pub use nlp::*;
 
 // 편의 타입 별칭
 pub type Packed = Packed128;
