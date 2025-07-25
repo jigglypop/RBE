@@ -4,19 +4,20 @@
 
 pub mod core;
 
-// 핵심 모듈들 재수출
 pub use core::{
     // 텐서 및 데이터 구조
     Packed128, Packed64, CycleState, DecodedParams, BitGradientTracker,
     HYPERBOLIC_LUT_DATA,
-    // 미분 시스템
-    UnifiedCycleDifferentialSystem, StateTransitionEngine,
+    // 비트 도메인 미분 시스템
+    UnifiedForwardPass, UnifiedBackwardPass, DifferentialSystem, DifferentialMetrics,
     // 최적화기
-    BitAdamState, BitRiemannianAdamState, OptimizerConfig, OptimizerType,
+    BitAdamState, BitRiemannianAdamState, OptimizerConfig,
 };
 
 // 편의 타입 별칭들
 pub type Packed = Packed128;
 pub type BitOptimizer = BitAdamState;
 pub type RiemannianOptimizer = BitRiemannianAdamState;
+pub type ForwardEngine = UnifiedForwardPass;
+pub type BackwardEngine = UnifiedBackwardPass;
  
