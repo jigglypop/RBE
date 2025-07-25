@@ -3,7 +3,7 @@
 //! Packed128::fused_forward의 30,904 epoch/s 성능을 활용한
 //! 순수 비트 연산 순전파 시스템
 
-use crate::core::tensors::packed_types::{Packed128, CycleState, BitGradientTracker};
+use crate::core::tensors::packed_types::{Packed128, BitGradientTracker};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -11,9 +11,7 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub struct BitForwardPass {
     /// 비트 연산 캐시 (순수 비트 키)
-    bit_cache: HashMap<(u64, u64, u16, u16), u32>, // (hi, lo, i, j) -> fixed_point_result
-    /// 11비트 사이클 연산 최적화 캐시
-    cycle_cache: HashMap<u16, CycleState>, // cycle_bits -> optimized_state
+    bit_cache: HashMap<(u64, u64, u16, u16), u32>, // (r_data, theta_data, i, j) -> fixed_point_result
     /// 성능 메트릭
     performance_metrics: BitForwardMetrics,
     /// 비트 그래디언트 추적기 (역전파 준비)
@@ -25,8 +23,6 @@ pub struct BitForwardPass {
 pub struct BitForwardConfig {
     /// 비트 캐시 활성화 (30,904 epoch/s 달성용)
     pub enable_bit_cache: bool,
-    /// 11비트 사이클 시스템 최적화 레벨 (0-7)
-    pub cycle_optimization_level: u8,
     /// 고정소수점 정밀도 (Q16.16 vs Q32.32)
     pub fixed_point_precision: u8, // 16 or 32
     /// 병렬 배치 크기
@@ -40,8 +36,6 @@ pub struct BitForwardMetrics {
     pub bit_cache_hit_rate: f32,
     /// 평균 비트 연산 시간 (ns) - 목표: <35ns
     pub avg_bit_computation_ns: f32,
-    /// 11비트 사이클 활용률
-    pub cycle_utilization_rate: f32,
     /// 순수 비트 연산 비율
     pub pure_bit_operation_ratio: f32,
     /// 초당 순전파 수 (goal: 30,904+)
@@ -52,8 +46,7 @@ impl Default for BitForwardConfig {
     fn default() -> Self {
         Self {
             enable_bit_cache: true,
-            cycle_optimization_level: 7, // 최고 최적화
-            fixed_point_precision: 16,   // Q16.16 (속도 우선)
+            fixed_point_precision: 32,   // Q32.32 (정확도 우선)
             parallel_batch_size: 64,     // 64개 배치
         }
     }
@@ -64,7 +57,6 @@ impl BitForwardPass {
     pub fn new(config: BitForwardConfig) -> Self {
         Self {
             bit_cache: HashMap::with_capacity(8192), // 비트 캐시 예약
-            cycle_cache: HashMap::with_capacity(2048), // 11비트 = 2048 가능한 상태
             performance_metrics: BitForwardMetrics::default(),
             bit_tracker: BitGradientTracker::new(1024),
         }
@@ -82,7 +74,7 @@ impl BitForwardPass {
         let start = Instant::now();
         
         // 1. 비트 캐시 확인 (극한 최적화)
-        let cache_key = (packed.hi, packed.lo, i as u16, j as u16);
+        let cache_key = (packed.r_data, packed.theta_data, i as u16, j as u16);
         if let Some(&cached_result) = self.bit_cache.get(&cache_key) {
             self.performance_metrics.bit_cache_hit_rate += 0.01; // 추적
             return Self::fixed_point_to_f32(cached_result);
@@ -129,64 +121,6 @@ impl BitForwardPass {
         results
     }
     
-    /// 11비트 사이클 최적화된 순전파 (간소화)
-    pub fn bit_forward_with_cycle_optimization(
-        &mut self,
-        packed: &Packed128,
-        i: usize,
-        j: usize,
-        rows: usize,
-        cols: usize,
-    ) -> f32 {
-        // 현재 11비트 사이클 상태 추출
-        let current_cycle = packed.get_cycle_state();
-        let cycle_bits = current_cycle.to_bits();
-        
-        // 사이클 캐시 확인
-        if let Some(&optimized_cycle) = self.cycle_cache.get(&cycle_bits) {
-            // 최적화된 사이클로 임시 packed 생성
-            let mut optimized_packed = *packed;
-            optimized_packed.set_cycle_state(optimized_cycle);
-            
-            return self.bit_forward_ultra_fast(&optimized_packed, i, j, rows, cols);
-        }
-        
-        // 사이클 최적화 수행 (간소화)
-        let optimized_cycle = self.optimize_cycle_state(current_cycle);
-        self.cycle_cache.insert(cycle_bits, optimized_cycle);
-        
-        // 최적화된 사이클로 순전파
-        let mut optimized_packed = *packed;
-        optimized_packed.set_cycle_state(optimized_cycle);
-        
-        self.bit_forward_ultra_fast(&optimized_packed, i, j, rows, cols)
-    }
-    
-    /// 11비트 사이클 상태 최적화 (간소화)
-    fn optimize_cycle_state(&self, cycle: CycleState) -> CycleState {
-        // 비트 레벨 최적화: XOR, AND, OR 연산으로 최적 패턴 찾기
-        let original_bits = cycle.to_bits();
-        let mut best_cycle = cycle;
-        let mut best_score = 0u32;
-        
-        // 빠른 비트 패턴 스캔 (8개 후보만 체크)
-        for mask in [0x001, 0x002, 0x004, 0x008, 0x010, 0x020, 0x040, 0x080] {
-            let candidate_bits = original_bits ^ mask; // XOR 변조
-            let candidate_cycle = CycleState::from_bits(candidate_bits);
-            
-            // 간단한 스코어링: 활성 함수 + 사이클 위치
-            let score = candidate_cycle.get_active_function() as u32 * 256 + 
-                       candidate_cycle.get_cycle_position() as u32;
-            
-            if score > best_score {
-                best_score = score;
-                best_cycle = candidate_cycle;
-            }
-        }
-        
-        best_cycle
-    }
-    
     /// 고정소수점 변환 (Q16.16)
     fn f32_to_fixed_point(value: f32) -> u32 {
         (value * 65536.0) as u32
@@ -202,17 +136,15 @@ impl BitForwardPass {
     }
 
     /// 캐시 통계
-    pub fn get_cache_stats(&self) -> (usize, usize, f32) {
+    pub fn get_cache_stats(&self) -> (usize, f32) {
         let bit_cache_size = self.bit_cache.len();
-        let cycle_cache_size = self.cycle_cache.len();
         let hit_rate = self.performance_metrics.bit_cache_hit_rate;
-        (bit_cache_size, cycle_cache_size, hit_rate)
+        (bit_cache_size, hit_rate)
     }
     
     /// 캐시 초기화 (메모리 관리)
     pub fn clear_cache(&mut self) {
         self.bit_cache.clear();
-        self.cycle_cache.clear();
         self.performance_metrics.bit_cache_hit_rate = 0.0;
     }
 }
@@ -222,7 +154,6 @@ impl Default for BitForwardMetrics {
         Self {
             bit_cache_hit_rate: 0.0,
             avg_bit_computation_ns: 35.0, // 목표값
-            cycle_utilization_rate: 0.0,
             pure_bit_operation_ratio: 1.0, // 100% 비트 연산 목표
             forwards_per_second: 0.0,
         }

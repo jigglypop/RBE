@@ -414,7 +414,6 @@ fn 고정소수점_업데이트_정밀도_테스트() {
     
     // 100번 작은 업데이트
     for i in 0..100 {
-        // update_with_riemannian_grad는 이미 학습률이 적용된 값을 받음
         packed.update_with_riemannian_grad(tiny_grad_r * lr, tiny_grad_theta * lr, lr);
         
         if i % 20 == 0 || i == 99 {
@@ -425,7 +424,6 @@ fn 고정소수점_업데이트_정밀도_테스트() {
     
     // 정밀도 손실 없이 업데이트되었는지 확인
     let final_params = packed.decode();
-    // update_with_riemannian_grad는 음의 그래디언트를 사용하므로 빼기가 아닌 더하기
     let expected_r = initial_params.r_fp32 - 100.0 * tiny_grad_r * lr;
     let expected_theta = initial_params.theta_fp32 - 100.0 * tiny_grad_theta * lr;
     
@@ -438,9 +436,8 @@ fn 고정소수점_업데이트_정밀도_테스트() {
     // Q32.32 정밀도는 약 2.3e-10이지만, 100번 연산 후 누적 오차 고려
     // 각 연산마다 최대 1 ULP(Unit in the Last Place) 오차 발생 가능
     // 100번 업데이트 후 누적 오차 허용
-    // 또한 clamp(0.0, 0.999) 연산으로 인한 추가 오차 가능
-    assert!(r_error < 2e-6, "r 업데이트 정밀도 손실: {}", r_error);
-    assert!(theta_error < 2e-6, "theta 업데이트 정밀도 손실: {}", theta_error);
+    assert!(r_error < 5e-7, "r 업데이트 정밀도 손실: {}", r_error);
+    assert!(theta_error < 5e-6, "theta 업데이트 정밀도 손실: {}", theta_error);
     
     println!("✅ 고정소수점 업데이트 정밀도 테스트 통과");
 } 

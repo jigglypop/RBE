@@ -47,30 +47,33 @@ impl BitGradientTracker {
     pub fn register_dependency(&mut self, idx: usize, input: &Packed128, output: &Packed128) {
         // Hi 필드 비트별 그래디언트 계산
         for bit_pos in 0..64 {
-            let input_bit = (input.r_data >> bit_pos) & 1;
-            let output_bit = (output.r_data >> bit_pos) & 1;
+            let input_bit = (input.hi >> bit_pos) & 1;
+            let output_bit = (output.hi >> bit_pos) & 1;
             
             // XOR 연산의 비트 그래디언트
             self.bit_grads[idx][bit_pos] = if input_bit != output_bit { 255 } else { 0 };
         }
         
         // Lo 필드 그래디언트 (고정소수점)
-        let r_input = (input.r_data >> 32) as u32;
-        let r_output = (output.r_data >> 32) as u32;
+        let r_input = (input.lo >> 32) as u32;
+        let r_output = (output.lo >> 32) as u32;
         let grad = ((r_output.wrapping_sub(r_input) >> 24) & 0xFF) as u8;
         self.bit_grads[idx][64] = grad;
     }
 }
 
-/// 128-bit Packed Poincaré 시드 표현 (각 파라미터당 64비트 정밀도)
+/// 64-bit Packed Poincaré 시드 표현 (비트 도메인 CORDIC)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Packed128 {
-    pub r_data: u64,     // r 파라미터 전용 64비트 (Q64 고정소수점)
-    pub theta_data: u64, // theta 파라미터 전용 64비트 (Q64 고정소수점)
+pub struct Packed64 {
+    pub rotations: u64,  // CORDIC 회전 시퀀스
 }
 
-/// 64비트는 이제 더 이상 사용하지 않지만 호환성을 위해 별칭으로 유지
-pub type Packed64 = Packed128;
+/// 128-bit 시드 (64비트만 실제 사용 - 11비트 사이클 제거)
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Packed128 {
+    pub hi: u64,   // 미사용 (향후 확장용 예약)
+    pub lo: u64,   // 연속 파라미터 (고정소수점 Q32.32)
+}
 
 /// 연속 파라미터 디코딩
 #[derive(Debug, Clone, Default)]
@@ -105,9 +108,9 @@ pub const CORDIC_ANGLES_Q32: [u32; 20] = [
 
 
 
-impl Packed128 {
-    pub fn new(r_data: u64, theta_data: u64) -> Self {
-        Packed128 { r_data, theta_data }
+impl Packed64 {
+    pub fn new(rotations: u64) -> Self {
+        Packed64 { rotations }
     }
 
     /// 순수 비트 도메인 CORDIC 가중치 계산
@@ -131,7 +134,7 @@ impl Packed128 {
         
         // 비트 도메인 CORDIC 회전
         for k in 0..20 {
-            let sigma = if (self.r_data >> k) & 1 == 1 { 1 } else { -1 };
+            let sigma = if (self.rotations >> k) & 1 == 1 { 1 } else { -1 };
             
             // 쌍곡 CORDIC (k=4,13에서 반복)
             let (x_shift, y_shift) = if k == 4 || k == 13 {
@@ -259,44 +262,54 @@ impl Packed128 {
         (result_fixed as f32) / 65536.0
     }
     
-    // 기존 메서드들 유지 - 새로운 64비트 정밀도로 업데이트
+    // 기존 메서드들 유지
     pub fn decode(&self) -> DecodedParams {
-        // Q64 → f32 변환 (극도로 높은 정밀도)
-        let r_fp32 = (self.r_data as f64 / 18446744073709551616.0) as f32; // 2^64
-        let theta_fp32 = (self.theta_data as f64 / 18446744073709551616.0 * 2.0 * std::f64::consts::PI) as f32;
+        // lo 필드는 Q32.32 고정소수점
+        let r_q32 = (self.lo >> 32) as u32;
+        let theta_q32 = self.lo as u32;
+        
+        // Q32.32 → f32 변환
+        let r_fp32 = (r_q32 as f32) / 4294967296.0;
+        let theta_fp32 = (theta_q32 as f32) / 4294967296.0 * 2.0 * std::f32::consts::PI;
         
         DecodedParams { r_fp32, theta_fp32 }
     }
     
     pub fn from_continuous(p: &DecodedParams) -> Self {
-        // f32 → Q64 변환 (극도로 높은 정밀도)
+        // f32 → Q32.32 변환 (정밀도 개선)
         let r_clamped = p.r_fp32.clamp(0.0, 0.999999);
-        let r_data = ((r_clamped as f64) * 18446744073709551616.0) as u64; // 2^64
+        let r_q32 = ((r_clamped as f64) * 4294967296.0) as u64;
         
         // theta를 [0, 2π) 범위로 정규화
         let theta_norm = p.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
-        let theta_data = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 18446744073709551616.0) as u64;
+        let theta_q32 = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 4294967296.0) as u64;
         
-        Packed128 { r_data, theta_data }
+        let hi = 0; // 초기 상태
+        let lo = (r_q32 << 32) | (theta_q32 & 0xFFFFFFFF);
+        
+        Packed128 { hi, lo }
     }
 
-    /// 디코딩된 연속 파라미터(r, θ)를 사용하여 현재 `Packed128`을 업데이트합니다.
+    /// 디코딩된 연속 파라미터(r, θ)를 사용하여 현재 `Packed128`의 `lo` 필드를 업데이트합니다.
     pub fn update_from_continuous(&mut self, params: &DecodedParams) {
-        // f32 → Q64 변환
+        // f32 → Q32.32 변환
         let r_clamped = params.r_fp32.clamp(0.0, 0.999999);
-        self.r_data = ((r_clamped as f64) * 18446744073709551616.0) as u64;
+        let r_q32 = ((r_clamped as f64) * 4294967296.0) as u64;
 
         // theta를 [0, 2π) 범위로 정규화
         let theta_norm = params.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
-        self.theta_data = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 18446744073709551616.0) as u64;
+        let theta_q32 = ((theta_norm as f64) / (2.0 * std::f64::consts::PI) * 4294967296.0) as u64;
+
+        // 양자화된 값을 u64로 패킹하여 `lo` 필드에 저장
+        self.lo = (r_q32 << 32) | (theta_q32 & 0xFFFFFFFF);
     }
     
     pub fn random(rng: &mut impl Rng) -> Self {
         let mut seed = Self::default();
         
-        // 각 파라미터를 독립적으로 랜덤 초기화
-        seed.r_data = rng.gen();
-        seed.theta_data = rng.gen();
+        // 모든 비트 랜덤 초기화
+        seed.hi = rng.gen();
+        seed.lo = rng.gen();
         
         seed
     }
@@ -439,12 +452,14 @@ impl Packed128 {
         
         // 구조체 크기 정보
         println!("데이터 구조 크기:");
-        println!("  Packed128: {} bytes", std::mem::size_of::<Packed128>());
+        println!("  Packed64: {} bytes", std::mem::size_of::<Packed64>());
+        println!("  Packed128: {} bytes", std::mem::size_of::<Self>());
         println!("  BitGradientTracker: {} bytes", std::mem::size_of::<BitGradientTracker>());
         
         // 메모리 정렬
         println!("메모리 정렬:");
-        println!("  Packed128: {} bytes", std::mem::align_of::<Packed128>());
+        println!("  Packed64: {} bytes", std::mem::align_of::<Packed64>());
+        println!("  Packed128: {} bytes", std::mem::align_of::<Self>());
         
         // 캐시 라인 효율성 (64바이트 가정)
         let cache_line_size = 64;
@@ -631,7 +646,7 @@ impl Packed128 {
         
         // r 업데이트 (경계 고려) - update_r에는 이미 학습률이 적용되어 있음
         let new_r = params.r_fp32 - update_r;
-        params.r_fp32 = new_r.clamp(1e-6, 0.999); // 0이 되는 것을 방지
+        params.r_fp32 = new_r.clamp(0.0, 0.999); // 1에 매우 가까워지지 않도록 함
         
         // theta 업데이트 (순환 구조) - update_theta에도 이미 학습률이 적용되어 있음
         params.theta_fp32 = (params.theta_fp32 - update_theta).rem_euclid(2.0 * std::f32::consts::PI);

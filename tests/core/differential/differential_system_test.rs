@@ -14,7 +14,7 @@ fn differential_시스템_통합_성능_테스트() {
     let mut packed = Packed128::random(&mut rng);
     
     let matrix_size = 64;
-    let epochs = 3000;
+    let epochs = 5000; // 정확도 우선: 더 많은 에포크
     
     println!("📊 매트릭스: {}x{}, 에포크: {}", matrix_size, matrix_size, epochs);
     
@@ -34,10 +34,10 @@ fn differential_시스템_통합_성능_테스트() {
     
     // **핵심**: DifferentialSystem의 unified_forward_backward 사용
     for epoch in 0..epochs {
-        let learning_rate = if epoch < 1000 { 0.02 } else { 0.008 };
+        let learning_rate = if epoch < 1500 { 0.003 } else if epoch < 3500 { 0.001 } else { 0.0005 }; // 정확도 우선: 점진적 감소
         
-        // 매 에포크마다 24개 위치 샘플링
-        for sample in 0..24 {
+        // 매 에포크마다 32개 위치 샘플링 (정확도 우선)
+        for sample in 0..32 {
             let i = (epoch + sample) % matrix_size;
             let j = (epoch + sample * 5) % matrix_size;
             let target = target_pattern[i][j];

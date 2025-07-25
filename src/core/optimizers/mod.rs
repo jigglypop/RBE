@@ -16,6 +16,7 @@ pub enum OptimizerType {
     BitRiemannianAdam,
     SGD,
     RMSprop,
+    Hybrid, // 상황에 따라 자동 선택
 } 
 
 #[cfg(test)]

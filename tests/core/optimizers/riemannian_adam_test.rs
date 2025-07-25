@@ -55,12 +55,9 @@ fn 지수사상_및_뫼비우스변환_테스트() {
     
     for (x, v) in test_cases {
         let result = state.mobius_transform(x, v, 1.0); // mobius_transform은 exponential_map을 호출
-        
         println!("   exp_{:.2}({:.2}) = {:.4}", x, v, result);
-        
         // 결과는 항상 푸앵카레볼 내부
         assert!(result.abs() < 1.0, "결과가 단위구 내부에 있어야 함");
-        
         // v=0이면 변화 없음
         if v.abs() < 1e-6 {
             assert!((result - x).abs() < 1e-6, "v=0일 때 변화 없음");
@@ -119,16 +116,13 @@ fn 비트리만아담_수렴성_테스트() {
         r_fp32: 0.3,
         theta_fp32: PI / 6.0,
     });
-    
     // 단순 목표: (i, j) 위치에서 특정 값 출력
     let target_pattern = |i: usize, j: usize| -> f32 {
         ((i as f32 / 10.0).sin() + (j as f32 / 10.0).cos()) * 0.5
     };
-    
     let mut losses = Vec::new();
-    
     // 500 에폭 학습
-    for epoch in 0..500 {
+    for epoch in 0..2500 {
         let mut epoch_loss = 0.0;
         
         // 단일 포인트(0,0)에서만 학습하도록 변경하여 순수한 수렴성을 테스트

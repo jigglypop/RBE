@@ -161,10 +161,10 @@ impl WeightCompressor {
             
             // 비트 돌연변이
             if rng.gen::<f32>() < 0.3 {
-                child.hi ^= 1u64 << rng.gen_range(0..64);
+                child.r_data ^= 1u64 << rng.gen_range(0..64);
             }
             if rng.gen::<f32>() < 0.3 {
-                child.lo ^= 1u64 << rng.gen_range(0..64);
+                child.theta_data ^= 1u64 << rng.gen_range(0..64);
             }
             
             new_pop.push(child);
