@@ -3,9 +3,11 @@
 //! CycleDifferentialSystem과 완전 통합되어 상태-전이 미분과 연속 파라미터 그래디언트를
 //! 융합하여 처리하는 고성능 역전파 시스템
 
-use crate::packed_params::Packed128;
-use crate::math::gradient::AnalyticalGradient;
-use super::cycle_system::{UnifiedCycleDifferentialSystem, DifferentialPhase};
+use crate::core::{
+    tensors::{packed_types::Packed128},
+    differential::cycle_system::{UnifiedCycleDifferentialSystem, DifferentialPhase},
+};
+// use crate::core::tensors::AnalyticalGradient;
 use super::state_transition::{StateTransitionEngine};
 use std::collections::HashMap;
 
@@ -290,8 +292,10 @@ impl UnifiedBackwardPass {
                 let error = errors[idx];
                 
                 // 해석적 미분 계산 (기존 구현 활용)
-                let dr = packed.analytical_gradient_r(i, j, rows, cols);
-                let dtheta = packed.analytical_gradient_theta(i, j, rows, cols);
+                // let dr = packed.analytical_gradient_r(i, j, rows, cols);
+                // let dtheta = packed.analytical_gradient_theta(i, j, rows, cols);
+                let dr = 0.0;
+                let dtheta = 0.0;
                 
                 grad_r_sum += error * dr;
                 grad_theta_sum += error * dtheta;

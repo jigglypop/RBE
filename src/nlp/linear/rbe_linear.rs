@@ -1,9 +1,11 @@
-use crate::core::{
-    encoder::encoder::RBEEncoder,
-    packed_params::{HybridEncodedBlock, TransformType},
-    systems::core_layer::EncodedLayer,
+use crate::{
+    core::{
+        decoder::optimized_decoder::OptimizedDecoder,
+        tensors::{HybridEncodedBlock, TransformType},
+    },
+    RBEParameters,
 };
-use anyhow::Result;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::sync::Arc;
 use rayon::prelude::*;
 

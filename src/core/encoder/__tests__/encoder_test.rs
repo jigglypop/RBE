@@ -1,5 +1,5 @@
 use super::super::encoder::{AutoOptimizedEncoder, QualityGrade, CompressionConfig, RBEEncoder};
-use crate::packed_params::{TransformType, HybridEncodedBlock};
+use crate::core::packed_params::{TransformType, HybridEncodedBlock};
 
 fn generate_test_data(size: usize) -> Vec<f32> {
     (0..size * size)

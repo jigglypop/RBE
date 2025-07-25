@@ -1,6 +1,6 @@
 //! 그리드 압축 매트릭스 디코딩 기능
 
-use crate::encoder::GridCompressedMatrix;
+use crate::core::encoder::GridCompressedMatrix;
 use rayon::prelude::*;
 
 impl GridCompressedMatrix {

@@ -1,6 +1,6 @@
 //! 5단계 가중치 생성 파이프라인
 
-use crate::packed_params::{PoincarePackedBit128, PoincareQuadrant};
+use crate::core::packed_params::{PoincarePackedBit128, PoincareQuadrant};
 use super::cordic::{hyperbolic_cordic, POINCARE_BOUNDARY};
 use libm;
 

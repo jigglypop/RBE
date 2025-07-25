@@ -4,10 +4,7 @@
 
 pub mod encoder;
 pub mod decoder;
-pub mod math;
-pub mod matrix;
 pub mod optimizers;
-pub mod systems;
 pub mod generator;
 pub mod differential; // 새로운 통합 미분 시스템
 pub mod tensors;
@@ -18,13 +15,29 @@ pub mod packed_params {
     pub use super::tensors::*;
 }
 
-// 주요 타입들 재수출
-pub use encoder::*;
-pub use decoder::*;
-pub use packed_params::*;
-pub use systems::*;
-pub use generator::*;
-pub use differential::*; // 새로운 미분 시스템 타입들
-// tensors는 packed_params를 통해 이미 노출됨
+// 주요 타입들 재수출 - 중복 방지를 위해 선택적으로 수출
+pub use encoder::{RBEEncoder, CompressionConfig, CompressionProfile, QualityGrade};
+pub use decoder::{FusedForwardPass, WeightGenerator};
+pub use tensors::{
+    Packed128, TransformType, ResidualCoefficient, 
+    HybridEncodedBlock, EncodedBlockGradients, RbeParameters,
+    BasisFunction, HyperbolicBasisFunction,
+    PoincareMatrix, PoincarePackedBit128, PoincareQuadrant,
+};
+pub use generator::{
+    StateTransition, ConstraintProjection, 
+    RegularizationTerms, ConvergenceAnalyzer
+};
+pub use differential::{
+    DifferentialSystem, UnifiedCycleDifferentialSystem, CycleState,
+    UnifiedForwardPass, ForwardConfig, ForwardMetrics,
+    UnifiedBackwardPass, BackwardConfig, GradientMetrics,
+    StateTransitionEngine, TransitionRule, StateTransitionMetrics,
+    DifferentialPhase, HyperbolicFunction,
+};
+pub use optimizers::{
+    AdamState, RiemannianAdamState, TransformAnalyzer,
+    OptimizerConfig, AdamConfig, RiemannianAdamConfig, OptimizerType,
+};
 
 // 각 모듈이 자체 테스트를 포함함

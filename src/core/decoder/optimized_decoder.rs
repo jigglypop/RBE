@@ -1,6 +1,6 @@
 //! 최적화된 하이브리드 블록 디코더 (병렬 + SIMD + 메모리 최적화)
 
-use crate::packed_params::{HybridEncodedBlock, TransformType};
+use crate::core::packed_params::{HybridEncodedBlock, TransformType};
 use nalgebra::{DMatrix, DVector};
 use ndarray::{Array1, Array2};
 use omni_wave::{wavelet as w, completely_reconstruct_2d};
@@ -112,7 +112,7 @@ fn get_cached_a_matrix_simd(rows: usize, cols: usize) -> DMatrix<f32> {
 
 /// 최적화된 잔차 디코딩
 fn decode_residuals_optimized(
-    residuals: &[crate::packed_params::ResidualCoefficient], 
+    residuals: &[crate::core::packed_params::ResidualCoefficient], 
     rows: usize, 
     cols: usize, 
     transform_type: TransformType
@@ -142,7 +142,7 @@ fn decode_residuals_optimized(
 
 /// 최적화된 DWT 잔차 디코딩
 fn decode_dwt_residuals_optimized(
-    residuals: &[crate::packed_params::ResidualCoefficient], 
+    residuals: &[crate::core::packed_params::ResidualCoefficient], 
     rows: usize, 
     cols: usize
 ) -> Vec<f32> {

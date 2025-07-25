@@ -1,5 +1,5 @@
 use crate::core::differential::*;
-use crate::packed_params::Packed128;
+use crate::core::packed_params::Packed128;
 
 #[test]
 fn test_differential_system_creation() {

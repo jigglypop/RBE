@@ -1,4 +1,4 @@
-use crate::packed_params::{TransformType, HybridEncodedBlock, ResidualCoefficient};
+use crate::core::packed_params::{TransformType, HybridEncodedBlock, ResidualCoefficient};
 use std::time::Instant;
 use rayon::prelude::*;
 use nalgebra::{DMatrix, DVector, RowDVector};

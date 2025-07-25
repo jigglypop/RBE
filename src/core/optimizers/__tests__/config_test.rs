@@ -2,7 +2,7 @@ use crate::core::optimizers::{
     OptimizerConfig, AdamConfig, RiemannianAdamConfig, OptimizerType
 };
 use crate::core::optimizers::config::LearningRateSchedule;
-use crate::packed_params::TransformType;
+use crate::core::packed_params::TransformType;
 
 #[test]
 fn 옵티마이저구성_기본값_테스트() {
