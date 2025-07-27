@@ -4,3 +4,4 @@ compressed_models
 models
 models/
 models/*
+.env
