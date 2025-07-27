@@ -9,7 +9,7 @@ use crate::nlp::{
     dropout::RBEDropout,
 };
 
-/// Candle과 RBE 구현 비교 테스트
+/// Candle과 RBE 구현 비교 테스트 //
 #[cfg(test)]
 mod candle_comparison_tests {
     use super::*;
