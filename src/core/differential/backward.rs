@@ -104,7 +104,7 @@ impl BitBackwardPass {
         let error = predicted - target;
 
         // 캐시 키 생성 (r_data, theta_data 기반)
-        let cache_key = (packed.r_data, packed.theta_data);
+        let cache_key = (packed.hi, packed.lo);
         let mut cache_hit = false;
 
         if self.config.enable_bit_gradient_cache {

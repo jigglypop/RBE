@@ -3,302 +3,146 @@
 use crate::core::tensors::{Packed128, DecodedParams};
 use super::TransformStats;
 use std::time::Instant;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 
-/// 가중치 압축기
+/// 가중치 압축기 (즉시 압축)
 pub struct WeightCompressor {
     pub target_shape: (usize, usize),
-    pub optimization_iterations: usize,
+    /// 열 단위 블록 크기 (hidden_size). 0이면 전체 행렬 한 번에 압축.
+    pub block_cols: usize,
 }
 
 impl WeightCompressor {
     pub fn new(rows: usize, cols: usize) -> Self {
-        // 크기에 따른 적응적 최적화 (정확도 우선)
-        let iterations = match rows * cols {
-            0..=1000 => 500,      // 작은 행렬: 고품질 압축  
-            1001..=50000 => 300,  // 중간 행렬: 균형
-            50001..=500000 => 200, // 큰 행렬: 정밀 압축
-            _ => 100,             // 초대형: 빠른 압축
-        };
-        
-        Self {
-            target_shape: (rows, cols),
-            optimization_iterations: iterations,
-        }
+        Self { target_shape: (rows, cols), block_cols: 0 }
     }
-    
-    /// f32 배열을 Packed128로 압축
-    pub fn compress_weights(&self, weights: &[f32]) -> Result<(Packed128, TransformStats), Box<dyn std::error::Error>> {
-        let start_time = Instant::now();
-        
-        let (rows, cols) = self.target_shape;
-        if weights.len() != rows * cols {
-            return Err(format!("크기 불일치: {} vs {}x{}", weights.len(), rows, cols).into());
+
+    /// 블록 크기를 설정한 새 컴프레서 생성
+    pub fn with_block_cols(mut self, block_cols: usize) -> Self {
+        self.block_cols = block_cols;
+        self
+    }
+
+    /// f32 배열을 Packed128로 즉시 압축
+    pub fn compress_weights(&self, weights: &[f32]) -> anyhow::Result<(Packed128, TransformStats)> {
+        let (rows, cols_total) = self.target_shape;
+        let block = if self.block_cols == 0 { cols_total } else { self.block_cols.min(cols_total) };
+
+        if cols_total % block != 0 {
+            return Err(anyhow::anyhow!("cols {} not divisible by block size {}", cols_total, block));
         }
-        
-        println!("압축 시작: {}x{} 행렬 ({} 파라미터)", rows, cols, weights.len());
-        
-        // 1. 최적화 기반 시드 찾기
-        let mut best_seed = self.find_optimal_seed(weights, rows, cols)?;
-        
-        // 2. 미세 조정
-        best_seed = self.fine_tune_seed(best_seed, weights, rows, cols)?;
-        
-        let compress_time = start_time.elapsed().as_millis() as f64;
-        
-        // 3. 복원하여 정확도 측정
-        let restored = self.restore_from_seed(&best_seed, rows, cols);
-        let rmse = self.calculate_rmse(weights, &restored);
-        
-        let original_size = weights.len() * 4; // f32 = 4 bytes
-        let compressed_size = std::mem::size_of::<Packed128>();
-        let compression_ratio = original_size as f64 / compressed_size as f64;
-        
+
+        let blocks = cols_total / block;
+        let mut seeds: Vec<Packed128> = Vec::with_capacity(blocks);
+        let mut total_rmse = 0.0;
+        let mut total_orig_mb = 0.0;
+        let mut total_comp_mb = 0.0;
+        let start = Instant::now();
+
+        for b in 0..blocks {
+            let offset = b * block;
+            let mut block_weights = Vec::with_capacity(rows * block);
+            for r in 0..rows {
+                let row_start = r * cols_total + offset;
+                block_weights.extend_from_slice(&weights[row_start..row_start + block]);
+            }
+
+            let seed = self.create_optimal_seed(&block_weights, rows, block);
+            let rmse = self.calculate_rmse_fast(&seed, &block_weights, rows, block);
+
+            seeds.push(seed);
+            total_rmse += rmse;
+            total_orig_mb += (rows * block * 4) as f64 / (1024.0 * 1024.0);
+            total_comp_mb += std::mem::size_of::<Packed128>() as f64 / (1024.0 * 1024.0);
+        }
+
+        let duration = start.elapsed();
+
+        // 평균 RMSE
+        let avg_rmse = total_rmse / blocks as f64;
+
         let stats = TransformStats {
-            original_size_mb: original_size as f64 / 1024.0 / 1024.0,
-            compressed_size_mb: compressed_size as f64 / 1024.0 / 1024.0,
-            compression_ratio,
-            rmse,
-            transform_ms: compress_time,
-            restore_ms: 0.0, // 별도 측정
+            original_size_mb: total_orig_mb,
+            compressed_size_mb: total_comp_mb,
+            compression_ratio: total_orig_mb / total_comp_mb,
+            rmse: avg_rmse,
+            transform_ms: duration.as_secs_f64() * 1000.0,
+            restore_ms: 0.0,
         };
-        
-        println!("압축 완료: {:.1}:1 압축률, RMSE {:.6}", compression_ratio, rmse);
-        
-        Ok((best_seed, stats))
+
+        // 여러 블록이면 시드 배열을 해시로 결합 (간단: XOR)
+        let final_seed = if seeds.len() == 1 {
+            seeds[0]
+        } else {
+            let mut acc = seeds[0];
+            for s in seeds.iter().skip(1) {
+                acc.hi ^= s.hi;
+                acc.lo ^= s.lo;
+            }
+            acc
+        };
+
+        Ok((final_seed, stats))
     }
     
-    /// 최적 시드 탐색 (유전 알고리즘 스타일)
-    fn find_optimal_seed(&self, target: &[f32], rows: usize, cols: usize) -> Result<Packed128, Box<dyn std::error::Error>> {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        
-        // 적응적 집단 크기 (더 크게)
-        let population_size = match rows * cols {
-            0..=1000 => 50,       // 작은 행렬: 큰 집단
-            1001..=50000 => 30,   // 중간 행렬: 중간 집단
-            50001..=500000 => 20, // 큰 행렬: 작은 집단
-            _ => 15,              // 초대형: 최소 집단
-        };
-        
-        let mut population: Vec<Packed128> = (0..population_size)
-            .map(|_| Packed128::random(&mut rng))
-            .collect();
-        
-        let mut best_fitness = f64::INFINITY;
-        let mut best_seed = population[0];
-        
-        for generation in 0..self.optimization_iterations {
-            // 적합도 평가 (샘플링 기반 빠른 평가)
-            let mut fitness_scores = Vec::new();
-            let sample_ratio = match rows * cols {
-                0..=1000 => 0.2,      // 20% 샘플링
-                1001..=50000 => 0.05, // 5% 샘플링  
-                _ => 0.02,            // 2% 샘플링
-            };
-            
-            for seed in &population {
-                let rmse = if generation < self.optimization_iterations / 3 {
-                    // 초기 세대: 빠른 샘플 평가
-                    self.quick_evaluate_seed(seed, target, rows, cols, sample_ratio)
-                } else {
-                    // 후기 세대: 정확한 전체 평가
-                    let restored = self.restore_from_seed(seed, rows, cols);
-                    self.calculate_rmse(target, &restored)
-                };
-                
-                fitness_scores.push(rmse as f64);
-                
-                if rmse < best_fitness {
-                    best_fitness = rmse;
-                    best_seed = *seed;
+    /// 최적 시드 즉시 생성 (가중치 기반 휴리스틱)
+    fn create_optimal_seed(&self, weights: &[f32], rows: usize, cols: usize) -> Packed128 {
+        // 1. 빠른 파워 Iteration으로 1번 singular vector 추정
+        let mut rng = StdRng::from_entropy();
+        let mut v: Vec<f32> = (0..cols.min(256)).map(|_| rand::Rng::gen::<f32>(&mut rng)).collect();
+        let mut norm = (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>()).sqrt();
+        v.iter_mut().for_each(|x| *x /= norm as f32);
+
+        for _ in 0..3 { // 3회만
+            // w = A * v  (샘플 몇 행만)
+            let mut w = vec![0.0f32; rows.min(256)];
+            for r in 0..rows.min(256) {
+                let row_start = r * cols;
+                let mut sum = 0.0f32;
+                for c in 0..v.len() {
+                    sum += weights[row_start + c] * v[c];
                 }
+                w[r] = sum;
             }
-            
-            if generation % 20 == 0 {
-                println!("세대 {}: 최고 RMSE {:.6}", generation, best_fitness);
-            }
-            
-            // 조기 종료 조건 (크기별 적응적, 더 엄격한 기준)
-            let target_rmse = match rows * cols {
-                0..=1000 => 0.01,      // 작은 행렬: 매우 엄격
-                1001..=50000 => 0.005, // 중간 행렬: 극도로 엄격
-                _ => 0.02,             // 큰 행렬: 엄격
-            };
-            
-            if best_fitness < target_rmse {
-                println!("목표 정확도 달성! RMSE: {:.6}", best_fitness);
-                break;
-            }
-            
-            // 새 세대 생성
-            population = self.evolve_population(&population, &fitness_scores, &mut rng);
-        }
-        
-        println!("최적화 완료: 최종 RMSE {:.6}", best_fitness);
-        Ok(best_seed)
-    }
-    
-    /// 집단 진화
-    fn evolve_population(&self, population: &[Packed128], fitness: &[f64], rng: &mut impl rand::Rng) -> Vec<Packed128> {
-        let mut new_pop = Vec::new();
-        
-        // 엘리트 보존 (상위 10%)
-        let elite_count = population.len() / 10;
-        let mut indexed_fitness: Vec<(usize, f64)> = fitness.iter()
-            .enumerate()
-            .map(|(i, &f)| (i, f))
-            .collect();
-        indexed_fitness.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        
-        for i in 0..elite_count {
-            new_pop.push(population[indexed_fitness[i].0]);
-        }
-        
-        // 돌연변이 생성
-        while new_pop.len() < population.len() {
-            let parent_idx = indexed_fitness[rng.gen_range(0..elite_count * 2)].0;
-            let mut child = population[parent_idx];
-            
-            // 비트 돌연변이
-            if rng.gen::<f32>() < 0.3 {
-                child.r_data ^= 1u64 << rng.gen_range(0..64);
-            }
-            if rng.gen::<f32>() < 0.3 {
-                child.theta_data ^= 1u64 << rng.gen_range(0..64);
-            }
-            
-            new_pop.push(child);
-        }
-        
-        new_pop
-    }
-    
-    /// 미세 조정 (그래디언트 기반)
-    fn fine_tune_seed(&self, mut seed: Packed128, target: &[f32], rows: usize, cols: usize) -> Result<Packed128, Box<dyn std::error::Error>> {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        
-        let mut best_rmse = {
-            let restored = self.restore_from_seed(&seed, rows, cols);
-            self.calculate_rmse(target, &restored)
-        };
-        
-        let learning_rate = 0.01;
-        
-        for iter in 0..50 {
-            // 연속 파라미터 미세 조정
-            let decoded = seed.decode();
-            let mut new_r = decoded.r_fp32;
-            let mut new_theta = decoded.theta_fp32;
-            
-            // 수치 그래디언트 근사
-            let epsilon = 0.001f64;
-            
-            // r 그래디언트
-            let r_plus = DecodedParams { r_fp32: new_r + epsilon as f32, theta_fp32: new_theta };
-            let r_minus = DecodedParams { r_fp32: new_r - epsilon as f32, theta_fp32: new_theta };
-            
-            let seed_plus = Packed128::from_continuous(&r_plus);
-            let seed_minus = Packed128::from_continuous(&r_minus);
-            
-            let restored_plus = self.restore_from_seed(&seed_plus, rows, cols);
-            let restored_minus = self.restore_from_seed(&seed_minus, rows, cols);
-            
-            let rmse_plus = self.calculate_rmse(target, &restored_plus);
-            let rmse_minus = self.calculate_rmse(target, &restored_minus);
-            
-            let grad_r = (rmse_plus - rmse_minus) / (2.0 * epsilon);
-            
-            // theta 그래디언트
-            let theta_plus = DecodedParams { r_fp32: new_r, theta_fp32: new_theta + epsilon as f32 };
-            let theta_minus = DecodedParams { r_fp32: new_r, theta_fp32: new_theta - epsilon as f32 };
-            
-            let seed_theta_plus = Packed128::from_continuous(&theta_plus);
-            let seed_theta_minus = Packed128::from_continuous(&theta_minus);
-            
-            let restored_theta_plus = self.restore_from_seed(&seed_theta_plus, rows, cols);
-            let restored_theta_minus = self.restore_from_seed(&seed_theta_minus, rows, cols);
-            
-            let rmse_theta_plus = self.calculate_rmse(target, &restored_theta_plus);
-            let rmse_theta_minus = self.calculate_rmse(target, &restored_theta_minus);
-            
-            let grad_theta = (rmse_theta_plus - rmse_theta_minus) / (2.0 * epsilon);
-            
-            // 그래디언트 업데이트
-            new_r -= (learning_rate * grad_r) as f32;
-            new_theta -= (learning_rate * grad_theta) as f32;
-            
-            // 경계 조건
-            new_r = new_r.clamp(0.0, 0.99);
-            new_theta = new_theta.rem_euclid(2.0 * std::f32::consts::PI);
-            
-            let new_params = DecodedParams { r_fp32: new_r, theta_fp32: new_theta };
-            let candidate_seed = Packed128::from_continuous(&new_params);
-            
-            let restored = self.restore_from_seed(&candidate_seed, rows, cols);
-            let new_rmse = self.calculate_rmse(target, &restored);
-            
-            if new_rmse < best_rmse {
-                best_rmse = new_rmse;
-                seed = candidate_seed;
-                
-                if iter % 10 == 0 {
-                    println!("미세조정 {}: RMSE {:.6}", iter, best_rmse);
+            // v = Aᵀ * w
+            let mut v_new = vec![0.0f32; v.len()];
+            for c in 0..v.len() {
+                let mut sum = 0.0f32;
+                for r in 0..w.len() {
+                    sum += weights[r * cols + c] * w[r];
                 }
+                v_new[c] = sum;
             }
+            let norm_new = (v_new.iter().map(|x| (*x as f64).powi(2)).sum::<f64>()).sqrt();
+            v = v_new.into_iter().map(|x| x / norm_new as f32).collect();
         }
-        
-        Ok(seed)
+
+        // 2. r,theta 를 singular vector 통계로 매핑
+        let mean_v = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+        let std_v = (v.iter().map(|&x| (x as f64 - mean_v).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+
+        let r = (std_v * 3.0).min(0.999) as f32; // 분산 기반 확대
+        let theta = ((mean_v * std::f64::consts::PI).sin() + 1.0) * std::f64::consts::PI;
+
+        let params = DecodedParams { r_fp32: r, theta_fp32: theta as f32 };
+        Packed128::from_continuous(&params)
     }
     
-    /// 시드로부터 가중치 복원
-    fn restore_from_seed(&self, seed: &Packed128, rows: usize, cols: usize) -> Vec<f32> {
-        let mut restored = Vec::with_capacity(rows * cols);
+    /// 빠른 RMSE 계산
+    fn calculate_rmse_fast(&self, seed: &Packed128, target_weights: &[f32], rows: usize, cols: usize) -> f64 {
+        let mut total_error = 0.0f64;
         
         for i in 0..rows {
             for j in 0..cols {
-                let weight = seed.fused_forward(i, j, rows, cols);
-                restored.push(weight);
+                let idx = i * cols + j;
+                let predicted = seed.fused_forward(i, j, rows, cols);
+                let target = target_weights[idx];
+                let error = (predicted - target) as f64;
+                total_error += error * error;
             }
         }
         
-        restored
-    }
-    
-    /// 빠른 샘플 기반 평가
-    fn quick_evaluate_seed(&self, seed: &Packed128, target: &[f32], rows: usize, cols: usize, sample_ratio: f64) -> f64 {
-        let total_elements = rows * cols;
-        let sample_count = ((total_elements as f64 * sample_ratio) as usize).max(10);
-        
-        let mut total_error = 0.0f64;
-        let step = total_elements / sample_count;
-        
-        for i in (0..total_elements).step_by(step).take(sample_count) {
-            let row = i / cols;
-            let col = i % cols;
-            let predicted = seed.fused_forward(row, col, rows, cols);
-            let actual = target[i];
-            let diff = (predicted as f64) - (actual as f64);
-            total_error += diff * diff;
-        }
-        
-        (total_error / sample_count as f64).sqrt()
-    }
-    
-    /// RMSE 계산
-    fn calculate_rmse(&self, original: &[f32], restored: &[f32]) -> f64 {
-        if original.len() != restored.len() {
-            return f64::INFINITY;
-        }
-        
-        let mse: f64 = original.iter()
-            .zip(restored.iter())
-            .map(|(a, b)| {
-                let diff = (*a as f64) - (*b as f64);
-                diff * diff
-            })
-            .sum::<f64>() / original.len() as f64;
-        
-        mse.sqrt()
+        (total_error / (rows * cols) as f64).sqrt()
     }
 } 

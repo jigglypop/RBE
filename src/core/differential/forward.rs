@@ -74,7 +74,7 @@ impl BitForwardPass {
         let start = Instant::now();
         
         // 1. 비트 캐시 확인 (극한 최적화)
-        let cache_key = (packed.r_data, packed.theta_data, i as u16, j as u16);
+        let cache_key = (packed.hi, packed.lo, i as u16, j as u16);
         if let Some(&cached_result) = self.bit_cache.get(&cache_key) {
             self.performance_metrics.bit_cache_hit_rate += 0.01; // 추적
             return Self::fixed_point_to_f32(cached_result);

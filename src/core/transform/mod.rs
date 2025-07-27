@@ -9,7 +9,7 @@ pub use compress::*;
 pub use restore::*;
 
 /// 변환 통계
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransformStats {
     pub original_size_mb: f64,
     pub compressed_size_mb: f64,

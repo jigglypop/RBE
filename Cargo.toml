@@ -3,11 +3,10 @@ name = "rbe_llm"
 version = "0.1.0"
 edition = "2021"
 
-# Executables (commented out for now)
-
-# [[bin]]
-# name = "korean-rbe"
-# path = "src/bin/korean_rbe.rs"
+# Executables
+[[bin]]
+name = "korean-chat"
+path = "examples/korean_llm_demo.rs"
 
 [dependencies]
 # 기존 의존성들
@@ -39,6 +38,7 @@ warp = "0.3"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 env_logger = "0.10"
+dotenv = "0.15"
 
 # 모델 로딩 및 처리
 safetensors = "0.4"
@@ -51,8 +51,6 @@ numpy = { version = "0.21", optional = true }
 
 # 토크나이저
 tokenizers = "0.21"
-candle-core = "0.9.1"
-candle-nn = "0.9.1"
 candle-transformers = "0.9.1"
 bincode = "2.0.0-rc.3"
 once_cell = "1.21.3"

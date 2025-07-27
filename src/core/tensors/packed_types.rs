@@ -69,7 +69,7 @@ pub struct Packed64 {
 }
 
 /// 128-bit 시드 (64비트만 실제 사용 - 11비트 사이클 제거)
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Packed128 {
     pub hi: u64,   // 미사용 (향후 확장용 예약)
     pub lo: u64,   // 연속 파라미터 (고정소수점 Q32.32)
@@ -224,8 +224,19 @@ impl Packed64 {
 impl Packed128 {
     /// 순수 비트 도메인 fused forward
     pub fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
-        // 새로운 푸앵카레볼 기하학 버전 사용
-        self.fused_forward_poincare(i, j, rows, cols)
+        // 1. 1차 Poincaré 매핑
+        let base = self.fused_forward_poincare(i, j, rows, cols);
+
+        // 2. 2차 보정항 (r^2 · x · y)
+        let params = self.decode();
+
+        // 정규화된 좌표 (-0.5 ~ 0.5)
+        let x = i as f32 / (rows.max(1) - 1) as f32 - 0.5;
+        let y = j as f32 / (cols.max(1) - 1) as f32 - 0.5;
+
+        let quad = 0.5 * params.r_fp32.powi(2) * x * y;
+
+        base + quad
     }
     
     /// 비트 패턴 변조 (곱셈 없이)

@@ -1,10 +1,9 @@
 //! RBE 압축 가중치를 사용한 BERT 모델 추론
-use anyhow::{bail, Result};
-use crate::{
-    decoder::WeightGenerator,
-    HybridEncodedBlock,
+use anyhow::{Result, bail};
+use crate::core::{
+    transform::{WeightCompressor, TransformStats},
+    tensors::Packed128,
 };
-use std::ops::{AddAssign, MulAssign};
 
 // --- Helper Functions ---
 
