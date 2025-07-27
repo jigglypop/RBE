@@ -1,6 +1,6 @@
 //! 융합 순전파 (Fused Forward Pass) 구현
 
-use crate::core::packed_params::{PoincarePackedBit128, PoincareQuadrant};
+use crate::core::tensors::Packed128;
 use super::weight_generator::WeightGenerator;
 
 /// 융합 순전파 (Fused Forward Pass) 구현 (문서 3.4)
@@ -21,7 +21,7 @@ impl FusedForwardPass {
     /// 가중치를 즉석에서 생성하며 벡터-행렬 곱셈 수행
     pub fn fused_gemv(
         &self,
-        weight_seeds: &[PoincarePackedBit128],
+        weight_seeds: &[Packed128],
         input_vector: &[f32],
         output_vector: &mut [f32],
         rows: usize,
@@ -53,7 +53,7 @@ impl FusedForwardPass {
     /// 블록 기반 융합 GEMV (문서 3.4.2)
     pub fn block_fused_gemv(
         &self,
-        weight_seeds: &[Vec<PoincarePackedBit128>], // [block_rows][block_cols]
+        weight_seeds: &[Vec<Packed128>], // [block_rows][block_cols]
         input_vector: &[f32],
         output_vector: &mut [f32],
         block_height: usize,
@@ -103,8 +103,8 @@ impl FusedForwardPass {
 impl WeightGenerator {
     /// 경계 조건 안정성 테스트
     pub fn test_boundary_stability_extended(&self) -> bool {
-        let packed = PoincarePackedBit128::new(
-            PoincareQuadrant::First,
+        let packed = Packed128::new(
+            // PoincareQuadrant::First, // This line is removed as PoincareQuadrant is removed
             2048, 2048, 32, 0x12345678,
             0.99, 0.0 // 경계 근처 값
         );

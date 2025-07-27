@@ -1,6 +1,6 @@
 //! 5단계 가중치 생성 파이프라인
 
-use crate::core::packed_params::{PoincarePackedBit128, PoincareQuadrant};
+use crate::core::tensors::{Packed128};
 use super::cordic::{hyperbolic_cordic, POINCARE_BOUNDARY};
 use libm;
 
@@ -40,7 +40,7 @@ impl WeightGenerator {
     /// 단일 가중치 생성 (5단계 파이프라인)
     pub fn generate_weight(
         &self,
-        packed: &PoincarePackedBit128,
+        packed: &Packed128,
         row: usize,
         col: usize,
         total_rows: usize,
@@ -74,7 +74,7 @@ impl WeightGenerator {
     }
     
     /// 1단계: 구조화된 비트 추출
-    fn extract_bits(&self, packed: &PoincarePackedBit128) -> (PoincareQuadrant, u16, u16, u8, u32) {
+    fn extract_bits(&self, packed: &Packed128) -> (u8, u16, u16, u8, u32) {
         let quadrant = packed.get_quadrant();
         let hyp_freq = packed.get_hyperbolic_frequency();
         let geo_amp = packed.get_geodesic_amplitude();
@@ -144,7 +144,7 @@ impl WeightGenerator {
     /// 4단계: 쌍곡 기저함수 적용 (문서 3.3.5 매핑 테이블)
     fn apply_basis_function(
         &self,
-        quadrant: PoincareQuadrant,
+        quadrant: u8,
         x_rotated: f32,
         y_rotated: f32,
         hyp_freq: u16,
@@ -165,20 +165,21 @@ impl WeightGenerator {
         let safe_input = modulated_input.clamp(-3.0, 3.0);
         
         let base_result = match quadrant {
-            PoincareQuadrant::First => {   // sinh 함수 (libm으로 정확하게)
+            0 => {   // sinh 함수 (libm으로 정확하게)
                 libm::sinhf(safe_input).clamp(-5.0, 5.0)
             },
-            PoincareQuadrant::Second => {  // cosh 함수 (libm으로 정확하게)
+            1 => {  // cosh 함수 (libm으로 정확하게)
                 libm::coshf(safe_input).clamp(1.0, 10.0)
             },
-            PoincareQuadrant::Third => {   // tanh 함수 (libm으로 정확하게)
+            2 => {   // tanh 함수 (libm으로 정확하게)
                 libm::tanhf(safe_input) // tanh는 자연스럽게 [-1,1] 범위
             },
-            PoincareQuadrant::Fourth => {  // sech² 함수 (libm으로 정확하게)
+            3 => {  // sech² 함수 (libm으로 정확하게)
                 let cosh_val = libm::coshf(safe_input).max(1.0);
                 let sech = 1.0 / cosh_val;
                 (sech * sech).clamp(0.01, 1.0)
             }
+            _ => 0.0, // 기본값
         };
         
         // NaN 체크 및 최종 처리

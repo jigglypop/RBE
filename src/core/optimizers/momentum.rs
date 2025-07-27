@@ -2,10 +2,10 @@
 
 use crate::core::tensors::{Packed128, DecodedParams};
 
-/// 모멘텀 옵티마이저
-/// 정확한 수학적 그래디언트와 속도(velocity) 항을 사용하여 수렴 가속
-#[derive(Debug, Clone)]
+/// 모멘텀 옵티마이저 (SGD + Momentum)
+#[derive(Debug, Clone, Default)]
 pub struct MomentumOptimizer {
+    /// 모멘텀 계수 (beta)
     beta: f32,               // 모멘텀 계수 (일반적으로 0.9)
     velocity_r: f32,         // r 방향 속도
     velocity_theta: f32,     // θ 방향 속도

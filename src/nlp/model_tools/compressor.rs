@@ -1,5 +1,5 @@
 use crate::core::encoder::encoder::RBEEncoder;
-use crate::core::packed_params::{HybridEncodedBlock, TransformType};
+use crate::core::tensors::{HybridEncodedBlock, TransformType};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;

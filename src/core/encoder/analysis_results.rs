@@ -1,6 +1,6 @@
 //! 주파수 분석 및 최적화 결과 구조체들
 
-use crate::core::packed_params::ResidualCoefficient;
+use crate::core::tensors::ResidualCoefficient;
 
 /// 2D FFT 결과 구조체
 #[derive(Debug, Clone)]

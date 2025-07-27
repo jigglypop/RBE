@@ -5,16 +5,20 @@ use crate::{
     core::{
         decoder::WeightGenerator,
         encoder::RBEEncoder,
-        packed_params::HybridEncodedBlock,
+        tensors::HybridEncodedBlock,
+        tensors::RBECompressedData, // RBECompressedEmbedding 대신
+        tensors::TransformType,
+        transform::compress::RBECompressor,
     },
     QualityGrade,
 };
-use anyhow::{Result, bail};
+use anyhow::{anyhow, Result, bail};
 use std::sync::Arc;
 use rayon::prelude::*;
+use serde::{Serialize, Deserialize};
 
 /// RBE 임베딩 설정
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RBEEmbeddingConfig {
     /// 어휘 크기
     pub vocab_size: usize,
@@ -35,10 +39,10 @@ pub struct RBEEmbeddingConfig {
 impl Default for RBEEmbeddingConfig {
     fn default() -> Self {
         Self {
-            vocab_size: 50257,  // GPT-2 기본값
+            vocab_size: 51200,  // GPT-2 기본값
             embedding_dim: 768,
             max_position_embeddings: 1024,
-            block_size: 256,  // 임베딩에 최적화된 큰 블록
+            block_size: 32,  // 임베딩에 최적화된 큰 블록
             quality_grade: QualityGrade::B,
             enable_parallel: true,
             cache_size: 32,
@@ -47,22 +51,70 @@ impl Default for RBEEmbeddingConfig {
 }
 
 /// RBE 기반 임베딩 레이어
-#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct RBEEmbedding {
     /// 압축된 토큰 임베딩
-    token_embeddings: Vec<HybridEncodedBlock>,
+    #[serde(skip)]
+    pub token_embeddings: Vec<HybridEncodedBlock>,
     /// 압축된 위치 임베딩
-    position_embeddings: Vec<HybridEncodedBlock>,
+    #[serde(skip)]
+    pub position_embeddings: Vec<HybridEncodedBlock>,
     /// 가중치 생성기
+    #[serde(skip)]
     weight_generator: WeightGenerator,
     /// 설정
-    config: RBEEmbeddingConfig,
+    pub config: RBEEmbeddingConfig,
     /// 블록 레이아웃 정보
+    #[serde(skip)]
     token_blocks_per_row: usize,
+    #[serde(skip)]
     position_blocks_per_row: usize,
+    pub rbe_weights: RBECompressedData, // RBECompressedEmbedding -> RBECompressedData
 }
 
 impl RBEEmbedding {
+    pub fn init_after_load(&mut self) -> Result<()> {
+        self.weight_generator = WeightGenerator::new();
+        
+        // rbe_weights.seeds에서 token_embeddings 초기화
+        if !self.rbe_weights.seeds.is_empty() {
+            // 블록 레이아웃 정보 계산
+            self.token_blocks_per_row = (self.config.embedding_dim + self.config.block_size - 1) / self.config.block_size;
+            self.position_blocks_per_row = (self.config.embedding_dim + self.config.block_size - 1) / self.config.block_size;
+            
+            // seeds를 HybridEncodedBlock으로 변환
+            // 실제로는 vocab_size * blocks_per_row 개의 블록이 필요
+            let blocks_needed = self.config.vocab_size * self.token_blocks_per_row;
+            
+            // 임시로 모든 토큰 임베딩을 동일한 값으로 초기화
+            for _ in 0..blocks_needed {
+                let block = HybridEncodedBlock {
+                    rbe_params: [0.0; 8],  // 임시 값
+                    residuals: vec![],
+                    rows: self.config.block_size,
+                    cols: self.config.block_size,
+                    transform_type: TransformType::Standard,
+                };
+                self.token_embeddings.push(block);
+            }
+            
+            // position embeddings도 초기화
+            let position_blocks_needed = self.config.max_position_embeddings * self.position_blocks_per_row;
+            for _ in 0..position_blocks_needed {
+                let block = HybridEncodedBlock {
+                    rbe_params: [0.0; 8],  // 임시 값
+                    residuals: vec![],
+                    rows: self.config.block_size,
+                    cols: self.config.block_size,
+                    transform_type: TransformType::Standard,
+                };
+                self.position_embeddings.push(block);
+            }
+        }
+        
+        Ok(())
+    }
+
     /// 새로운 RBE 임베딩 레이어 생성
     pub fn new(config: RBEEmbeddingConfig) -> Result<Self> {
         // 블록 레이아웃 계산
@@ -79,27 +131,33 @@ impl RBEEmbedding {
         println!("  - 위치 임베딩: {} x {} ({}개 블록)", 
                  config.max_position_embeddings, config.embedding_dim, position_blocks_needed);
         
-        Ok(Self {
+        let mut embedding = Self {
             token_embeddings: Vec::with_capacity(token_blocks_needed),
             position_embeddings: Vec::with_capacity(position_blocks_needed),
             weight_generator: WeightGenerator::new(),
             token_blocks_per_row,
             position_blocks_per_row,
             config,
-        })
+            rbe_weights: RBECompressedData::new(), // Initialize the new field
+        };
+        
+        // 자동으로 랜덤 가중치 초기화 - 제거
+        // embedding.init_random()?;
+        
+        Ok(embedding)
     }
     
     /// 랜덤 가중치로 초기화하고 압축
     pub fn init_random(&mut self) -> Result<()> {
-        use rand::thread_rng;
-        use rand::distributions::{Distribution, Uniform};
+        use crate::core::tensors::TransformType;
         
         let mut encoder = match self.config.quality_grade {
             QualityGrade::S => RBEEncoder::new_s_grade(),
             QualityGrade::A => RBEEncoder::new_a_grade(),
             QualityGrade::B => RBEEncoder::new_b_grade(),
             QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
-        };
+        }
+        .with_transform(TransformType::Dct); // 임베딩은 DCT 사용
         
         self.compress_token_embeddings(&mut encoder)?;
         self.compress_position_embeddings(&mut encoder)?;
@@ -300,79 +358,15 @@ impl RBEEmbedding {
 /// 사전 학습된 가중치에서 로드
 impl RBEEmbedding {
     pub fn from_pretrained_weights(
-        token_weights: &[f32],
-        position_weights: Option<&[f32]>,
+        weights_data: &[f32],
+        _bias_data: Option<&[f32]>,
         config: RBEEmbeddingConfig,
-    ) -> Result<Self> {
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let compressor = RBECompressor::new(5); // No need for full path here
+        let seeds = compressor.compress_slice(weights_data, config.vocab_size, config.embedding_dim)?;
+        
         let mut embedding = Self::new(config)?;
-        
-        // 토큰 임베딩 압축
-        let vocab_size = embedding.config.vocab_size;
-        let embedding_dim = embedding.config.embedding_dim;
-        
-        if token_weights.len() != vocab_size * embedding_dim {
-            return Err(anyhow::anyhow!(
-                "Token weights size mismatch: expected {}, got {}",
-                vocab_size * embedding_dim,
-                token_weights.len()
-            ));
-        }
-        
-        let mut encoder = match embedding.config.quality_grade {
-            QualityGrade::S => RBEEncoder::new_s_grade(),
-            QualityGrade::A => RBEEncoder::new_a_grade(),
-            QualityGrade::B => RBEEncoder::new_b_grade(),
-            QualityGrade::C => RBEEncoder::new_b_grade(), // C급도 B급으로 처리
-        };
-        
-        // 각 토큰 별로 압축
-        for token_id in 0..vocab_size {
-            let start = token_id * embedding_dim;
-            let end = start + embedding_dim;
-            let token_embedding = &token_weights[start..end];
-            
-            // 블록 단위로 압축
-            let block_size = embedding.config.block_size;
-            
-            for i in (0..embedding_dim).step_by(block_size) {
-                let block_width = (block_size).min(embedding_dim - i);
-                let block_data = &token_embedding[i..i + block_width];
-                let encoded = encoder.encode_vector(block_data);
-                embedding.token_embeddings.push(encoded);
-            }
-        }
-        
-        // 위치 임베딩 압축 (제공된 경우)
-        if let Some(pos_weights) = position_weights {
-            let max_pos = embedding.config.max_position_embeddings;
-            
-            if pos_weights.len() != max_pos * embedding_dim {
-                return Err(anyhow::anyhow!(
-                    "Position weights size mismatch: expected {}, got {}",
-                    max_pos * embedding_dim,
-                    pos_weights.len()
-                ));
-            }
-            
-            for pos in 0..max_pos {
-                let start = pos * embedding_dim;
-                let end = start + embedding_dim;
-                let pos_embedding = &pos_weights[start..end];
-                
-                let block_size = embedding.config.block_size;
-                
-                for i in (0..embedding_dim).step_by(block_size) {
-                    let block_width = (block_size).min(embedding_dim - i);
-                    let block_data = &pos_embedding[i..i + block_width];
-                    let encoded = encoder.encode_vector(block_data);
-                    embedding.position_embeddings.push(encoded);
-                }
-            }
-        } else {
-            // 사인파 위치 임베딩 생성
-            embedding.compress_position_embeddings(&mut encoder)?;
-        }
-        
+        embedding.rbe_weights.seeds = seeds;
         Ok(embedding)
     }
 } 

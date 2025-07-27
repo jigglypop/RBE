@@ -1,7 +1,7 @@
 //! BitAdam 옵티마이저 테스트
 
 use rbe_llm::core::optimizers::adam::BitAdamState;
-use rbe_llm::core::tensors::{Packed128, DecodedParams, Packed64, CycleState};
+use rbe_llm::core::tensors::{Packed128, DecodedParams, CycleState};
 use rand::SeedableRng;
 use std::time::Instant;
 

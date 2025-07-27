@@ -1,7 +1,7 @@
-use hf_hub::{api::tokio::Api, Repo, RepoType};
 use std::path::PathBuf;
 use anyhow::Result;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 /// HuggingFace Hub에서 모델을 다운로드하는 구조체
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ impl Default for DownloadConfig {
         Self {
             model_id: "skt/kogpt2-base-v2".to_string(),
             files_to_download: vec![
-                "model.safetensors".to_string(),
+                "pytorch_model.bin".to_string(),
                 "config.json".to_string(),
                 "tokenizer.json".to_string(),
             ],
@@ -60,30 +60,35 @@ impl ModelDownloader {
         }
     }
     
-    /// 단일 파일 다운로드
+    /// 단일 파일 다운로드 (reqwest 사용)
     pub async fn download_file(&self, filename: &str) -> Result<PathBuf> {
         println!("Downloading '{}' from '{}'...", filename, self.model_id);
         
-        let api = Api::new()?;
-        let repo = api.repo(Repo::new(self.model_id.clone(), RepoType::Model));
-        
-        let download_path = repo.get(filename).await?;
-        
-        // 출력 디렉토리 생성
-        fs::create_dir_all(&self.output_dir).await?;
+        let url = format!("https://huggingface.co/{}/resolve/main/{}", self.model_id, filename);
         let final_path = self.output_dir.join(filename);
         
-        // 파일 복사
-        fs::copy(&download_path, &final_path).await?;
+        fs::create_dir_all(&self.output_dir).await?;
+
+        let client = reqwest::Client::new();
+        let mut response = client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to download '{}': HTTP status {}", url, response.status());
+        }
+
+        let mut file = fs::File::create(&final_path).await?;
         
+        while let Some(chunk) = response.chunk().await? {
+            file.write_all(&chunk).await?;
+        }
+
         println!("✅ Successfully downloaded: '{}'", final_path.display());
-        
         Ok(final_path)
     }
     
     /// 기본 모델 파일들 다운로드
     pub async fn download(&self) -> Result<PathBuf> {
-        let files = vec!["model.safetensors", "config.json"];
+        let files = vec!["pytorch_model.bin", "config.json", "tokenizer.json"];
         
         for file in &files {
             match self.download_file(file).await {

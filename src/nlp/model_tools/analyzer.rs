@@ -2,13 +2,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::Value;
+use serde::{Serialize, Deserialize};
 
 /// 품질 등급 (core와 호환성을 위해 추가)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum QualityGrade {
+    /// 무손실에 가까운 최고 품질 (느림)
     S,  // RMSE ≤ 0.000001
+    /// 높은 품질 (빠름)
     A,  // RMSE ≤ 0.001
+    /// 보통 품질 (중간 속도)
     B,  // RMSE ≤ 0.01
+    /// 낮은 품질 (빠름)
     C,  // RMSE ≤ 0.1
 }
 

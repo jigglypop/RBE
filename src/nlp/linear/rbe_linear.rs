@@ -4,10 +4,12 @@ use crate::core::{
     Packed128, WeightCompressor, WeightDecompressor, TransformStats,
 };
 use std::sync::Arc;
+use serde::{Serialize, Deserialize};
+use anyhow::bail;
 
 
 /// RBE 선형 레이어 설정
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RBELinearConfig {
     pub enable_parallel: bool,
     pub cache_size: usize,
@@ -25,7 +27,7 @@ impl Default for RBELinearConfig {
 }
 
 /// RBE 기반 선형 레이어 (Packed128 사용)
-#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct RBELinear {
     /// 압축된 가중치 시드
     pub weight_seed: Packed128,
@@ -38,6 +40,7 @@ pub struct RBELinear {
     /// 출력 크기
     pub out_features: usize,
     /// 가중치 캐시 (lazy 로딩)
+    #[serde(skip)]
     cached_weights: Option<Arc<Vec<f32>>>,
     /// 설정
     config: RBELinearConfig,
@@ -46,16 +49,26 @@ pub struct RBELinear {
 }
 
 impl RBELinear {
+    pub fn init_after_load(&mut self) -> Result<(), String> {
+        self.cached_weights = None;
+        Ok(())
+    }
+
     /// 새로운 RBE 선형 레이어 생성
     pub fn new(
         in_features: usize,
         out_features: usize,
         config: Option<RBELinearConfig>,
     ) -> Self {
+        use rand::thread_rng;
         let config = config.unwrap_or_default();
         
+        // 랜덤한 weight_seed 생성
+        let mut rng = thread_rng();
+        let weight_seed = Packed128::random(&mut rng);
+        
         Self {
-            weight_seed: Packed128::default(),
+            weight_seed,
             weight_shape: (out_features, in_features),
             bias: if config.use_bias {
                 Some(vec![0.0; out_features])
@@ -77,12 +90,12 @@ impl RBELinear {
         in_features: usize,
         out_features: usize,
         config: Option<RBELinearConfig>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, String> {
         let config = config.unwrap_or_default();
         
         // 가중치 압축
         let compressor = WeightCompressor::new(out_features, in_features);
-        let (weight_seed, stats) = compressor.compress_weights(weights)?;
+        let (weight_seed, stats) = compressor.compress_weights(weights).map_err(|e| e.to_string())?;
         
         println!("RBE Linear 압축 완료: {:.1}:1 압축률, RMSE {:.6}", 
                 stats.compression_ratio, stats.rmse);
@@ -100,7 +113,7 @@ impl RBELinear {
         
         // 가중치 캐시 미리 생성 (옵션)
         if layer.config.cache_size > 0 {
-            layer.preload_weights()?;
+            layer.preload_weights().map_err(|e| e.to_string())?;
         }
         
         Ok(layer)
@@ -108,7 +121,7 @@ impl RBELinear {
     
     /// 가중치 미리 로딩 (캐시에 저장)
     pub fn preload_weights(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let (weights, _stats) = WeightDecompressor::restore_weights(
+        let (weights, _) = WeightDecompressor::restore_weights(
             &self.weight_seed, 
             self.weight_shape.0, 
             self.weight_shape.1
@@ -124,7 +137,7 @@ impl RBELinear {
             (**cached).clone()
         } else {
             // 즉시 복원
-            let (weights, _stats) = WeightDecompressor::restore_weights(
+            let (weights, _) = WeightDecompressor::restore_weights(
                 &self.weight_seed,
                 self.weight_shape.0,
                 self.weight_shape.1
@@ -139,36 +152,50 @@ impl RBELinear {
     }
     
     /// 순전파 (행렬 곱셈)
-    pub fn forward(&self, input: &[f32]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    pub fn forward(&self, input: &[f32]) -> Result<Vec<f32>, String> {
         if input.len() != self.in_features {
-            return Err(format!("입력 크기 불일치: {} vs {}", input.len(), self.in_features).into());
+            return Err(format!("입력 크기 불일치: {} vs {}", input.len(), self.in_features));
         }
+
+        // 가중치 복원
+        let (weights, _) = WeightDecompressor::restore_weights(
+            &self.weight_seed, 
+            self.in_features, 
+            self.out_features
+        );
         
-        let weights = self.get_weights();
+        // 디버깅: weight_seed의 값에 따라 출력 (처음 몇 개만)
+        if self.weight_seed.hi % 1000 == 0 || self.weight_seed.lo % 1000 == 0 {
+            println!("🔍 RBELinear forward: input[0..5]={:?}", &input[0..input.len().min(5)]);
+            println!("🔍 RBELinear weights: first_5={:?}, sum={:.6}", 
+                    &weights[0..weights.len().min(5)], 
+                    weights.iter().sum::<f32>());
+        }
+
+        // 행렬 곱셈: output = input * weights^T + bias
         let mut output = vec![0.0; self.out_features];
-        
-        // 행렬 곱셈: output = weights * input
-        for out_idx in 0..self.out_features {
-            let mut sum = 0.0;
-            for in_idx in 0..self.in_features {
-                let weight_idx = out_idx * self.in_features + in_idx;
-                sum += weights[weight_idx] * input[in_idx];
+        for i in 0..self.out_features {
+            for j in 0..self.in_features {
+                output[i] += input[j] * weights[i * self.in_features + j];
             }
-            output[out_idx] = sum;
-        }
-        
-        // 편향 추가
-        if let Some(bias) = &self.bias {
-            for (out_val, &bias_val) in output.iter_mut().zip(bias.iter()) {
-                *out_val += bias_val;
+            if let Some(ref bias) = self.bias {
+                output[i] += bias[i];
             }
         }
         
+        // 디버깅: 결과 확인
+        if self.weight_seed.hi % 1000 == 0 || self.weight_seed.lo % 1000 == 0 {
+            let output_sum: f32 = output.iter().sum();
+            let output_max = output.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            println!("🔍 RBELinear output: first_5={:?}, sum={:.6}, max={:.6}", 
+                    &output[0..output.len().min(5)], output_sum, output_max);
+        }
+
         Ok(output)
     }
     
     /// 배치 순전파
-    pub fn forward_batch(&self, inputs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    pub fn forward_batch(&self, inputs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>, String> {
         let mut outputs = Vec::with_capacity(inputs.len());
         
         for input in inputs {

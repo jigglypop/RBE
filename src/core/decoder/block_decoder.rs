@@ -1,6 +1,6 @@
 //! 하이브리드 블록 디코딩 기능
 
-use crate::core::packed_params::{HybridEncodedBlock, TransformType};
+use crate::core::tensors::{HybridEncodedBlock, TransformType};
 use nalgebra::{DMatrix, DVector};
 use ndarray::{Array, Array2};
 use rustdct::DctPlanner;
@@ -12,7 +12,6 @@ impl HybridEncodedBlock {
     pub fn decode(&self) -> Vec<f32> {
         let rows = self.rows;
         let cols = self.cols;
-
         // 1. RBE 기본 패턴 복원
         let mut a_matrix = DMatrix::from_element(rows * cols, 8, 0.0);
         for r in 0..rows {

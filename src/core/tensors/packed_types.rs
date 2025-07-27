@@ -3,9 +3,10 @@
 use rand::Rng;
 use std::collections::HashMap;
 use super::hyperbolic_lut::HYPERBOLIC_LUT_DATA;
+use serde::{Serialize, Deserialize};
 
 /// 11비트 미분 사이클 상태
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CycleState {
     bits: u16, // 11비트만 사용
 }
@@ -130,15 +131,22 @@ pub struct Packed64 {
     pub rotations: u64,  // CORDIC 회전 시퀀스
 }
 
-/// 128-bit 시드 (11비트 사이클 시스템 통합)
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// 128비트 압축 표현
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(C)]
 pub struct Packed128 {
     pub hi: u64,   // [63:53] 11비트 사이클 상태 | [52:0] CORDIC 및 상태
     pub lo: u64,   // 연속 파라미터 (고정소수점 Q32.32)
 }
 
-/// 연속 파라미터 디코딩
-#[derive(Debug, Clone, Default)]
+impl Default for Packed128 {
+    fn default() -> Self {
+        Packed128 { hi: 0, lo: 0 }
+    }
+}
+
+/// 디코딩된 연속 파라미터
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DecodedParams {
     pub r_fp32: f32,
     pub theta_fp32: f32,

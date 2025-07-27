@@ -1,11 +1,12 @@
 //! RBE 기반 Layer Normalization
 //! 수치적 안정성을 위한 Kahan summation과 융합 연산 구현
 
+use serde::{Serialize, Deserialize};
 use anyhow::{Result, bail};
 use std::sync::Arc;
 
 /// Layer Normalization 설정
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RBELayerNormConfig {
     /// 정규화할 차원의 크기
     pub normalized_shape: Vec<usize>,
@@ -29,16 +30,16 @@ impl Default for RBELayerNormConfig {
 }
 
 /// RBE Layer Normalization
-#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct RBELayerNorm {
     /// 설정
-    config: RBELayerNormConfig,
+    pub config: RBELayerNormConfig,
     /// Scale parameter (gamma)
-    gamma: Option<Vec<f32>>,
+    pub gamma: Option<Vec<f32>>,
     /// Shift parameter (beta)
-    beta: Option<Vec<f32>>,
+    pub beta: Option<Vec<f32>>,
     /// 정규화할 원소 개수
-    normalized_size: usize,
+    pub normalized_size: usize,
 }
 
 impl RBELayerNorm {

@@ -138,7 +138,7 @@ impl BitBackwardPass {
 
         if !cache_hit {
             let decoded = packed.decode();
-            let grad_r = error * (1.0 - decoded.r_fp32.powi(2)).max(0.0) / 2.0;
+            let grad_r = error * (1.0 - decoded.r_fp32.powi(2)).max(0.0f32) / 2.0;
             let grad_theta = error;
 
             r_grad_bits = Self::f32_to_q16(grad_r);
@@ -157,7 +157,7 @@ impl BitBackwardPass {
         match self.optimizer_integration.active_optimizer_type {
             OptimizerType::BitAdam => {
                 self.optimizer_integration.adam_pool[optimizer_idx]
-                    .bit_update(packed, i, j, target, learning_rate, rows, cols);
+                    .bit_update(packed, i, j, rows, cols, target, learning_rate);
             }
             OptimizerType::BitRiemannianAdam => {
                 self.optimizer_integration.riemann_pool[optimizer_idx]
@@ -165,11 +165,11 @@ impl BitBackwardPass {
             }
             OptimizerType::GradientDescent => {
                 self.optimizer_integration.gd_pool[optimizer_idx]
-                    .update(packed, predicted, target, learning_rate);
+                    .update(packed, i, j, rows, cols, target, learning_rate);
             }
             OptimizerType::Momentum => {
                 self.optimizer_integration.momentum_pool[optimizer_idx]
-                    .update(packed, predicted, target, learning_rate);
+                    .update(packed, i, j, rows, cols, target, learning_rate);
             }
             OptimizerType::Hybrid => {
                 // 상황에 따라 자동 선택 (오차 크기 기준)
@@ -178,7 +178,7 @@ impl BitBackwardPass {
                         .bit_riemannian_update(packed, i, j, target, learning_rate, rows, cols);
                 } else {
                     self.optimizer_integration.adam_pool[optimizer_idx]
-                        .bit_update(packed, i, j, target, learning_rate, rows, cols);
+                        .bit_update(packed, i, j, rows, cols, target, learning_rate);
                 }
             }
         }

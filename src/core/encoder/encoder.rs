@@ -1,6 +1,3 @@
-use crate::core::packed_params::{TransformType, HybridEncodedBlock, ResidualCoefficient};
-use std::time::Instant;
-use rayon::prelude::*;
 use nalgebra::{DMatrix, DVector, RowDVector};
 use rustdct::DctPlanner;
 use ndarray::{Array, Array1, Array2};
@@ -8,6 +5,8 @@ use omni_wave::{wavelet as w, completely_decompose_2d};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use once_cell::sync::Lazy;
+use crate::core::tensors::{HybridEncodedBlock, TransformType, ResidualCoefficient};
+use rayon::prelude::*;
 
 // A matrix 캐시 (thread-safe)
 static A_MATRIX_CACHE: Lazy<Arc<RwLock<HashMap<(usize, usize), Arc<DMatrix<f32>>>>>> = 
@@ -143,6 +142,12 @@ impl RBEEncoder {
         Self::new(200, TransformType::Dwt)  // 웨이블릿으로 변경
     }
     
+    /// 변환 유형을 설정하는 빌더 메서드
+    pub fn with_transform(mut self, transform_type: TransformType) -> Self {
+        self.transform_type = transform_type;
+        self
+    }
+
     /// 극한 압축 (RMSE ~0.09): 3276:1 압축률
     pub fn new_extreme_compression() -> Self {
         Self::new(50, TransformType::Dwt)   // 웨이블릿으로 변경
@@ -255,6 +260,9 @@ impl RBEEncoder {
                 let mut buffer = Array1::zeros(rows.max(cols) + wavelet.window_size() - 2);
                 completely_decompose_2d(residual_matrix.view_mut(), buffer.view_mut(), wavelet);
             },
+            TransformType::Standard => {
+                // Standard transform does nothing to the residuals
+            },
             TransformType::Adaptive => unreachable!("Adaptive transform should be handled separately"),
         }
 
@@ -286,7 +294,7 @@ impl RBEEncoder {
         coefficients: usize,
         transform_type: TransformType,
     ) -> Result<(Vec<HybridEncodedBlock>, f64, f32, f32), String> {
-        let start = Instant::now();
+        let start = std::time::Instant::now();
         
         // 비대칭 매트릭스 격자 분할
         let blocks_per_height = (height + block_size - 1) / block_size;
@@ -612,6 +620,53 @@ impl RBEEncoder {
         
         Ok(critical_coeffs)
     }
+    
+    pub fn encode_vector(&mut self, data: &[f32]) -> HybridEncodedBlock {
+        // 입력 데이터에서 RBE 파라미터 계산
+        let rbe_params = self.compute_rbe_parameters(data);
+        self.encode_single_transform(rbe_params, &DVector::from_vec(data.to_vec()), data.len(), 1, self.transform_type)
+    }
+    
+    /// 입력 데이터로부터 RBE 파라미터 계산
+    fn compute_rbe_parameters(&self, data: &[f32]) -> [f32; 8] {
+        if data.is_empty() {
+            return [0.0; 8];
+        }
+        
+        // 통계적 특성 계산
+        let mean = data.iter().sum::<f32>() / data.len() as f32;
+        let variance = data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
+        let std_dev = variance.sqrt();
+        
+        // 주파수 성분 계산 (간단한 DFT 근사)
+        let mut freq_components = [0.0f32; 4];
+        let n = data.len();
+        for k in 0..4 {
+            let mut real = 0.0;
+            let mut imag = 0.0;
+            for (i, &val) in data.iter().enumerate() {
+                let angle = -2.0 * std::f32::consts::PI * (k as f32) * (i as f32) / (n as f32);
+                real += val * angle.cos();
+                imag += val * angle.sin();
+            }
+            freq_components[k] = (real * real + imag * imag).sqrt() / (n as f32);
+        }
+        
+        // 8개 RBE 파라미터 구성
+        [
+            mean,                    // 평균 (상수항)
+            std_dev,                 // 표준편차 (크기)
+            variance.max(0.001),     // 분산 (최소값 보장)
+            freq_components[0],      // 저주파 성분
+            freq_components[1],      // 중저주파 성분
+            freq_components[2],      // 중고주파 성분
+            freq_components[3],      // 고주파 성분
+            (data.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0) - 
+             data.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0)).max(0.001), // 레인지
+        ]
+    }
 }
+
+// 더미 구현은 제거 - 기존 RBEEncoder 사용
 
  

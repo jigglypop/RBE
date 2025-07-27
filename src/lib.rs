@@ -1,23 +1,20 @@
-//! RBE-LLM: 리만 기저 인코딩 기반 언어 모델 라이브러리
-//!
-//! 푸앵카레 볼 기하학과 CORDIC 알고리즘을 결합한 압축 시스템
+//! RBE Library - 리만 비트 인코딩
 
 pub mod core;
-// pub mod nlp;
+pub mod nlp;
 
+// Core exports
 pub use core::{
-    // 비트 도메인 텐서 타입들
-    Packed128, CycleState, DecodedParams, BitTensor, BitGradientTracker,
-    // 비트 도메인 미분 시스템
-    // BitForwardPass, BitBackwardPass, DifferentialSystem,
-    // 최적화기
-    BitAdamState, BitRiemannianAdamState, OptimizerType,
-    // 변환 시스템
-    // TransformStats, ModelLoader, WeightCompressor, WeightDecompressor,
+    encoder::*,
+    decoder::*,
+    tensors::*,
+    optimizers::*,
+    differential::*,
+    transform::{WeightCompressor, WeightDecompressor, TransformStats},
 };
 
-// nlp 모듈 re-export
-// pub use nlp::*;
+// NLP exports  
+pub use nlp::*;
 
 // 편의 타입 별칭
 pub type Packed = Packed128;

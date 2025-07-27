@@ -14,6 +14,19 @@ impl WeightDecompressor {
         
         println!("복원 시작: {}x{} 행렬", rows, cols);
         
+        // 디버깅: seed와 decode 결과 확인
+        static mut RESTORE_COUNT: usize = 0;
+        unsafe {
+            if RESTORE_COUNT < 2 {
+                println!("🔍 Restore seed: hi={}, lo={}", seed.hi, seed.lo);
+                let decoded = seed.decode();
+                println!("🔍 Decoded: r={}, theta={}", decoded.r_fp32, decoded.theta_fp32);
+                let test_val = seed.fused_forward(0, 0, rows, cols);
+                println!("🔍 Test fused_forward(0,0): {}", test_val);
+                RESTORE_COUNT += 1;
+            }
+        }
+        
         let mut weights = Vec::with_capacity(rows * cols);
         
         // 병렬 처리 가능한 구조
@@ -21,6 +34,17 @@ impl WeightDecompressor {
             for j in 0..cols {
                 let weight = seed.fused_forward(i, j, rows, cols);
                 weights.push(weight);
+            }
+        }
+        
+        // 디버깅: 복원 결과 확인
+        unsafe {
+            if RESTORE_COUNT <= 2 {
+                let weight_sum: f32 = weights.iter().sum();
+                let weight_max = weights.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                let weight_min = weights.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+                println!("🔍 Restored weights: sum={:.6}, max={:.6}, min={:.6}, first_5={:?}", 
+                        weight_sum, weight_max, weight_min, &weights[0..weights.len().min(5)]);
             }
         }
         

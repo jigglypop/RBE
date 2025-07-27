@@ -3,6 +3,29 @@
 use crate::core::tensors::{Packed128, DecodedParams};
 use super::TransformStats;
 use std::time::Instant;
+use anyhow::anyhow;
+
+#[derive(Debug, Clone)]
+pub struct RBECompressor {
+    pub target_shape: (usize, usize),
+    pub optimization_iterations: usize,
+}
+
+impl RBECompressor {
+    pub fn new(optimization_iterations: usize) -> Self {
+        Self {
+            target_shape: (0, 0),  // Will be set when compress is called
+            optimization_iterations,
+        }
+    }
+
+    pub fn compress_slice(&self, weights_data: &[f32], rows: usize, cols: usize) -> Result<Vec<Packed128>, Box<dyn std::error::Error + Send + Sync>> {
+        let compressor = WeightCompressor::new(rows, cols);
+        let (seed, _stats) = compressor.compress_weights(weights_data)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        Ok(vec![seed])
+    }
+}
 
 /// 가중치 압축기
 pub struct WeightCompressor {
@@ -12,12 +35,10 @@ pub struct WeightCompressor {
 
 impl WeightCompressor {
     pub fn new(rows: usize, cols: usize) -> Self {
-        // 크기에 따른 적응적 최적화 (정확도 우선)
+        // 크기에 따른 적응적 최적화 (초고속 압축)
         let iterations = match rows * cols {
-            0..=1000 => 500,      // 작은 행렬: 고품질 압축  
-            1001..=50000 => 300,  // 중간 행렬: 균형
-            50001..=500000 => 200, // 큰 행렬: 정밀 압축
-            _ => 100,             // 초대형: 빠른 압축
+            0..=50000 => 5,    // 중간 행렬: 빠른 압축
+            _ => 3,            // 초대형: 매우 빠른 압축
         };
         
         Self {
@@ -35,7 +56,7 @@ impl WeightCompressor {
             return Err(format!("크기 불일치: {} vs {}x{}", weights.len(), rows, cols).into());
         }
         
-        println!("압축 시작: {}x{} 행렬 ({} 파라미터)", rows, cols, weights.len());
+        println!("🔄 압축 시작: {}x{} 행렬 ({} 파라미터)", rows, cols, weights.len());
         
         // 1. 최적화 기반 시드 찾기
         let mut best_seed = self.find_optimal_seed(weights, rows, cols)?;
@@ -62,7 +83,7 @@ impl WeightCompressor {
             restore_ms: 0.0, // 별도 측정
         };
         
-        println!("압축 완료: {:.1}:1 압축률, RMSE {:.6}", compression_ratio, rmse);
+        println!("✅ 압축 완료: {:.1}:1 압축률, RMSE {:.6}", compression_ratio, rmse);
         
         Ok((best_seed, stats))
     }
@@ -72,12 +93,12 @@ impl WeightCompressor {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         
-        // 적응적 집단 크기 (더 크게)
+        // 집단 크기 대폭 증가 + 다양성 확보
         let population_size = match rows * cols {
-            0..=1000 => 50,       // 작은 행렬: 큰 집단
-            1001..=50000 => 30,   // 중간 행렬: 중간 집단
-            50001..=500000 => 20, // 큰 행렬: 작은 집단
-            _ => 15,              // 초대형: 최소 집단
+            0..=1000 => 100,      // 작은 행렬: 큰 집단
+            1001..=50000 => 80,   // 중간 행렬: 중간 집단  
+            50001..=500000 => 60, // 큰 행렬: 여전히 큰 집단
+            _ => 40,              // 초대형: 최소한의 큰 집단
         };
         
         let mut population: Vec<Packed128> = (0..population_size)
@@ -86,19 +107,20 @@ impl WeightCompressor {
         
         let mut best_fitness = f64::INFINITY;
         let mut best_seed = population[0];
+        let mut no_improvement_count = 0; // 개선 없는 세대 카운트
         
         for generation in 0..self.optimization_iterations {
-            // 적합도 평가 (샘플링 기반 빠른 평가)
+            // 적합도 평가 (샘플링 개선)
             let mut fitness_scores = Vec::new();
             let sample_ratio = match rows * cols {
-                0..=1000 => 0.2,      // 20% 샘플링
-                1001..=50000 => 0.05, // 5% 샘플링  
-                _ => 0.02,            // 2% 샘플링
+                0..=1000 => 1.0,      // 작은 행렬: 전체 평가
+                1001..=50000 => 0.3,  // 중간 행렬: 30% 샘플링 (기존 5% → 30%)
+                _ => 0.1,             // 큰 행렬: 10% 샘플링 (기존 2% → 10%)
             };
             
             for seed in &population {
-                let rmse = if generation < self.optimization_iterations / 3 {
-                    // 초기 세대: 빠른 샘플 평가
+                let rmse = if generation < self.optimization_iterations / 4 { // 1/3 → 1/4로 줄임
+                    // 초기 세대도 더 정확하게 평가
                     self.quick_evaluate_seed(seed, target, rows, cols, sample_ratio)
                 } else {
                     // 후기 세대: 정확한 전체 평가
@@ -111,18 +133,23 @@ impl WeightCompressor {
                 if rmse < best_fitness {
                     best_fitness = rmse;
                     best_seed = *seed;
+                    no_improvement_count = 0; // 개선되면 카운트 리셋
+                } else {
+                    no_improvement_count += 1;
                 }
             }
             
-            if generation % 20 == 0 {
-                println!("세대 {}: 최고 RMSE {:.6}", generation, best_fitness);
+            if generation % 2 == 0 || generation < 5 {
+                let progress_pct = (generation + 1) as f32 / self.optimization_iterations as f32 * 100.0;
+                println!("  ⚡ 세대 {}/{} ({:.0}%): RMSE {:.6} (개선없음: {}세대)", 
+                         generation + 1, self.optimization_iterations, progress_pct, best_fitness, no_improvement_count);
             }
             
-            // 조기 종료 조건 (크기별 적응적, 더 엄격한 기준)
+            // 조기 종료 조건 개선
             let target_rmse = match rows * cols {
-                0..=1000 => 0.01,      // 작은 행렬: 매우 엄격
-                1001..=50000 => 0.005, // 중간 행렬: 극도로 엄격
-                _ => 0.02,             // 큰 행렬: 엄격
+                0..=1000 => 0.005,     // 더 엄격한 기준
+                1001..=50000 => 0.008, 
+                _ => 0.015,            
             };
             
             if best_fitness < target_rmse {
@@ -130,47 +157,126 @@ impl WeightCompressor {
                 break;
             }
             
-            // 새 세대 생성
-            population = self.evolve_population(&population, &fitness_scores, &mut rng);
+            // 수렴 탐지 및 다양성 회복
+            if no_improvement_count > 10 {
+                println!("🔄 다양성 회복: {}세대 동안 개선 없음", no_improvement_count);
+                // 집단의 절반을 새로 생성하여 다양성 회복
+                for i in population_size/2..population_size {
+                    population[i] = Packed128::random(&mut rng);
+                }
+                no_improvement_count = 0;
+            }
+            
+            // 새 세대 생성 (개선된 진화 알고리즘)
+            population = self.evolve_population_improved(&population, &fitness_scores, &mut rng);
         }
         
-        println!("최적화 완료: 최종 RMSE {:.6}", best_fitness);
+        println!("✅ 최적화 완료: 최종 RMSE {:.6}", best_fitness);
         Ok(best_seed)
     }
     
-    /// 집단 진화
-    fn evolve_population(&self, population: &[Packed128], fitness: &[f64], rng: &mut impl rand::Rng) -> Vec<Packed128> {
+    /// 개선된 집단 진화 (교차 + 돌연변이)
+    fn evolve_population_improved(&self, population: &[Packed128], fitness: &[f64], rng: &mut impl rand::Rng) -> Vec<Packed128> {
         let mut new_pop = Vec::new();
         
-        // 엘리트 보존 (상위 10%)
-        let elite_count = population.len() / 10;
+        // 엘리트 보존 (상위 20%로 증가)
+        let elite_count = population.len() / 5; // 10% → 20%
         let mut indexed_fitness: Vec<(usize, f64)> = fitness.iter()
             .enumerate()
             .map(|(i, &f)| (i, f))
             .collect();
         indexed_fitness.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         
+        // 엘리트 보존
         for i in 0..elite_count {
             new_pop.push(population[indexed_fitness[i].0]);
         }
         
-        // 돌연변이 생성
+        // 토너먼트 선택 + 교차 + 돌연변이
         while new_pop.len() < population.len() {
-            let parent_idx = indexed_fitness[rng.gen_range(0..elite_count * 2)].0;
-            let mut child = population[parent_idx];
-            
-            // 비트 돌연변이
-            if rng.gen::<f32>() < 0.3 {
-                child.hi ^= 1u64 << rng.gen_range(0..64);
+            if rng.gen::<f32>() < 0.7 { // 70% 확률로 교차
+                // 토너먼트 선택으로 부모 2개 선택
+                let parent1_idx = self.tournament_selection(&indexed_fitness, 3, rng);
+                let parent2_idx = self.tournament_selection(&indexed_fitness, 3, rng);
+                
+                let parent1 = population[parent1_idx];
+                let parent2 = population[parent2_idx];
+                
+                // 교차 연산
+                let child = self.crossover(&parent1, &parent2, rng);
+                
+                // 돌연변이 (확률 증가)
+                let mutated_child = self.mutate(child, 0.6, rng); // 30% → 60%
+                new_pop.push(mutated_child);
+            } else { // 30% 확률로 완전 새로운 개체
+                new_pop.push(Packed128::random(rng));
             }
-            if rng.gen::<f32>() < 0.3 {
-                child.lo ^= 1u64 << rng.gen_range(0..64);
-            }
-            
-            new_pop.push(child);
         }
         
         new_pop
+    }
+    
+    /// 토너먼트 선택
+    fn tournament_selection(&self, indexed_fitness: &[(usize, f64)], tournament_size: usize, rng: &mut impl rand::Rng) -> usize {
+        let mut best_idx = 0;
+        let mut best_fitness = f64::INFINITY;
+        
+        for _ in 0..tournament_size {
+            let idx = rng.gen_range(0..indexed_fitness.len());
+            if indexed_fitness[idx].1 < best_fitness {
+                best_fitness = indexed_fitness[idx].1;
+                best_idx = indexed_fitness[idx].0;
+            }
+        }
+        
+        best_idx
+    }
+    
+    /// 교차 연산 (uniform crossover)
+    fn crossover(&self, parent1: &Packed128, parent2: &Packed128, rng: &mut impl rand::Rng) -> Packed128 {
+        let mut child_hi = 0u64;
+        let mut child_lo = 0u64;
+        
+        // 비트별 uniform crossover
+        for bit in 0..64 {
+            if rng.gen::<bool>() {
+                child_hi |= parent1.hi & (1u64 << bit);
+                child_lo |= parent1.lo & (1u64 << bit);
+            } else {
+                child_hi |= parent2.hi & (1u64 << bit);
+                child_lo |= parent2.lo & (1u64 << bit);
+            }
+        }
+        
+        Packed128 { hi: child_hi, lo: child_lo }
+    }
+    
+    /// 향상된 돌연변이
+    fn mutate(&self, mut individual: Packed128, mutation_rate: f32, rng: &mut impl rand::Rng) -> Packed128 {
+        // 비트 플립 돌연변이
+        for bit in 0..64 {
+            if rng.gen::<f32>() < mutation_rate / 64.0 {
+                individual.hi ^= 1u64 << bit;
+            }
+            if rng.gen::<f32>() < mutation_rate / 64.0 {
+                individual.lo ^= 1u64 << bit;
+            }
+        }
+        
+        // 가우시안 돌연변이 (연속 공간에서)
+        if rng.gen::<f32>() < 0.3 {
+            let decoded = individual.decode();
+            let noise_r = rng.gen_range(-0.1..0.1);
+            let noise_theta = rng.gen_range(-0.3..0.3);
+            
+            let new_r = (decoded.r_fp32 + noise_r).clamp(0.0, 0.99);
+            let new_theta = (decoded.theta_fp32 + noise_theta).rem_euclid(2.0 * std::f32::consts::PI);
+            
+            let new_params = DecodedParams { r_fp32: new_r, theta_fp32: new_theta };
+            individual = Packed128::from_continuous(&new_params);
+        }
+        
+        individual
     }
     
     /// 미세 조정 (그래디언트 기반)

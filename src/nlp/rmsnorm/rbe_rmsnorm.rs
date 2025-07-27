@@ -8,7 +8,8 @@ use rayon::prelude::*;
 use crate::{
     core::{
         decoder::WeightGenerator,
-        packed_params::HybridEncodedBlock,
+        encoder::RBEEncoder,
+        tensors::HybridEncodedBlock,
     },
     QualityGrade,
 };
@@ -98,7 +99,7 @@ impl RBERMSNorm {
     fn get_gamma(&mut self) -> Result<&[f32]> {
         if self.decoded_cache.is_none() && !self.gamma_blocks.is_empty() {
             let decoded = self.weight_generator.decode_block(&self.gamma_blocks[0]);
-            self.decoded_cache = Some((*decoded).clone());
+            self.decoded_cache = Some(decoded.clone());
         }
         
         self.decoded_cache.as_deref()

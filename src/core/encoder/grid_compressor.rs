@@ -1,6 +1,6 @@
 //! 그리드로 압축된 행렬 처리
 
-use crate::core::packed_params::{HybridEncodedBlock, TransformType};
+use crate::core::tensors::{HybridEncodedBlock, TransformType};
 use super::encoder::RBEEncoder;
 use std::sync::Mutex;
 use rayon::prelude::*;

@@ -5,7 +5,7 @@ use crate::{
     core::{
         decoder::WeightGenerator,
         encoder::RBEEncoder,
-        packed_params::HybridEncodedBlock,
+        tensors::HybridEncodedBlock,
     },
     nlp::linear::{RBELinear, RBELinearConfig},
     QualityGrade,
@@ -13,9 +13,10 @@ use crate::{
 use anyhow::{Result, bail};
 use std::sync::Arc;
 use rayon::prelude::*;
+use serde::{Serialize, Deserialize};
 
 /// FFN 설정
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RBEFFNConfig {
     /// 입력/출력 차원
     pub hidden_dim: usize,
@@ -36,7 +37,7 @@ pub struct RBEFFNConfig {
 }
 
 /// 활성화 함수 타입
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ActivationType {
     Gelu,
     GeluNew,  // GPT-2 스타일 GELU
@@ -60,21 +61,27 @@ impl Default for RBEFFNConfig {
 }
 
 /// RBE 기반 Feed-Forward Network
-#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct RBEFFN {
     /// 첫 번째 선형 레이어 (hidden -> intermediate)
-    up_proj: RBELinear,
+    pub up_proj: RBELinear,
     /// 두 번째 선형 레이어 (intermediate -> hidden)
-    down_proj: RBELinear,
+    pub down_proj: RBELinear,
     /// 활성화 함수
-    activation: ActivationType,
+    pub activation: ActivationType,
     /// 드롭아웃 확률
-    dropout: f32,
+    pub dropout: f32,
     /// 설정
-    config: RBEFFNConfig,
+    pub config: RBEFFNConfig,
 }
 
 impl RBEFFN {
+    pub fn init_after_load(&mut self) -> Result<()> {
+        self.up_proj.init_after_load().map_err(|e| anyhow::anyhow!(e))?;
+        self.down_proj.init_after_load().map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
+
     /// 새로운 FFN 생성
     pub fn new(config: RBEFFNConfig) -> Result<Self> {
         println!("RBEFFN 초기화:");
@@ -86,23 +93,20 @@ impl RBEFFN {
         let linear_config = RBELinearConfig {
             enable_parallel: config.enable_parallel,
             cache_size: config.cache_size,
+            use_bias: false,
         };
         
         // 빈 블록으로 초기화 (나중에 압축된 가중치 로드)
-        let up_proj = RBELinear::with_config(
-            Vec::new(),
+        let up_proj = RBELinear::new(
             config.hidden_dim,
             config.intermediate_dim,
-            None,  // bias 없음
-            linear_config.clone(),
+            Some(linear_config.clone()),
         );
         
-        let down_proj = RBELinear::with_config(
-            Vec::new(),
+        let down_proj = RBELinear::new(
             config.intermediate_dim,
             config.hidden_dim,
-            None,  // bias 없음
-            linear_config,
+            Some(linear_config),
         );
         
         Ok(Self {
@@ -179,7 +183,7 @@ impl RBEFFN {
             }
         }
         
-        self.up_proj.blocks = blocks;
+        // self.up_proj.blocks = blocks; // TODO: RBELinear 구조 변경 필요
         println!("  Up projection 압축 완료: {} -> {}", 
                  self.config.hidden_dim, self.config.intermediate_dim);
         
@@ -226,7 +230,7 @@ impl RBEFFN {
             }
         }
         
-        self.down_proj.blocks = blocks;
+        // self.down_proj.blocks = blocks; // TODO: RBELinear 구조 변경 필요
         println!("  Down projection 압축 완료: {} -> {}", 
                  self.config.intermediate_dim, self.config.hidden_dim);
         
@@ -241,7 +245,7 @@ impl RBEFFN {
         }
         
         // 1. Up projection (hidden -> intermediate)
-        let intermediate = self.up_proj.forward(input);
+        let intermediate = self.up_proj.forward(input).map_err(|e| anyhow::anyhow!(e))?;
         
         // 2. 활성화 함수
         let activated = self.apply_activation(&intermediate);
@@ -254,7 +258,7 @@ impl RBEFFN {
         };
         
         // 4. Down projection (intermediate -> hidden)
-        let output = self.down_proj.forward(&dropped);
+        let output = self.down_proj.forward(&dropped).map_err(|e| anyhow::anyhow!(e))?;
         
         Ok(output)
     }
@@ -326,8 +330,8 @@ impl RBEFFN {
     
     /// 메모리 사용량 계산
     pub fn memory_usage(&self) -> (usize, f32) {
-        let (up_size, up_ratio) = self.up_proj.memory_usage();
-        let (down_size, down_ratio) = self.down_proj.memory_usage();
+        let up_size = self.up_proj.memory_usage();
+        let down_size = self.down_proj.memory_usage();
         
         let total_compressed = up_size + down_size;
         let total_original = (self.config.hidden_dim * self.config.intermediate_dim * 2) * 4;
@@ -435,26 +439,24 @@ impl RBEFFN {
         )?;
         
         // RBELinear 생성
-        let up_proj = RBELinear::with_config(
-            up_blocks,
+        let up_proj = RBELinear::new(
             config.hidden_dim,
             config.intermediate_dim,
-            None,
-            RBELinearConfig {
+            Some(RBELinearConfig {
                 enable_parallel: config.enable_parallel,
                 cache_size: config.cache_size,
-            },
+                use_bias: false,
+            }),
         );
         
-        let down_proj = RBELinear::with_config(
-            down_blocks,
+        let down_proj = RBELinear::new(
             config.intermediate_dim,
             config.hidden_dim,
-            None,
-            RBELinearConfig {
+            Some(RBELinearConfig {
                 enable_parallel: config.enable_parallel,
                 cache_size: config.cache_size,
-            },
+                use_bias: false,
+            }),
         );
         
         let ffn = Self {

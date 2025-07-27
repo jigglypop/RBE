@@ -1,6 +1,6 @@
 //! 최적화된 하이브리드 블록 디코더 (병렬 + SIMD + 메모리 최적화)
 
-use crate::core::packed_params::{HybridEncodedBlock, TransformType};
+use crate::core::tensors::{HybridEncodedBlock, TransformType, ResidualCoefficient};
 use nalgebra::{DMatrix, DVector};
 use ndarray::{Array1, Array2};
 use omni_wave::{wavelet as w, completely_reconstruct_2d};
@@ -112,37 +112,57 @@ fn get_cached_a_matrix_simd(rows: usize, cols: usize) -> DMatrix<f32> {
 
 /// 최적화된 잔차 디코딩
 fn decode_residuals_optimized(
-    residuals: &[crate::core::packed_params::ResidualCoefficient], 
+    residuals: &[ResidualCoefficient], 
     rows: usize, 
     cols: usize, 
     transform_type: TransformType
 ) -> Vec<f32> {
-    let total_size = rows * cols;
-    
+    let mut output = DMatrix::zeros(rows, cols);
+
     match transform_type {
         TransformType::Dct => {
-            // 기존 방식 사용 (최적화 안함)
-            let mut coeffs_matrix = Array2::<f32>::zeros((rows, cols));
-            for coeff in residuals {
-                let (r, c) = (coeff.index.0 as usize, coeff.index.1 as usize);
-                if r < rows && c < cols {
-                    coeffs_matrix[(r, c)] = coeff.value;
-                }
-            }
-            coeffs_matrix.into_raw_vec()
+            decode_dct_residuals_optimized(residuals, rows, cols, output.as_mut_slice());
         },
         TransformType::Dwt => {
-            decode_dwt_residuals_optimized(residuals, rows, cols)
+            let decoded_dwt = decode_dwt_residuals_optimized(residuals, rows, cols);
+             for r in 0..rows {
+                for c in 0..cols {
+                    output[(r, c)] = decoded_dwt[r * cols + c];
+                }
+            }
+        },
+        TransformType::Standard => {
+             for coeff in residuals {
+                let (r, c) = (coeff.index.0 as usize, coeff.index.1 as usize);
+                if r < rows && c < cols {
+                    output[(r, c)] = coeff.value;
+                }
+            }
         },
         TransformType::Adaptive => {
-            vec![0.0; total_size]
-        }
+            // Adaptive logic would go here
+        },
     }
+
+    output.transpose().data.into()
 }
+
+/// 최적화된 DCT 잔차 디코딩 (임시 구현)
+fn decode_dct_residuals_optimized(
+    residuals: &[ResidualCoefficient], 
+    rows: usize, 
+    cols: usize,
+    output_slice: &mut [f32]
+) {
+    // 임시로 DWT 디코딩 사용
+    let dwt_decoded = decode_dwt_residuals_optimized(residuals, rows, cols);
+    output_slice.copy_from_slice(&dwt_decoded);
+}
+
 
 /// 최적화된 DWT 잔차 디코딩
 fn decode_dwt_residuals_optimized(
-    residuals: &[crate::core::packed_params::ResidualCoefficient], 
+    residuals: &[ResidualCoefficient], 
     rows: usize, 
     cols: usize
 ) -> Vec<f32> {
@@ -260,5 +280,115 @@ fn simd_add_vectors_fallback(a: &[f32], b: &[f32], result: &mut Vec<f32>) {
     // 단순 반복문보다 빠른 청크 단위 처리
     for (ai, bi) in a.iter().zip(b.iter()) {
         result.push(ai + bi);
+    }
+} 
+
+/// 더미 RBE 디코더 구현
+pub struct OptimizedRBEDecoder;
+
+impl OptimizedRBEDecoder {
+    pub fn new() -> Self {
+        Self
+    }
+    /// RBE 파라미터로부터 기본 블록 생성
+    fn generate_base_block(rbe_params: &[f32; 8], rows: usize, cols: usize) -> DMatrix<f32> {
+        let mut result_matrix = DMatrix::zeros(rows, cols);
+        
+        // 미리 계산된 상수들 (메모리 레이아웃 최적화)
+        let pi = std::f32::consts::PI;
+        let inv_cols = if cols > 1 { 2.0 / (cols - 1) as f32 } else { 0.0 };
+        let inv_rows = if rows > 1 { 2.0 / (rows - 1) as f32 } else { 0.0 };
+        
+        // RBE 파라미터를 사용한 기저 함수 계산
+        for r in 0..rows {
+            let y = (r as f32 * inv_rows) - 1.0;
+            let pi_y = pi * y;
+            let pi2_y = 2.0 * pi_y;
+            let cos_pi_y = pi_y.cos();
+            let cos_2pi_y = pi2_y.cos();
+            
+            for c in 0..cols {
+                let x = (c as f32 * inv_cols) - 1.0;
+                let d = (x * x + y * y).sqrt();
+                let d_squared = d * d;
+                
+                let pi_x = pi * x;
+                let pi2_x = 2.0 * pi_x;
+                let cos_pi_x = pi_x.cos();
+                let cos_2pi_x = pi2_x.cos();
+                let cos_pi_xy = cos_pi_x * cos_pi_y;
+                
+                // 8개 기저 함수와 RBE 파라미터의 선형 결합
+                let mut value = 0.0;
+                value += rbe_params[0] * 1.0;           // 상수항
+                value += rbe_params[1] * d;             // 거리
+                value += rbe_params[2] * d_squared;     // 거리 제곱
+                value += rbe_params[3] * cos_pi_x;      // x 코사인
+                value += rbe_params[4] * cos_pi_y;      // y 코사인
+                value += rbe_params[5] * cos_2pi_x;     // 2x 코사인
+                value += rbe_params[6] * cos_2pi_y;     // 2y 코사인
+                value += rbe_params[7] * cos_pi_xy;     // xy 교차항
+                
+                result_matrix[(r, c)] = value;
+            }
+        }
+        
+        result_matrix
+    }
+
+    /// 더미 잔차 디코딩 (RBE 파라미터로부터 기본 블록 생성)
+    fn decode_residuals(
+        residuals: &[ResidualCoefficient], 
+        rows: usize, 
+        cols: usize, 
+        transform_type: TransformType
+    ) -> Vec<f32> {
+        let mut output = DMatrix::zeros(rows, cols);
+
+        match transform_type {
+            TransformType::Dct => {
+                decode_dct_residuals_optimized(residuals, rows, cols, output.as_mut_slice());
+            },
+            TransformType::Dwt => {
+                let decoded_dwt = decode_dwt_residuals_optimized(residuals, rows, cols);
+                for r in 0..rows {
+                    for c in 0..cols {
+                        output[(r, c)] = decoded_dwt[r * cols + c];
+                    }
+                }
+            },
+            TransformType::Standard => {
+                 for coeff in residuals {
+                    let (r, c) = (coeff.index.0 as usize, coeff.index.1 as usize);
+                    if r < rows && c < cols {
+                        output[(r, c)] = coeff.value;
+                    }
+                }
+            },
+            TransformType::Adaptive => {
+                // Adaptive logic would go here
+            },
+        }
+
+        output.transpose().data.into()
+    }
+}
+
+/// 더미 가중치 생성기
+#[derive(Default, Clone)]
+pub struct WeightGenerator;
+
+impl WeightGenerator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn decode_block(&self, block: &HybridEncodedBlock) -> Vec<f32> {
+        // HybridEncodedBlock의 자체 decode 메소드 사용
+        block.decode()
+    }
+
+    pub fn clear_cache(&self) {
+        // No cache to clear in this dummy implementation
     }
 } 

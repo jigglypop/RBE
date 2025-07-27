@@ -3,26 +3,22 @@
 //! core 구현체를 활용한 실제 NLP 레이어 구현
 
 pub mod linear;
-// pub mod model_tools;
-// pub mod bert_inference;
-// pub mod embedding;
-// pub mod layernorm;
-// pub mod ffn;
-// pub mod attention;
-// pub mod dropout;
-// pub mod softmax;
-// pub mod rmsnorm;
-// pub mod accuracy_utils;
+pub mod model_tools;
+pub mod embedding;
+pub mod layernorm;
+pub mod ffn;
+pub mod attention;
+pub mod dropout;
+pub mod softmax;
+pub mod rmsnorm;
 
-// candle 비교 테스트
-// #[cfg(test)]
-// pub mod candle_comparison_test;
-
-// tensor 모듈 제거 - WeightGenerator 직접 사용으로 대체
+// KoGPT-2 RBE 구현
+pub mod kogpt2_rbe;
 
 // 재-export for convenience
 pub use linear::*;
-// pub use model_tools::*;
+pub use model_tools::*;
+pub use kogpt2_rbe::*;
 
 /// 두 벡터 간의 상대 오차 계산
 pub fn compute_relative_error(reference: &[f32], approximation: &[f32]) -> f32 {
