@@ -1,7 +1,9 @@
 //! 비트 도메인 푸앵카레볼 리만 Adam 최적화기
-//! 정확한 수학적 구현과 비트 정밀도 보장
+//! 정확한 수학적 구현과 비트 정밀도 보장 (Enhanced128 통합)
 
 use crate::core::tensors::packed_types::*;
+use crate::core::tensors::{Enhanced128, EnhancedParams};
+use crate::core::optimizers::adam::RBESeed;
 use std::f32::consts::PI;
 
 /// 비트 도메인 리만 Adam 상태
@@ -147,7 +149,57 @@ impl BitRiemannianAdamState {
         }
     }
     
-    /// **핵심: 정밀한 리만 Adam 업데이트**
+    /// **핵심: 제네릭 리만 Adam 업데이트 (Enhanced128 지원)**
+    pub fn bit_riemannian_update_generic<T: RBESeed>(
+        &mut self,
+        seed: &mut T,
+        i: usize,
+        j: usize,
+        target: f32,
+        learning_rate: f32,
+        rows: usize,
+        cols: usize,
+    ) {
+        self.t += 1;
+        
+        // 1. 리만 그래디언트 계산 (제네릭)
+        let (grad_r, grad_theta, _predicted) = seed.compute_gradients(i, j, rows, cols, target, true);
+        
+        // 2. 그래디언트 클리핑
+        let grad_r_clipped = grad_r.clamp(-self.clip_grad, self.clip_grad);
+        let grad_theta_clipped = grad_theta.clamp(-self.clip_grad, self.clip_grad);
+        
+        // 3. Adam 모멘트 업데이트
+        self.m_r = self.beta1 * self.m_r + (1.0 - self.beta1) * grad_r_clipped;
+        self.m_theta = self.beta1 * self.m_theta + (1.0 - self.beta1) * grad_theta_clipped;
+        
+        self.v_r = self.beta2 * self.v_r + (1.0 - self.beta2) * grad_r_clipped.powi(2);
+        self.v_theta = self.beta2 * self.v_theta + (1.0 - self.beta2) * grad_theta_clipped.powi(2);
+        
+        // 4. AMSGrad (선택적)
+        if self.use_amsgrad {
+            self.vmax_r = self.vmax_r.max(self.v_r);
+            self.vmax_theta = self.vmax_theta.max(self.v_theta);
+        }
+        
+        // 5. 편향 보정
+        let bias_correction1 = 1.0 - self.beta1.powi(self.t as i32);
+        let bias_correction2 = 1.0 - self.beta2.powi(self.t as i32);
+        
+        let m_hat_r = self.m_r / bias_correction1;
+        let m_hat_theta = self.m_theta / bias_correction1;
+        
+        let v_to_use_r = if self.use_amsgrad { self.vmax_r } else { self.v_r };
+        let v_to_use_theta = if self.use_amsgrad { self.vmax_theta } else { self.v_theta };
+        
+        let v_hat_r = v_to_use_r / bias_correction2;
+        let v_hat_theta = v_to_use_theta / bias_correction2;
+        
+        // 6. 제네릭 업데이트 (RBESeed 트레이트 사용)
+        seed.adam_update(m_hat_r, m_hat_theta, v_hat_r, v_hat_theta, learning_rate, self.epsilon);
+    }
+
+    /// **기존 호환성: Packed128 전용 리만 Adam 업데이트**
     pub fn bit_riemannian_update(
         &mut self,
         packed: &mut Packed128,
@@ -311,5 +363,35 @@ impl BitRiemannianAdamState {
         let (t, m_r, v_r, m_theta, v_theta) = optimizer.get_state_info();
         println!("최종 상태: t={}, m_r={:.6}, v_r={:.6}, m_θ={:.6}, v_θ={:.6}",
                 t, m_r, v_r, m_theta, v_theta);
+    }
+}
+
+impl BitRiemannianAdamState {
+    /// Enhanced128을 위한 리만 Adam 업데이트 (편의 메서드)
+    pub fn bit_riemannian_update_enhanced(
+        &mut self,
+        enhanced: &mut Enhanced128,
+        i: usize,
+        j: usize,
+        target: f32,
+        learning_rate: f32,
+        rows: usize,
+        cols: usize,
+    ) {
+        self.bit_riemannian_update_generic(enhanced, i, j, target, learning_rate, rows, cols);
+    }
+    
+    /// Packed128을 위한 리만 Adam 업데이트 (편의 메서드)
+    pub fn bit_riemannian_update_packed128(
+        &mut self,
+        packed: &mut Packed128,
+        i: usize,
+        j: usize,
+        target: f32,
+        learning_rate: f32,
+        rows: usize,
+        cols: usize,
+    ) {
+        self.bit_riemannian_update(packed, i, j, target, learning_rate, rows, cols);
     }
 } 

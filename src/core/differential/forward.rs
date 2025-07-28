@@ -1,9 +1,11 @@
 //! # 비트 도메인 초고속 순전파 엔진 (Bit-Domain Ultra-Fast Forward Engine)
 //!
 //! Packed128::fused_forward의 30,904 epoch/s 성능을 활용한
-//! 순수 비트 연산 순전파 시스템
+//! 순수 비트 연산 순전파 시스템 (Enhanced128 통합)
 
 use crate::core::tensors::packed_types::{Packed128, BitGradientTracker};
+use crate::core::tensors::Enhanced128;
+use crate::core::optimizers::adam::RBESeed;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -62,10 +64,10 @@ impl BitForwardPass {
         }
     }
     
-    /// **핵심 메서드**: 비트 도메인 초고속 순전파 (30,904+ epoch/s)
-    pub fn bit_forward_ultra_fast(
+    /// **핵심 메서드**: 비트 도메인 초고속 순전파 (Enhanced128 지원)
+    pub fn bit_forward_ultra_fast<T: RBESeed>(
         &mut self,
-        packed: &Packed128,
+        seed: &T,
         i: usize,
         j: usize,
         rows: usize,
@@ -73,26 +75,66 @@ impl BitForwardPass {
     ) -> f32 {
         let start = Instant::now();
         
-        // 1. 비트 캐시 확인 (극한 최적화)
-        let cache_key = (packed.hi, packed.lo, i as u16, j as u16);
+        // Enhanced128과 Packed128에 대한 캐시 키 생성 (제네릭)
+        let cache_key = self.generate_cache_key(seed, i as u16, j as u16);
         if let Some(&cached_result) = self.bit_cache.get(&cache_key) {
             self.performance_metrics.bit_cache_hit_rate += 0.01; // 추적
             return Self::fixed_point_to_f32(cached_result);
         }
         
-        // 2. Packed128의 fused_forward 직접 호출 (30,904 epoch/s 성능)
-        let result = packed.fused_forward(i, j, rows, cols);
+        // 제네릭 fused_forward 호출
+        let result = seed.fused_forward(i, j, rows, cols);
         
-        // 3. 결과를 고정소수점으로 캐시 (메모리 효율성)
+        // 결과를 고정소수점으로 캐시 (메모리 효율성)
         let fixed_result = Self::f32_to_fixed_point(result);
         self.bit_cache.insert(cache_key, fixed_result);
         
-        // 4. 성능 메트릭 업데이트
+        // 성능 메트릭 업데이트
         let elapsed_ns = start.elapsed().as_nanos() as f32;
         self.performance_metrics.avg_bit_computation_ns = 
             (self.performance_metrics.avg_bit_computation_ns * 0.99) + (elapsed_ns * 0.01);
         
         result
+    }
+
+    /// 기존 Packed128 전용 버전 (호환성 유지)
+    pub fn bit_forward_ultra_fast_packed128(
+        &mut self,
+        packed: &Packed128,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+    ) -> f32 {
+        self.bit_forward_ultra_fast(packed, i, j, rows, cols)
+    }
+
+    /// Enhanced128을 위한 순전파 (편의 메서드)
+    pub fn bit_forward_ultra_fast_enhanced(
+        &mut self,
+        enhanced: &Enhanced128,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+    ) -> f32 {
+        self.bit_forward_ultra_fast(enhanced, i, j, rows, cols)
+    }
+
+    /// 제네릭 캐시 키 생성
+    fn generate_cache_key<T: RBESeed>(&self, seed: &T, i: u16, j: u16) -> (u64, u64, u16, u16) {
+        // 기본 해시 기반 캐시 키 (타입에 관계없이 작동)
+        let hash = self.compute_seed_hash(seed);
+        (hash.0, hash.1, i, j)
+    }
+
+    /// 시드 해시 계산 (제네릭)
+    fn compute_seed_hash<T: RBESeed>(&self, seed: &T) -> (u64, u64) {
+        // 임시로 간단한 해시 (더 정교한 해시로 개선 가능)
+        let params = seed.decode();
+        // 메모리 주소를 기반으로 한 해시 (임시)
+        let ptr = seed as *const T as u64;
+        (ptr, ptr.wrapping_mul(0x9e3779b97f4a7c15))
     }
 
     /// 배치 순전파: 여러 위치를 한 번에 처리 (벡터화 최적화)

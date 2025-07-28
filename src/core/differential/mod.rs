@@ -19,6 +19,9 @@ pub use backward::{
     OptimizerType
 };
 
+use crate::core::tensors::{Packed128, Enhanced128};
+use crate::core::optimizers::adam::RBESeed;
+
 /// 비트 도메인 통합 미분 시스템 (완전 독립형)
 #[derive(Debug, Clone)]
 pub struct DifferentialSystem {
@@ -43,25 +46,49 @@ impl DifferentialSystem {
         }
     }
     
-    /// **핵심 메서드**: 비트 도메인 통합 순전파 (30,904+ epoch/s)
-    pub fn unified_forward(
+    /// **제네릭 핵심 메서드**: 비트 도메인 통합 순전파 (Enhanced128 지원)
+    pub fn unified_forward_generic<T: RBESeed>(
         &mut self,
-        packed: &crate::core::tensors::packed_types::Packed128,
+        seed: &T,
         i: usize,
         j: usize,
         rows: usize,
         cols: usize,
     ) -> f32 {
         // 순수 비트 도메인 초고속 순전파 직접 호출
-        self.forward_engine.bit_forward_ultra_fast(packed, i, j, rows, cols)
+        self.forward_engine.bit_forward_ultra_fast(seed, i, j, rows, cols)
+    }
+
+    /// **기존 호환성**: Packed128 전용 순전파
+    pub fn unified_forward(
+        &mut self,
+        packed: &Packed128,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+    ) -> f32 {
+        self.unified_forward_generic(packed, i, j, rows, cols)
+    }
+
+    /// Enhanced128을 위한 순전파 (편의 메서드)
+    pub fn unified_forward_enhanced(
+        &mut self,
+        enhanced: &Enhanced128,
+        i: usize,
+        j: usize,
+        rows: usize,
+        cols: usize,
+    ) -> f32 {
+        self.unified_forward_generic(enhanced, i, j, rows, cols)
     }
     
-    /// **핵심 메서드**: 비트 도메인 통합 역전파 (옵티마이저 자동 선택)
-    pub fn unified_backward(
+    /// **제네릭 핵심 메서드**: 비트 도메인 통합 역전파 (Enhanced128 지원)
+    pub fn unified_backward_generic<T: RBESeed>(
         &mut self,
         target: &[f32],
         predicted: &[f32],
-        packed: &mut crate::core::tensors::packed_types::Packed128,
+        seed: &mut T,
         rows: usize,
         cols: usize,
         learning_rate: f32,
@@ -77,18 +104,44 @@ impl DifferentialSystem {
                     break;
                 }
                 
-                let loss = self.backward_engine.bit_backward_ultra_fast(
-                    packed, target[idx], predicted[idx], i, j, learning_rate, rows, cols
+                let loss = self.backward_engine.bit_backward_ultra_fast_generic(
+                    seed, target[idx], predicted[idx], i, j, learning_rate, rows, cols
                 );
                 total_loss += loss;
                 operations += 1;
             }
         }
-        
+
         let avg_loss = if operations > 0 { total_loss / operations as f32 } else { 0.0 };
         let metrics = self.backward_engine.get_performance_metrics().clone();
         
         (avg_loss, metrics)
+    }
+
+    /// **기존 호환성**: Packed128 전용 역전파
+    pub fn unified_backward(
+        &mut self,
+        target: &[f32],
+        predicted: &[f32],
+        packed: &mut Packed128,
+        rows: usize,
+        cols: usize,
+        learning_rate: f32,
+    ) -> (f32, GradientMetrics) {
+        self.unified_backward_generic(target, predicted, packed, rows, cols, learning_rate)
+    }
+
+    /// Enhanced128을 위한 역전파 (편의 메서드)
+    pub fn unified_backward_enhanced(
+        &mut self,
+        target: &[f32],
+        predicted: &[f32],
+        enhanced: &mut Enhanced128,
+        rows: usize,
+        cols: usize,
+        learning_rate: f32,
+    ) -> (f32, GradientMetrics) {
+        self.unified_backward_generic(target, predicted, enhanced, rows, cols, learning_rate)
     }
     
     /// **최고 성능**: 통합 순전파-역전파 (원패스)

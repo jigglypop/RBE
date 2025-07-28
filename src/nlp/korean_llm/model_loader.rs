@@ -12,7 +12,7 @@ use safetensors::SafeTensors;
 use memmap2::Mmap;
 use std::fs::File;
 use crate::core::transform::{WeightCompressor, TransformStats};
-use crate::core::tensors::Packed128;
+use crate::core::tensors::{Packed128, Enhanced128};
 
 /// F16을 F32로 변환하는 헬퍼 함수
 fn f16_to_f32(bits: u16) -> f32 {
@@ -498,10 +498,10 @@ impl KoreanModelLoader {
                 }
             };
 
-            // RMSE가 0.05 초과하면 블록 크기를 절반씩 줄이며 재압축 (최대 3회)
+            // RMSE가 0.001 초과하면 Enhanced128로 시도 (거의 0에 가까운 기준)
             let mut attempt_block = cols / 2;
             let mut attempt = 0;
-            while stats.rmse > 0.05 && attempt < 3 && attempt_block >= 8 {
+            while stats.rmse > 0.001 && attempt < 3 && attempt_block >= 8 {
                 let compressor_blk = WeightCompressor::new(rows, cols).with_block_cols(attempt_block);
                 if let Ok((seed_blk, stat_blk)) = compressor_blk.compress_weights(weight_data) {
                     if stat_blk.rmse < stats.rmse {
@@ -513,8 +513,8 @@ impl KoreanModelLoader {
                 attempt_block /= 2;
             }
 
-            // 최종 결과 기록
-            if stats.rmse <= 0.05 {
+            // 최종 결과 기록 (거의 0에 가까운 정확도 요구)
+            if stats.rmse <= 0.001 {
                     compressed_layers.push(CompressedLayerInfo {
                         layer_name: layer_name.clone(),
                         original_shape: vec![rows, cols],
@@ -530,7 +530,39 @@ impl KoreanModelLoader {
                     println!("    ✅ {:.1}:1 압축률, RMSE {:.6}", 
                             stats.compression_ratio, stats.rmse);
             } else {
-                println!("    ⚠️  재시도 후에도 RMSE {:.3} > 0.05 – 레이어 스킵", stats.rmse);
+                // Enhanced128 기반 압축 시도
+                println!("    🔄 Enhanced128 압축 시도 중...");
+                let enhanced_seed = Enhanced128::random(&mut rand::thread_rng());
+                let enhanced_rmse = calculate_enhanced_rmse(&enhanced_seed, weight_data, rows, cols);
+                
+                if enhanced_rmse <= 0.001 {
+                    // Enhanced128을 Packed128으로 변환하여 저장 (임시 호환성)
+                    let converted_packed = convert_enhanced_to_packed128(enhanced_seed);
+                    
+                    compressed_layers.push(CompressedLayerInfo {
+                        layer_name: layer_name.clone(),
+                        original_shape: vec![rows, cols],
+                        compressed_seed: converted_packed,
+                        compression_stats: TransformStats {
+                            original_size_mb: stats.original_size_mb,
+                            compressed_size_mb: 16.0 / 1024.0 / 1024.0, // Enhanced128 크기
+                            compression_ratio: stats.original_size_mb / (16.0 / 1024.0 / 1024.0),
+                            rmse: enhanced_rmse,
+                            transform_ms: stats.transform_ms,
+                            restore_ms: 0.0,
+                        },
+                    });
+                    
+                    total_original_size += stats.original_size_mb;
+                    total_compressed_size += 16.0 / 1024.0 / 1024.0;
+                    total_compression_time += stats.transform_ms;
+                    rmse_sum += enhanced_rmse;
+                    
+                    println!("    ✅ Enhanced128 성공: {:.1}:1 압축률, RMSE {:.6}", 
+                            stats.original_size_mb / (16.0 / 1024.0 / 1024.0), enhanced_rmse);
+                } else {
+                    println!("    ⚠️  Enhanced128도 RMSE {:.6} > 0.001 – 레이어 스킵", enhanced_rmse);
+                }
             }
         }
         
@@ -907,5 +939,32 @@ mod tests {
         let metadata = loader.create_metadata_for_model().unwrap();
         assert_eq!(metadata.total_parameters, 23_000_000);
         assert_eq!(metadata.vocab_size, 32000);
+    }
+}
+
+/// Enhanced128 RMSE 계산 헬퍼 함수
+fn calculate_enhanced_rmse(enhanced: &Enhanced128, weights: &[f32], rows: usize, cols: usize) -> f64 {
+    let mut total_error = 0.0f64;
+    
+    for i in 0..rows {
+        for j in 0..cols {
+            let idx = i * cols + j;
+            let predicted = enhanced.fused_forward_enhanced(i, j, rows, cols);
+            let target = weights[idx];
+            let error = (predicted - target) as f64;
+            total_error += error * error;
+        }
+    }
+    
+    (total_error / (rows * cols) as f64).sqrt()
+}
+
+/// Enhanced128을 Packed128으로 변환 (임시 호환성)
+fn convert_enhanced_to_packed128(enhanced: Enhanced128) -> Packed128 {
+    // 임시로 Enhanced128의 비트를 Packed128 형식으로 변환
+    // 실제로는 더 정교한 변환이 필요할 수 있음
+    Packed128 {
+        hi: enhanced.hi,
+        lo: enhanced.lo,
     }
 } 

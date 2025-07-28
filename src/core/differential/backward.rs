@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 use std::time::Instant;
-use crate::core::tensors::Packed128;
-use crate::core::optimizers::{BitAdamState, BitRiemannianAdamState};
+use crate::core::tensors::{Packed128, Enhanced128};
+use crate::core::optimizers::{BitAdamState, BitRiemannianAdamState, adam::RBESeed};
 
 // Public re-export for mod.rs
 pub use crate::core::optimizers::OptimizerType;
@@ -89,7 +89,47 @@ impl BitBackwardPass {
         }
     }
 
-    /// 코어 역전파 및 최적화 로직
+    /// **제네릭 코어 역전파 및 최적화 로직 (Enhanced128 지원)**
+    pub fn bit_backward_ultra_fast_generic<T: RBESeed>(
+        &mut self,
+        seed: &mut T,
+        target: f32,
+        predicted: f32,
+        i: usize, j: usize,
+        learning_rate: f32,
+        rows: usize, cols: usize
+    ) -> f32 {
+        let start = Instant::now();
+        let loss = Self::calculate_loss(predicted, target);
+
+        // 옵티마이저 선택 (배치 내 위치 기반)
+        let optimizer_idx = (i * cols + j) % self.optimizer_integration.adam_pool.len();
+
+        match self.optimizer_integration.active_optimizer_type {
+            OptimizerType::BitAdam => {
+                let adam_optimizer = &mut self.optimizer_integration.adam_pool[optimizer_idx];
+                adam_optimizer.bit_update(seed, i, j, rows, cols, target, learning_rate);
+            }
+            OptimizerType::BitRiemannianAdam => {
+                let riemann_optimizer = &mut self.optimizer_integration.riemann_pool[optimizer_idx];
+                riemann_optimizer.bit_riemannian_update_generic(seed, i, j, target, learning_rate, rows, cols);
+            }
+            OptimizerType::SGD | OptimizerType::RMSprop | OptimizerType::Hybrid => {
+                // 기본적으로 BitAdam으로 폴백
+                let adam_optimizer = &mut self.optimizer_integration.adam_pool[optimizer_idx];
+                adam_optimizer.bit_update(seed, i, j, rows, cols, target, learning_rate);
+            }
+        }
+
+        // 성능 메트릭 업데이트
+        let elapsed_ns = start.elapsed().as_nanos() as f32;
+        self.performance_metrics.avg_backward_time_ns = 
+            (self.performance_metrics.avg_backward_time_ns * 0.99) + (elapsed_ns * 0.01);
+
+        loss
+    }
+
+    /// **기존 호환성: Packed128 전용 역전파**
     pub fn bit_backward_ultra_fast(
         &mut self,
         packed: &mut Packed128,
@@ -147,7 +187,36 @@ impl BitBackwardPass {
         self.performance_metrics.avg_backward_time_ns = 
             (self.performance_metrics.avg_backward_time_ns * 0.99) + (elapsed_ns * 0.01);
         
-        loss
+        // 제네릭 메서드로 위임
+        self.bit_backward_ultra_fast_generic(packed, target, predicted, i, j, learning_rate, rows, cols)
+    }
+
+    /// Enhanced128을 위한 역전파 (편의 메서드)
+    pub fn bit_backward_ultra_fast_enhanced(
+        &mut self,
+        enhanced: &mut Enhanced128,
+        target: f32,
+        predicted: f32,
+        i: usize, j: usize,
+        learning_rate: f32,
+        rows: usize, cols: usize
+    ) -> f32 {
+        self.bit_backward_ultra_fast_generic(enhanced, target, predicted, i, j, learning_rate, rows, cols)
+    }
+
+    /// **제네릭 통합 순전파-역전파**
+    pub fn unified_forward_backward_generic<T: RBESeed>(
+        &mut self,
+        seed: &mut T,
+        forward_engine: &mut crate::core::differential::forward::BitForwardPass,
+        target: f32,
+        i: usize, j: usize,
+        learning_rate: f32,
+        rows: usize, cols: usize
+    ) -> (f32, f32) {
+        let predicted = forward_engine.bit_forward_ultra_fast(seed, i, j, rows, cols);
+        let loss = self.bit_backward_ultra_fast_generic(seed, target, predicted, i, j, learning_rate, rows, cols);
+        (predicted, loss)
     }
 
     pub fn unified_forward_backward(
@@ -159,9 +228,8 @@ impl BitBackwardPass {
         learning_rate: f32,
         rows: usize, cols: usize
     ) -> (f32, f32) {
-        let predicted = forward_engine.bit_forward_ultra_fast(packed, i, j, rows, cols);
-        let loss = self.bit_backward_ultra_fast(packed, target, predicted, i, j, learning_rate, rows, cols);
-        (predicted, loss)
+        // 제네릭 메서드로 위임
+        self.unified_forward_backward_generic(packed, forward_engine, target, i, j, learning_rate, rows, cols)
     }
 
     pub fn bit_backward_batch(
