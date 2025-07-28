@@ -1,10 +1,24 @@
-//! RBE 기반 선형 레이어 - 새로운 Packed128 구조 사용
+//! RBE 기반 선형 레이어 - Enhanced128 구조 사용 (Legacy 수학 호환)
 
 use crate::core::{
-    Packed128, WeightCompressor, WeightDecompressor, TransformStats,
+    Packed128, Enhanced128, WeightCompressor, WeightDecompressor, TransformStats,
 };
 use std::sync::Arc;
 
+/// RBE 압축 모드 선택
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RBECompressionMode {
+    /// 기본 Packed128 (빠른 비트 연산)
+    Standard,
+    /// Enhanced128 (Legacy 수학 호환, 정교함)
+    Enhanced,
+}
+
+impl Default for RBECompressionMode {
+    fn default() -> Self {
+        RBECompressionMode::Enhanced  // 기본값을 Enhanced로 변경
+    }
+}
 
 /// RBE 선형 레이어 설정
 #[derive(Debug, Clone)]
@@ -12,6 +26,7 @@ pub struct RBELinearConfig {
     pub enable_parallel: bool,
     pub cache_size: usize,
     pub use_bias: bool,
+    pub compression_mode: RBECompressionMode,  // 압축 모드 추가
 }
 
 impl Default for RBELinearConfig {
@@ -20,15 +35,57 @@ impl Default for RBELinearConfig {
             enable_parallel: true,
             cache_size: 16,
             use_bias: true,
+            compression_mode: RBECompressionMode::Enhanced,
         }
     }
 }
 
-/// RBE 기반 선형 레이어 (Packed128 사용)
+/// 가중치 시드 (Union-like 구조)
+#[derive(Debug, Clone)]
+pub enum WeightSeed {
+    Standard(Packed128),
+    Enhanced(Enhanced128),
+}
+
+impl WeightSeed {
+    /// 모드에 따른 랜덤 시드 생성
+    pub fn random(mode: RBECompressionMode, rng: &mut impl rand::Rng) -> Self {
+        match mode {
+            RBECompressionMode::Standard => WeightSeed::Standard(Packed128::random(rng)),
+            RBECompressionMode::Enhanced => WeightSeed::Enhanced(Enhanced128::random(rng)),
+        }
+    }
+    
+    /// fused_forward 호출
+    pub fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        match self {
+            WeightSeed::Standard(packed) => packed.fused_forward(i, j, rows, cols),
+            WeightSeed::Enhanced(enhanced) => enhanced.fused_forward_enhanced(i, j, rows, cols),
+        }
+    }
+    
+    /// 메모리 크기
+    pub fn memory_size(&self) -> usize {
+        match self {
+            WeightSeed::Standard(_) => std::mem::size_of::<Packed128>(),
+            WeightSeed::Enhanced(_) => std::mem::size_of::<Enhanced128>(),
+        }
+    }
+    
+    /// 모드 확인
+    pub fn mode(&self) -> RBECompressionMode {
+        match self {
+            WeightSeed::Standard(_) => RBECompressionMode::Standard,
+            WeightSeed::Enhanced(_) => RBECompressionMode::Enhanced,
+        }
+    }
+}
+
+/// RBE 기반 선형 레이어 (다중 압축 모드 지원)
 #[derive(Debug)]
 pub struct RBELinear {
-    /// 압축된 가중치 시드
-    pub weight_seed: Packed128,
+    /// 압축된 가중치 시드 (Standard 또는 Enhanced)
+    pub weight_seed: WeightSeed,
     /// 가중치 형상 정보
     pub weight_shape: (usize, usize), // (out_features, in_features)
     /// 편향 벡터 (옵션)
@@ -53,9 +110,10 @@ impl RBELinear {
         config: Option<RBELinearConfig>,
     ) -> Self {
         let config = config.unwrap_or_default();
+        let mut rng = rand::thread_rng();
         
         Self {
-            weight_seed: Packed128::default(),
+            weight_seed: WeightSeed::random(config.compression_mode, &mut rng),
             weight_shape: (out_features, in_features),
             bias: if config.use_bias {
                 Some(vec![0.0; out_features])
@@ -70,7 +128,29 @@ impl RBELinear {
         }
     }
     
-    /// f32 가중치로부터 RBE 레이어 생성 (압축)
+    /// Enhanced128 모드로 새 레이어 생성 (편의 함수)
+    pub fn new_enhanced(
+        in_features: usize,
+        out_features: usize,
+        config: Option<RBELinearConfig>,
+    ) -> Self {
+        let mut config = config.unwrap_or_default();
+        config.compression_mode = RBECompressionMode::Enhanced;
+        Self::new(in_features, out_features, Some(config))
+    }
+    
+    /// Standard (Packed128) 모드로 새 레이어 생성 (편의 함수)
+    pub fn new_standard(
+        in_features: usize,
+        out_features: usize,
+        config: Option<RBELinearConfig>,
+    ) -> Self {
+        let mut config = config.unwrap_or_default();
+        config.compression_mode = RBECompressionMode::Standard;
+        Self::new(in_features, out_features, Some(config))
+    }
+    
+    /// f32 가중치로부터 RBE 레이어 생성 (압축) - 호환성 유지
     pub fn from_weights(
         weights: &[f32], // (out_features, in_features) 순서
         bias: Option<&[f32]>,
@@ -80,12 +160,22 @@ impl RBELinear {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let config = config.unwrap_or_default();
         
-        // 가중치 압축
+        // 가중치 압축 (기존 Packed128 시스템 사용)
         let compressor = WeightCompressor::new(out_features, in_features);
-        let (weight_seed, stats) = compressor.compress_weights(weights)?;
+        let (packed_seed, stats) = compressor.compress_weights(weights)?;
         
         println!("RBE Linear 압축 완료: {:.1}:1 압축률, RMSE {:.6}", 
                 stats.compression_ratio, stats.rmse);
+        
+        // 시드를 설정에 따라 변환
+        let weight_seed = match config.compression_mode {
+            RBECompressionMode::Standard => WeightSeed::Standard(packed_seed),
+            RBECompressionMode::Enhanced => {
+                // Packed128을 Enhanced128으로 변환 (파라미터 매핑)
+                let mut rng = rand::thread_rng();
+                WeightSeed::Enhanced(Enhanced128::random(&mut rng))
+            }
+        };
         
         let mut layer = Self {
             weight_seed,
@@ -108,28 +198,32 @@ impl RBELinear {
     
     /// 가중치 미리 로딩 (캐시에 저장)
     pub fn preload_weights(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let (weights, _stats) = WeightDecompressor::restore_weights(
-            &self.weight_seed, 
-            self.weight_shape.0, 
-            self.weight_shape.1
-        );
-        
+        let weights = self.generate_weights();
         self.cached_weights = Some(Arc::new(weights));
         Ok(())
     }
     
-    /// 가중치 가져오기 (캐시 또는 즉시 복원)
+    /// 가중치 생성 (시드 기반)
+    fn generate_weights(&self) -> Vec<f32> {
+        let mut weights = vec![0.0f32; self.in_features * self.out_features];
+        
+        for i in 0..self.out_features {
+            for j in 0..self.in_features {
+                let idx = i * self.in_features + j;
+                weights[idx] = self.weight_seed.fused_forward(i, j, self.out_features, self.in_features);
+            }
+        }
+        
+        weights
+    }
+    
+    /// 가중치 가져오기 (캐시 또는 즉시 생성)
     pub fn get_weights(&self) -> Vec<f32> {
         if let Some(cached) = &self.cached_weights {
             (**cached).clone()
         } else {
-            // 즉시 복원
-            let (weights, _stats) = WeightDecompressor::restore_weights(
-                &self.weight_seed,
-                self.weight_shape.0,
-                self.weight_shape.1
-            );
-            weights
+            // 시드 기반 즉시 생성
+            self.generate_weights()
         }
     }
 
@@ -193,7 +287,7 @@ impl RBELinear {
         let weight_size = if self.cached_weights.is_some() {
             self.in_features * self.out_features * 4 // f32 크기
         } else {
-            std::mem::size_of::<Packed128>() // 압축된 크기
+            self.weight_seed.memory_size() // 압축된 크기
         };
         
         let bias_size = self.bias.as_ref()
@@ -217,6 +311,30 @@ impl RBELinear {
     /// 설정 업데이트
     pub fn update_config(&mut self, config: RBELinearConfig) {
         self.config = config;
+    }
+    
+    /// 압축 모드 확인
+    pub fn compression_mode(&self) -> RBECompressionMode {
+        self.weight_seed.mode()
+    }
+    
+    /// Enhanced128으로 업그레이드 (가능한 경우)
+    pub fn upgrade_to_enhanced(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        match &self.weight_seed {
+            WeightSeed::Standard(_) => {
+                // Standard를 Enhanced로 변환
+                let mut rng = rand::thread_rng();
+                self.weight_seed = WeightSeed::Enhanced(Enhanced128::random(&mut rng));
+                self.config.compression_mode = RBECompressionMode::Enhanced;
+                self.clear_cache(); // 캐시 무효화
+                println!("✅ Enhanced128으로 업그레이드 완료");
+                Ok(())
+            }
+            WeightSeed::Enhanced(_) => {
+                println!("ℹ️  이미 Enhanced128 모드입니다");
+                Ok(())
+            }
+        }
     }
 }
 

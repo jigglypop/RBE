@@ -1,6 +1,6 @@
 
-// #[cfg(test)]
-// pub mod tensors;
+#[cfg(test)]
+pub mod tensors;  // Enhanced128 테스트를 위해 활성화
 
 // #[cfg(test)]
 // pub mod differential;

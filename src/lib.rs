@@ -8,6 +8,7 @@ pub mod nlp;
 pub use core::{
     // 비트 도메인 텐서 타입들
     Packed128, DecodedParams, BitTensor, BitGradientTracker,
+    Enhanced128, EnhancedParams, FixedPoint,  // Enhanced128 추가
     // 비트 도메인 미분 시스템
     BitForwardPass, BitBackwardPass, DifferentialSystem,
     // 최적화기
@@ -21,6 +22,7 @@ pub use nlp::*;
 
 // 편의 타입 별칭
 pub type Packed = Packed128;
+pub type Enhanced = Enhanced128;  // Enhanced128 별칭 추가
 pub type BitOptimizer = BitAdamState;
 pub type RiemannianOptimizer = BitRiemannianAdamState;
 pub type ForwardEngine = BitForwardPass;
