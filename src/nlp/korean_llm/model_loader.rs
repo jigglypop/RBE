@@ -394,7 +394,7 @@ impl KoreanModelLoader {
         // 1. 파일에서 float32 패턴을 찾아서 추출
         // 2. 레이어 이름은 메타데이터에서 가져옴
         
-        let mut weights = HashMap::new();
+        let weights = HashMap::new();
         
         // GPT2 모델의 알려진 레이어 구조
         let mut gpt2_layers = vec![
@@ -437,8 +437,8 @@ impl KoreanModelLoader {
         
         // 간단한 휴리스틱: float32 배열 찾기
         // PyTorch는 일반적으로 연속된 float32 데이터를 저장
-        let mut cursor = Cursor::new(&buffer);
-        let mut offset = 0;
+        let cursor = Cursor::new(&buffer);
+        let offset = 0;
         
         // 실제 구현은 복잡하므로, 다른 방법 시도
         println!("  ⚠️  PyTorch .bin 직접 파싱은 복잡합니다. 대안을 찾고 있습니다...");
@@ -489,7 +489,7 @@ impl KoreanModelLoader {
             println!("  🔄 {} 압축 중: {}x{}", layer_name, rows, cols);
             
             // RBE 압축 수행
-            let mut compressor = WeightCompressor::new(rows, cols);
+            let compressor = WeightCompressor::new(rows, cols);
             let (mut compressed_seed, mut stats) = match compressor.compress_weights(weight_data) {
                 Ok(r) => r,
                 Err(e) => {

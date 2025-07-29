@@ -2,7 +2,6 @@
 //! 
 //! Legacy의 정교한 12가지 기저 함수를 128비트 구조에서 효율적으로 구현
 
-use super::hyperbolic_lut::HYPERBOLIC_LUT_DATA;
 use rand::Rng;
 use std::f32::consts::PI;
 
@@ -265,6 +264,33 @@ impl Enhanced128 {
     /// 현재 구현과의 호환성을 위한 기본 fused_forward
     pub fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
         self.fused_forward_enhanced(i, j, rows, cols)
+    }
+
+    /// 파라미터 디코딩 (Q16.16 부동소수점)
+    pub fn decode_q16_16(&self) -> (i32, i32) {
+        let r_q16 = ((self.lo >> 32) & 0xFFFFFFFF) as i32;
+        let theta_q16 = (self.lo & 0xFFFFFFFF) as i32;
+        (r_q16, theta_q16)
+    }
+
+    /// 기저 함수 값 계산
+    pub fn basis_function_value(&self, basis_id: u8) -> f32 {
+        let params = self.decode_enhanced();
+        let c = 2.0f32.powi(params.log2_c as i32);
+        let r = params.r_fp32;
+        let theta = params.theta_fp32;
+
+        match basis_id {
+            4 => Self::bessel_j0_approx(r * 10.0),
+            5 => Self::bessel_j0_approx(r * 10.0).cosh(),
+            6 => (-r * 10.0).exp(),
+            7 => Self::bessel_j0_approx(r * 10.0) * (r * 10.0).ln().max(-10.0),
+            8 => (c * r).tanh() * theta.cos().signum(),
+            9 => Self::sech(c * r) * Self::triangle_wave(theta),
+            10 => (-c * r).exp() * theta.sin(),
+            11 => Self::morlet_wavelet(r, theta, 5.0),
+            _ => 0.0,
+        }
     }
 }
 

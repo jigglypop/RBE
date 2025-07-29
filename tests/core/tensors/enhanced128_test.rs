@@ -1,6 +1,6 @@
 //! Enhanced128 철저한 테스트 - Legacy vs Packed128 vs Enhanced128 비교
 
-use rbe_llm::core::tensors::{Enhanced128, EnhancedParams, Packed128, AnalyticalGradient};
+use rbe_llm::core::tensors::{Enhanced128, Packed128, AnalyticalGradient};
 use std::time::Instant;
 use rand::{SeedableRng, Rng};  // Rng trait 추가
 use std::f32::consts::PI;
@@ -235,7 +235,7 @@ fn enhanced128_vs_packed128_성능_비교() {
 fn enhanced128_기저함수_전체_테스트() {
     println!("\n🔬 Enhanced128 12가지 기저 함수 전체 테스트");
     
-    let mut rng = rand::rngs::StdRng::seed_from_u64(55555);
+    let rng = rand::rngs::StdRng::seed_from_u64(55555);
     let matrix_size = 16;
     
     for basis_id in 0..12 {

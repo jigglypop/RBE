@@ -130,7 +130,7 @@ impl Packed64 {
         // CORDIC 초기화 (K ≈ 0.60725 in Q16.16)
         let mut x = 39797i32; // 0.60725 * 65536
         let mut y = 0i32;
-        let mut z = angle_fixed;
+        let z = angle_fixed;
         
         // 비트 도메인 CORDIC 회전
         for k in 0..20 {
@@ -372,7 +372,7 @@ impl Packed128 {
         println!("결과 합계: {:.6} (최적화 방지)", sum);
         
         // 2. 상태 전이 속도 측정
-        let mut packed_mut = Self::random(&mut rng);
+        let packed_mut = Self::random(&mut rng);
         let start = Instant::now();
         
         for i in 0..iterations {

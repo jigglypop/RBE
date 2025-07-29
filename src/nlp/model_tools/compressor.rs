@@ -1,11 +1,8 @@
 use crate::core::transform::{WeightCompressor, TransformStats};
 use crate::core::tensors::Packed128;
-use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 use anyhow::Result;
-use indicatif::{ProgressBar, ProgressStyle};
-use serde_json;
 
 /// 모델 압축을 담당하는 구조체
 pub struct ModelCompressor {

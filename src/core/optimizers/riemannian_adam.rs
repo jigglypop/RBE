@@ -2,7 +2,7 @@
 //! 정확한 수학적 구현과 비트 정밀도 보장 (Enhanced128 통합)
 
 use crate::core::tensors::packed_types::*;
-use crate::core::tensors::{Enhanced128, EnhancedParams};
+use crate::core::tensors::Enhanced128;
 use crate::core::optimizers::adam::RBESeed;
 use std::f32::consts::PI;
 

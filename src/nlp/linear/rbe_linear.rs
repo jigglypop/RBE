@@ -1,7 +1,7 @@
 //! RBE 기반 선형 레이어 - Enhanced128 구조 사용 (Legacy 수학 호환)
 
 use crate::core::{
-    Packed128, Enhanced128, WeightCompressor, WeightDecompressor, TransformStats,
+    Packed128, Enhanced128, WeightCompressor, TransformStats,
 };
 use std::sync::Arc;
 

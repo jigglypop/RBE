@@ -6,25 +6,14 @@ pub mod core;
 pub mod nlp;
 
 pub use core::{
-    // 비트 도메인 텐서 타입들
-    Packed128, DecodedParams, BitTensor, BitGradientTracker,
-    Enhanced128, EnhancedParams, FixedPoint,  // Enhanced128 추가
-    // 비트 도메인 미분 시스템
-    BitForwardPass, BitBackwardPass, DifferentialSystem,
-    // 최적화기
-    BitAdamState, BitRiemannianAdamState, OptimizerType,
-    // 변환 시스템
-    TransformStats, WeightCompressor, WeightDecompressor,
+    tensors::{
+        Packed128, DecodedParams, Packed256, Packed256Params, FixedPoint32,
+        Enhanced128, EnhancedParams, FixedPoint, AnalyticGradient, FixedPointMath
+    },
+    optimizers::{BitAdamState, BitRiemannianAdamState, adam::RBESeed},
+    transform::{WeightCompressor, TransformStats},
 };
 
-// nlp 모듈 re-export
-pub use nlp::*;
-
-// 편의 타입 별칭
-pub type Packed = Packed128;
-pub type Enhanced = Enhanced128;  // Enhanced128 별칭 추가
-pub type BitOptimizer = BitAdamState;
-pub type RiemannianOptimizer = BitRiemannianAdamState;
-pub type ForwardEngine = BitForwardPass;
-pub type BackwardEngine = BitBackwardPass;
-//  
+// 기본 타입 별칭들
+pub type CompressionSeed = Packed128;
+pub type HighPrecisionSeed = Packed256; 

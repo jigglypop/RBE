@@ -1,6 +1,5 @@
 //! 정확도 측정 유틸리티
 
-use std::f32::consts::PI;
 
 /// RMSE (Root Mean Square Error) 계산
 pub fn rmse(reference: &[f32], approximation: &[f32]) -> f32 {

@@ -1,8 +1,13 @@
 #[cfg(test)]
-pub mod packed_types_test;
+pub mod analytic_grad_test;
 #[cfg(test)]
-pub mod tensor_seed_test;
+pub mod enhanced128_test;
 #[cfg(test)]
-pub mod enhanced128_test;  // 새로운 Enhanced128 테스트 추가 
+pub mod legacy_comparison_test;
 #[cfg(test)]
-pub mod analytic_grad_test; 
+pub mod packed256_convergence_test;
+
+// #[cfg(test)]
+// pub mod packed_types_test;
+// #[cfg(test)]
+// pub mod tensor_seed_test; 

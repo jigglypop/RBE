@@ -3,8 +3,9 @@
 //! BitForwardPass와 BitBackwardPass를 중심으로 30,904 epoch/s 성능을 달성하는
 //! 순수 비트 연산 미분 계산 모듈
 
-pub mod forward;
 pub mod backward;
+pub mod forward;
+pub mod bit_engine;
 
 // 핵심 타입들 재수출 (순수 비트 도메인)
 pub use forward::{
@@ -111,7 +112,7 @@ impl DifferentialSystem {
                 operations += 1;
             }
         }
-
+        
         let avg_loss = if operations > 0 { total_loss / operations as f32 } else { 0.0 };
         let metrics = self.backward_engine.get_performance_metrics().clone();
         

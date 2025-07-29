@@ -1,4 +1,3 @@
-use anyhow::Result;
 use rayon::prelude::*;
 
 /// RBESoftmax - 푸앵카레 볼 기하학 기반 소프트맥스

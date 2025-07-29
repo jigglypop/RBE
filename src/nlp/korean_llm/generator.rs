@@ -437,7 +437,7 @@ impl KoreanTextGenerator {
             .ok_or_else(|| anyhow::anyhow!("토크나이저가 로딩되지 않았습니다"))?;
 
         // 1. 입력 토크나이징
-        let mut tokenizer_guard = tokenizer.lock().await;
+        let tokenizer_guard = tokenizer.lock().await;
         let mut input_ids = tokenizer_guard.encode(prompt)?;
         drop(tokenizer_guard); // 락 해제
         

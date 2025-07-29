@@ -1,6 +1,6 @@
 //! 모멘텀(Momentum) 옵티마이저 - 정밀 수학적 구현
 
-use crate::core::tensors::{Packed128, DecodedParams};
+use crate::core::tensors::Packed128;
 
 /// 모멘텀 옵티마이저
 /// 정확한 수학적 그래디언트와 속도(velocity) 항을 사용하여 수렴 가속

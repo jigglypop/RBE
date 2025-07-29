@@ -3,7 +3,7 @@
 use crate::core::tensors::{Packed128, DecodedParams};
 use super::TransformStats;
 use std::time::Instant;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 /// 가중치 압축기 (즉시 압축)
@@ -91,7 +91,7 @@ impl WeightCompressor {
         // 1. 빠른 파워 Iteration으로 1번 singular vector 추정
         let mut rng = StdRng::from_entropy();
         let mut v: Vec<f32> = (0..cols.min(256)).map(|_| rand::Rng::gen::<f32>(&mut rng)).collect();
-        let mut norm = (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>()).sqrt();
+        let norm = (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>()).sqrt();
         v.iter_mut().for_each(|x| *x /= norm as f32);
 
         for _ in 0..3 { // 3회만

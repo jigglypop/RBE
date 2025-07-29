@@ -3,7 +3,11 @@
 //! Adaptive Moment Estimation (Adam)을 RBE 시스템에 적용
 //! Packed128 및 Enhanced128 모두 지원
 
-use crate::core::tensors::{Packed128, Enhanced128, DecodedParams, EnhancedParams, AnalyticalGradient};
+use crate::core::tensors::{
+    Packed128, Enhanced128, DecodedParams, EnhancedParams, AnalyticalGradient,
+    Packed256, Packed256Params
+};
+use crate::core::differential::bit_engine;
 
 /// RBE 압축 시드 공통 트레이트 (Adam 통합용)
 pub trait RBESeed: Clone {
@@ -123,6 +127,77 @@ impl RBESeed for Enhanced128 {
     }
 }
 
+/// Packed256에 대한 RBESeed 구현
+impl RBESeed for Packed256 {
+    type Params = Packed256Params;
+
+    fn compute_gradients(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32, _use_riemannian: bool) -> (f32, f32, f32) {
+        let params = self.decode();
+        let output = bit_engine::compute_fused_output(&params, i, j, rows, cols);
+        
+        let loss_grad = 2.0 * (output.predicted_value - target);
+
+        let final_grad_r = (loss_grad * output.grad_r).clamp(-1.0, 1.0);
+        let final_grad_theta = (loss_grad * output.grad_theta).clamp(-1.0, 1.0);
+
+        (final_grad_r, final_grad_theta, output.predicted_value)
+    }
+
+    fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        let params = self.decode();
+        bit_engine::compute_fused_output(&params, i, j, rows, cols).predicted_value
+    }
+
+    fn decode(&self) -> Self::Params {
+        // Packed256에 이미 구현된 getter를 사용
+        Packed256Params {
+            r: self.get_r(),
+            theta: self.get_theta(),
+            param1: self.get_param1(),
+            param2: self.get_param2(),
+            basis_id: self.get_basis_id(),
+            d_r: self.get_d_r(),
+            d_theta: self.get_d_theta(),
+            log2_c: self.get_log2_c(),
+            activation_id: self.get_activation_id(),
+            q_value: self.get_q_value(),
+            k_value: self.get_k_value(),
+            flags: self.get_flags(),
+        }
+    }
+
+    fn update_from_params(&mut self, params: &Self::Params) {
+        // Packed256에 이미 구현된 setter를 사용
+        self.set_r(params.r);
+        self.set_theta(params.theta);
+        self.set_param1(params.param1);
+        self.set_param2(params.param2);
+        self.set_basis_id(params.basis_id);
+        self.set_d_r(params.d_r);
+        self.set_d_theta(params.d_theta);
+        self.set_log2_c(params.log2_c);
+        self.set_activation_id(params.activation_id);
+        self.set_q_value(params.q_value);
+        self.set_k_value(params.k_value);
+        self.set_flags(params.flags);
+    }
+
+    fn adam_update(&mut self, m_hat_r: f32, m_hat_theta: f32, v_hat_r: f32, v_hat_theta: f32, learning_rate: f32, epsilon: f32) {
+        let mut params = self.decode();
+        
+        // Adam 업데이트 규칙
+        params.r -= learning_rate * m_hat_r / (v_hat_r.sqrt() + epsilon);
+        params.theta -= learning_rate * m_hat_theta / (v_hat_theta.sqrt() + epsilon);
+        
+        // 범위 제약
+        params.r = params.r.clamp(0.0, 0.9999);
+        params.theta = params.theta.rem_euclid(2.0 * std::f32::consts::PI);
+        
+        self.update_from_params(&params);
+    }
+}
+
+
 /// BitAdam 옵티마이저 상태
 /// Adam 알고리즘의 1차/2차 모멘트를 유지하며 적응적 학습률 제공
 #[derive(Debug, Clone)]
@@ -183,6 +258,11 @@ impl BitAdamState {
         }
     }
     
+    pub fn set_learning_rate(&mut self, _learning_rate: f32) {
+        // BitAdamState는 learning_rate를 내부적으로 저장하지 않고 bit_update에서 받음
+        // 호환성을 위한 빈 메서드
+    }
+
     /// 정확한 수학적 그래디언트를 사용한 Adam 업데이트 (Enhanced128 지원)
     pub fn bit_update<T: RBESeed>(
         &mut self,
@@ -197,7 +277,7 @@ impl BitAdamState {
         self.t += 1;
         
         // 1. 정확한 그래디언트 계산
-        let (grad_r, grad_theta, predicted) = seed.compute_gradients(i, j, rows, cols, target, self.use_riemannian);
+        let (grad_r, grad_theta, _predicted) = seed.compute_gradients(i, j, rows, cols, target, self.use_riemannian);
         
         // 2. 1차 모멘트 업데이트 (지수이동평균)
         self.m_r = self.beta1 * self.m_r + (1.0 - self.beta1) * grad_r;
@@ -261,7 +341,7 @@ impl BitAdamState {
     pub fn bit_update_simple(
         &mut self,
         packed: &mut Packed128,
-        predicted: f32,
+        _predicted: f32,
         target: f32,
         learning_rate: f32,
     ) {

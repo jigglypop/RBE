@@ -2,7 +2,7 @@
 //! 
 //! 해석적 미분의 정확도와 성능을 검증
 
-use rbe_llm::core::tensors::{AnalyticGradient, Enhanced128, get_analytic_gradient, AnalyticalGradient};
+use rbe_llm::core::tensors::{Enhanced128, AnalyticGradient, AnalyticalGradient};
 use std::f32::consts::PI;
 
 #[test]
@@ -155,7 +155,7 @@ fn lut_보간_정확도_테스트() {
 fn enhanced128_analytic_integration_테스트() {
     println!("🧪 Enhanced128 + Analytic Gradient 통합 테스트");
     
-    let gradient = get_analytic_gradient();
+    let gradient = AnalyticGradient::new();
     let mut rng = rand::thread_rng();
     
     // Enhanced128 시드 생성
@@ -199,7 +199,7 @@ fn enhanced128_analytic_integration_테스트() {
 fn 성능_벤치마크_테스트() {
     println!("🧪 Analytic Gradient 성능 벤치마크");
     
-    let gradient = get_analytic_gradient();
+    let gradient = AnalyticGradient::new();
     let test_points = 10000;
     let mut total_time = std::time::Duration::new(0, 0);
     

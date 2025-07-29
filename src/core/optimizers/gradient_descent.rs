@@ -1,6 +1,6 @@
 //! 기본 경사하강법(Gradient Descent) 옵티마이저 - 정밀 수학적 구현
 
-use crate::core::tensors::{Packed128, DecodedParams};
+use crate::core::tensors::Packed128;
 
 /// 기본 경사하강법 옵티마이저
 /// 수학적으로 정확한 그래디언트를 사용하여 파라미터 업데이트

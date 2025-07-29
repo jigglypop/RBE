@@ -2,7 +2,6 @@
 //! 수치적 안정성을 위한 Kahan summation과 융합 연산 구현
 
 use anyhow::{Result, bail};
-use std::sync::Arc;
 
 /// Layer Normalization 설정
 #[derive(Debug, Clone)]
