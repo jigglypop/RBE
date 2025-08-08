@@ -55,21 +55,20 @@ pub fn compute_fused_output(
     rows: usize,
     cols: usize,
 ) -> EngineOutput {
-    // 1) 인덱스 기반 좌표(r_coord, theta_coord) 생성
-    let r_coord = if rows > 1 {
-        i as f32 / ((rows as f32) - 1.0)
-    } else { 0.0 };
-    let theta_coord = if cols > 0 {
-        2.0 * PI * (j as f32) / (cols as f32)
-    } else { 0.0 };
+    let r_coord = if rows > 1 { i as f32 / ((rows as f32) - 1.0) } else { 0.0 };
+    let theta_coord = if cols > 0 { 2.0 * PI * (j as f32) / (cols as f32) } else { 0.0 };
+    compute_fused_output_fast(params, r_coord, theta_coord)
+}
 
-    // 2) 시드 파라미터는 좌표 스케일/시프트로 사용
-    //    - r_scale: r 좌표 스케일, theta_scale: theta 좌표 스케일
-    //    안정성 가드로 과도한 스케일을 제한
+/// 고속 경로: 사전계산된 r_coord, theta_coord를 제공
+#[inline(always)]
+pub fn compute_fused_output_fast(
+    params: &Packed256Params,
+    r_coord: f32,
+    theta_coord: f32,
+) -> EngineOutput {
     let r_scale = params.r.clamp(0.0, 4.0);
     let theta_scale = if params.basis_id == 12 { 1.0 } else { params.theta.clamp(0.0, 8.0) };
-
-    // 유효 좌표(미분은 r_scale, theta_scale에 대해 계산)
     let r_eff = r_scale * r_coord;
     let th_eff = theta_scale * theta_coord;
 
@@ -82,7 +81,7 @@ pub fn compute_fused_output(
     } else {
         // Partition of Unity: bilinear weights on (u,v) in [0,1]^2
         let u = r_coord; // already 0..1
-        let v = if cols > 1 { j as f32 / ((cols as f32) - 1.0) } else { 0.0 };
+        let v = (theta_coord / (2.0 * PI)).clamp(0.0, 1.0);
         let w00 = (1.0 - u) * (1.0 - v);
         let w10 = u * (1.0 - v);
         let w01 = (1.0 - u) * v;
@@ -162,12 +161,18 @@ pub fn compute_fused_output(
 
     // 6) Poincaré 유사 메트릭 (r_eff 기준)
     let c = 2.0_f32.powi(params.log2_c as i32);
-    let jacobian_denom = 1.0 - c * r_eff * r_eff;
-    if jacobian_denom <= 1e-8 {
-        return EngineOutput { predicted_value: 0.0, grad_r: 0.0, grad_theta: 0.0, grad_p2: 0.0, grad_p1: 0.0 };
-    }
+    let use_neutral_metric = c.abs() < 1.0e-6;
+    let (metric, d_metric_dr_eff) = if use_neutral_metric {
+        (1.0, 0.0)
+    } else {
+        let jacobian_denom = 1.0 - c * r_eff * r_eff;
+        if jacobian_denom <= 1e-8 {
+            return EngineOutput { predicted_value: 0.0, grad_r: 0.0, grad_theta: 0.0, grad_p2: 0.0, grad_p1: 0.0 };
+        }
     let metric = 1.0 / jacobian_denom;
-    let d_metric_dr_eff = (2.0 * c * r_eff) / (jacobian_denom * jacobian_denom);
+        let d_metric_dr_eff = (2.0 * c * r_eff) / (jacobian_denom * jacobian_denom);
+        (metric, d_metric_dr_eff)
+    };
 
     // 7) 진폭(amp) 적용: param2를 진폭으로 사용
     let amp = params.param2.clamp(0.0, 4.0);

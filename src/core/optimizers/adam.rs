@@ -199,7 +199,7 @@ impl BitAdamState {
     /// 제네릭 RBE 시드용 Adam 업데이트
     pub fn bit_update<S: RBESeed>(&mut self, seed: &mut S, i: usize, j: usize, rows: usize, cols: usize, target: f32, learning_rate: f32) {
         self.t += 1;
-
+        
         // 기본 예측값 (해석 경로 사용 시 덮어씀)
         let mut predicted = seed.fused_forward_generic(i, j, rows, cols);
         let mut loss_grad = predicted - target; // d(0.5*(p-t)^2)/dp
@@ -348,7 +348,7 @@ impl BitAdamState {
         self.v_theta = self.beta2 * self.v_theta + (1.0 - self.beta2) * grad_theta.powi(2);
         self.v_amp = self.beta2 * self.v_amp + (1.0 - self.beta2) * 0.0;
         self.v_p1 = self.beta2 * self.v_p1 + (1.0 - self.beta2) * grad_p1.powi(2);
-
+        
         let (v_r_used, v_theta_used) = if self.use_amsgrad {
             self.vmax_r = self.vmax_r.max(self.v_r);
             self.vmax_theta = self.vmax_theta.max(self.v_theta);
