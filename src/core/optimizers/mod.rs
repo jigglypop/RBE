@@ -5,6 +5,7 @@ pub mod gradient_descent;
 pub mod momentum;
 
 pub use adam::BitAdamState;
+pub use adam::RBESeed;
 pub use config::OptimizerConfig;
 pub use riemannian_adam::BitRiemannianAdamState;
 pub use gradient_descent::GradientDescent;

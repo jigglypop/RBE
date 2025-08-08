@@ -10,7 +10,7 @@ pub use core::{
         Packed128, DecodedParams, Packed256, Packed256Params, FixedPoint32,
         Enhanced128, EnhancedParams, FixedPoint, AnalyticGradient, FixedPointMath
     },
-    optimizers::{BitAdamState, BitRiemannianAdamState, adam::RBESeed},
+    optimizers::{BitAdamState, BitRiemannianAdamState},
     transform::{WeightCompressor, TransformStats},
 };
 

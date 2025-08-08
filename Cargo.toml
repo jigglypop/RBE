@@ -3,10 +3,10 @@ name = "rbe_llm"
 version = "0.1.0"
 edition = "2021"
 
-# Executables
-[[bin]]
-name = "korean-chat"
-path = "examples/korean_llm_demo.rs"
+# Executables (비활성화: 예제 파일 삭제됨)
+# [[bin]]
+# name = "korean-chat"
+# path = "examples/korean_llm_demo.rs"
 
 [dependencies]
 # 기존 의존성들

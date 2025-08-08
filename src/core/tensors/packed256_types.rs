@@ -106,6 +106,23 @@ pub struct Packed256 {
 }
 
 impl Packed256 {
+    /// Packed256Params로 디코딩
+    pub fn decode(&self) -> Packed256Params {
+        Packed256Params {
+            r: self.get_r(),
+            theta: self.get_theta(),
+            param1: self.get_param1(),
+            param2: self.get_param2(),
+            basis_id: self.get_basis_id(),
+            d_r: self.get_d_r(),
+            d_theta: self.get_d_theta(),
+            log2_c: self.get_log2_c(),
+            activation_id: self.get_activation_id(),
+            q_value: self.get_q_value(),
+            k_value: self.get_k_value(),
+            flags: self.get_flags(),
+        }
+    }
     /// 파라미터로부터 새로운 `Packed256` 인스턴스를 생성합니다.
     pub fn new(params: &Packed256Params) -> Self {
         let mut seed = Self::default();
@@ -226,4 +243,28 @@ impl Packed256 {
     pub fn set_flags(&mut self, value: u8) {
         self.hi = (self.hi & !(FLAGS_MASK << FLAGS_SHIFT)) | ((value as u128 & FLAGS_MASK) << FLAGS_SHIFT);
     }
-} 
+
+    pub fn adam_update(
+        &mut self,
+        m_hat_r: f32,
+        m_hat_theta: f32,
+        v_hat_r: f32,
+        v_hat_theta: f32,
+        learning_rate: f32,
+        epsilon: f32,
+    ) {
+        // 현재 파라미터 가져오기
+        let mut r = self.get_r();
+        let mut theta = self.get_theta();
+        
+        // r 업데이트 (안정화된 스텝)
+        r = (r - learning_rate * m_hat_r / (v_hat_r.sqrt() + epsilon)).clamp(0.0, 0.9999);
+        
+        // theta 업데이트
+        theta -= learning_rate * m_hat_theta / (v_hat_theta.sqrt() + epsilon);
+        
+        // 업데이트된 파라미터 설정
+        self.set_r(r);
+        self.set_theta(theta);
+    }
+}

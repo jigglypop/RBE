@@ -5,7 +5,6 @@
 
 use crate::core::tensors::packed_types::{Packed128, BitGradientTracker};
 use crate::core::tensors::Enhanced128;
-use crate::core::optimizers::adam::RBESeed;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -65,13 +64,13 @@ impl BitForwardPass {
     }
     
     /// **핵심 메서드**: 비트 도메인 초고속 순전파 (Enhanced128 지원)
-    pub fn bit_forward_ultra_fast<T: RBESeed>(
+    pub fn bit_forward_ultra_fast(
         &mut self,
-        seed: &T,
+        seed: &Packed128,
         i: usize,
         j: usize,
         rows: usize,
-        cols: usize,
+        cols: usize
     ) -> f32 {
         let start = Instant::now();
         
@@ -109,32 +108,23 @@ impl BitForwardPass {
         self.bit_forward_ultra_fast(packed, i, j, rows, cols)
     }
 
-    /// Enhanced128을 위한 순전파 (편의 메서드)
-    pub fn bit_forward_ultra_fast_enhanced(
-        &mut self,
-        enhanced: &Enhanced128,
-        i: usize,
-        j: usize,
-        rows: usize,
-        cols: usize,
-    ) -> f32 {
-        self.bit_forward_ultra_fast(enhanced, i, j, rows, cols)
-    }
+    // pub fn bit_forward_ultra_fast_enhanced(
+    //     &mut self,
+    //     enhanced: &Enhanced128,
+    //     i: usize, j: usize, rows: usize, cols: usize
+    // ) -> f32 {
+    //     self.bit_forward_ultra_fast(enhanced, i, j, rows, cols)
+    // }
 
     /// 제네릭 캐시 키 생성
-    fn generate_cache_key<T: RBESeed>(&self, seed: &T, i: u16, j: u16) -> (u64, u64, u16, u16) {
-        // 기본 해시 기반 캐시 키 (타입에 관계없이 작동)
-        let hash = self.compute_seed_hash(seed);
-        (hash.0, hash.1, i, j)
+    fn generate_cache_key(&self, seed: &Packed128, i: u16, j: u16) -> (u64, u64, u16, u16) {
+        let (seed_hi, seed_lo) = self.compute_seed_hash(seed);
+        (seed_hi, seed_lo, i, j)
     }
-
-    /// 시드 해시 계산 (제네릭)
-    fn compute_seed_hash<T: RBESeed>(&self, seed: &T) -> (u64, u64) {
-        // 임시로 간단한 해시 (더 정교한 해시로 개선 가능)
-        let params = seed.decode();
-        // 메모리 주소를 기반으로 한 해시 (임시)
-        let ptr = seed as *const T as u64;
-        (ptr, ptr.wrapping_mul(0x9e3779b97f4a7c15))
+    
+    fn compute_seed_hash(&self, seed: &Packed128) -> (u64, u64) {
+        // Packed128의 64비트 필드를 직접 사용
+        (seed.hi, seed.lo)
     }
 
     /// 배치 순전파: 여러 위치를 한 번에 처리 (벡터화 최적화)

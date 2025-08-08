@@ -222,6 +222,49 @@ impl Packed64 {
 }
 
 impl Packed128 {
+    // --- 전역 파라미터 (hi 비트필드) ---
+    // hi 비트 레이아웃(하위→상위):
+    // [15:0]   alpha_g  (Q8.8)
+    // [31:16]  delta    (Q8.8)
+    // [47:32]  kappa    (Q8.8, >=0)
+    // [63:48]  reserved
+
+    #[inline]
+    fn encode_q8_8(v: f32) -> u16 { (v.clamp(-255.0, 255.0) * 256.0).round() as i32 as u16 }
+
+    #[inline]
+    fn decode_q8_8(bits: u16) -> f32 { (bits as i16 as f32) / 256.0 }
+
+    pub fn get_alpha_g(&self) -> f32 {
+        let bits = (self.hi & 0xFFFF) as u16;
+        if self.hi == 0 { 1.0 } else { Self::decode_q8_8(bits).max(0.0) }
+    }
+
+    pub fn get_delta(&self) -> f32 {
+        let bits = ((self.hi >> 16) & 0xFFFF) as u16;
+        if self.hi == 0 { 0.0 } else { Self::decode_q8_8(bits) }
+    }
+
+    pub fn get_kappa(&self) -> f32 {
+        let bits = ((self.hi >> 32) & 0xFFFF) as u16;
+        if self.hi == 0 { 0.0 } else { Self::decode_q8_8(bits).max(0.0) }
+    }
+
+    pub fn set_alpha_g(&mut self, alpha_g: f32) {
+        let bits = Self::encode_q8_8(alpha_g.max(0.0));
+        self.hi = (self.hi & !0xFFFF) | bits as u64;
+    }
+
+    pub fn set_delta(&mut self, delta: f32) {
+        let bits = Self::encode_q8_8(delta);
+        self.hi = (self.hi & !(0xFFFFu64 << 16)) | ((bits as u64) << 16);
+    }
+
+    pub fn set_kappa(&mut self, kappa: f32) {
+        let bits = Self::encode_q8_8(kappa.max(0.0));
+        self.hi = (self.hi & !(0xFFFFu64 << 32)) | ((bits as u64) << 32);
+    }
+
     /// 순수 비트 도메인 fused forward
     pub fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
         // 1. 1차 Poincaré 매핑
@@ -669,31 +712,248 @@ impl Packed128 {
     pub fn fused_forward_poincare(&self, i: usize, j: usize, _rows: usize, _cols: usize) -> f32 {
         // 1. 연속 파라미터 디코딩
         let params = self.decode();
-        let r = params.r_fp32.min(0.999);
+        let mut r = params.r_fp32.min(0.999);
         let theta = params.theta_fp32;
+
+        // 전역 파라미터 로드 (기본값: αg=1, δ=0, κ=0)
+        let alpha_g = self.get_alpha_g();
+        let delta = self.get_delta();
+        let kappa = self.get_kappa();
         
-        // 2. 푸앵카레볼 → 쌍곡 거리 변환
+        // 2. 곡률 기반 반경 스케일링  r -> r'
+        // κ→0 극한에서 r' = r 가 되어야 하므로, 작은 κ는 해석적 극한을 사용
+        if kappa.abs() >= 1e-7 {
+            let denom = kappa.tanh();
+            if denom.abs() > 0.0 {
+                r = (kappa * r).tanh() / denom;
+            }
+        } // else: r 그대로 유지
+
+        // 3. 푸앵카레볼 → 쌍곡 거리 변환
         let d = if r < 0.999 {
             2.0 * r.atanh()
         } else {
             2.0 * (0.5 * ((1.0 + r) / (1.0 - r)).ln())
         };
         
-        // 3. 위치 기반 변조
+        // 4. 위치 기반 변조
         let pos_hash = ((i * 31 + j * 17) % 256) as f32 / 256.0;
         let spatial_modulation = (pos_hash * 2.0 * std::f32::consts::PI).sin();
         
-        // 4. 단순화된 함수: tanh만 사용
+        // 5. 단순화된 함수: tanh만 사용
         let func_value = d.tanh();
         
-        // 5. 각도 성분
+        // 6. 각도 성분
         let angular_component = theta.sin();
         
-        // 6. 최종 출력
-        let output = func_value * angular_component * (1.0 + spatial_modulation * 0.1);
-        
-        // 7. 출력 정규화
+        // 7. 전역 스케일/오프셋 적용
+        let output_raw = func_value * angular_component * (1.0 + spatial_modulation * 0.1);
+        let output = alpha_g * output_raw + delta;
+
+        // 8. 출력 정규화 (안정성)
         output.tanh()
+    }
+} 
+
+/// Packed512 파라미터 구조체 (초고정밀도)
+#[derive(Clone, Debug)]
+pub struct Packed512Params {
+    // 주요 좌표 (32비트 고정밀도)
+    pub r: f32,
+    pub theta: f32, 
+    pub param1: f32,
+    pub param2: f32,
+    
+    // 보조 좌표 (다중 기저)
+    pub secondary_r: f32,
+    pub secondary_theta: f32,
+    pub blend_weight: f32,
+    pub precision_param: f32,
+    
+    // 기저 함수
+    pub basis_id: u8,
+    pub secondary_basis: u8,
+    pub blend_mode: u8,
+    
+    // 미분 차수 (확장)
+    pub d_r: u8,
+    pub d_theta: u8,
+    pub cross_diff_r_theta: u8,
+    
+    // 고급 파라미터
+    pub activation_id: u8,
+    pub log2_c: i8,
+    pub harmonic_order: u8,
+    pub frequency_band: u8,
+    pub phase_quantization: u8,
+    pub amplitude_scale: u8,
+    pub convergence_hint: u8,
+    pub precision_level: u8,
+    pub stability_flags: u8,
+    pub optimization_flags: u8,
+}
+
+impl Default for Packed512Params {
+    fn default() -> Self {
+        Self {
+            r: 0.5,
+            theta: 0.0,
+            param1: 1.0,
+            param2: 0.0,
+            secondary_r: 0.3,
+            secondary_theta: 0.0,
+            blend_weight: 0.5,
+            precision_param: 1.0,
+            basis_id: 0,
+            secondary_basis: 1,
+            blend_mode: 0, // 가산 모드
+            d_r: 0,
+            d_theta: 0,
+            cross_diff_r_theta: 0,
+            activation_id: 0,
+            log2_c: -2,
+            harmonic_order: 1,
+            frequency_band: 0,
+            phase_quantization: 0,
+            amplitude_scale: 128, // 중간값
+            convergence_hint: 0,
+            precision_level: 255, // 최대 정밀도
+            stability_flags: 0,
+            optimization_flags: 0,
+        }
+    }
+}
+
+/// Packed512: 512비트 초고정밀도 RBE 시드
+#[derive(Clone, Debug)]
+pub struct Packed512 {
+    pub hi_primary: u128,    // 주요 상태/제어
+    pub hi_extended: u128,   // 확장 상태/고차미분
+    pub lo_primary: u128,    // 주요 파라미터  
+    pub lo_extended: u128,   // 확장 파라미터/정밀도
+}
+
+impl Packed512 {
+    /// 새로운 Packed512 생성
+    pub fn new(params: &Packed512Params) -> Self {
+        let mut packed = Self::zero();
+        packed.encode(params);
+        packed
+    }
+    
+    /// 영시드 생성
+    pub fn zero() -> Self {
+        Self {
+            hi_primary: 0,
+            hi_extended: 0,
+            lo_primary: 0,
+            lo_extended: 0,
+        }
+    }
+    
+    /// 32비트 고정소수점 인코딩 (Q16.16)
+    fn encode_q16_16(value: f32) -> u32 {
+        let clamped = value.clamp(-32768.0, 32767.9999);
+        (clamped * 65536.0) as i32 as u32
+    }
+    
+    /// 32비트 고정소수점 디코딩 (Q16.16)
+    fn decode_q16_16(encoded: u32) -> f32 {
+        (encoded as i32) as f32 / 65536.0
+    }
+    
+    /// 파라미터 인코딩
+    pub fn encode(&mut self, params: &Packed512Params) {
+        // hi_primary 인코딩 (128비트)
+        self.hi_primary = 0;
+        self.hi_primary |= (params.basis_id as u128) << 120;
+        self.hi_primary |= (params.d_r as u128) << 112;
+        self.hi_primary |= (params.d_theta as u128) << 104;
+        self.hi_primary |= (params.activation_id as u128) << 96;
+        self.hi_primary |= ((params.log2_c as i8 as u8) as u128) << 88;
+        self.hi_primary |= (params.secondary_basis as u128) << 80;
+        self.hi_primary |= (params.blend_mode as u128) << 72;
+        self.hi_primary |= (params.stability_flags as u128) << 64;
+        
+        // hi_extended 인코딩 (128비트)
+        self.hi_extended = 0;
+        self.hi_extended |= (params.cross_diff_r_theta as u128) << 120;
+        self.hi_extended |= (params.harmonic_order as u128) << 112;
+        self.hi_extended |= (params.frequency_band as u128) << 104;
+        self.hi_extended |= (params.phase_quantization as u128) << 96;
+        self.hi_extended |= (params.amplitude_scale as u128) << 88;
+        self.hi_extended |= (params.convergence_hint as u128) << 80;
+        self.hi_extended |= (params.precision_level as u128) << 72;
+        self.hi_extended |= (params.optimization_flags as u128) << 64;
+        
+        // lo_primary 인코딩 (128비트 - 4개 32비트 파라미터)
+        let r_encoded = Self::encode_q16_16(params.r);
+        let theta_encoded = Self::encode_q16_16(params.theta);
+        let param1_encoded = Self::encode_q16_16(params.param1);
+        let param2_encoded = Self::encode_q16_16(params.param2);
+        
+        self.lo_primary = 0;
+        self.lo_primary |= (r_encoded as u128) << 96;
+        self.lo_primary |= (theta_encoded as u128) << 64;
+        self.lo_primary |= (param1_encoded as u128) << 32;
+        self.lo_primary |= param2_encoded as u128;
+        
+        // lo_extended 인코딩 (128비트 - 4개 32비트 확장 파라미터)
+        let sec_r_encoded = Self::encode_q16_16(params.secondary_r);
+        let sec_theta_encoded = Self::encode_q16_16(params.secondary_theta);
+        let blend_encoded = Self::encode_q16_16(params.blend_weight);
+        let precision_encoded = Self::encode_q16_16(params.precision_param);
+        
+        self.lo_extended = 0;
+        self.lo_extended |= (sec_r_encoded as u128) << 96;
+        self.lo_extended |= (sec_theta_encoded as u128) << 64;
+        self.lo_extended |= (blend_encoded as u128) << 32;
+        self.lo_extended |= precision_encoded as u128;
+    }
+    
+    /// 파라미터 디코딩
+    pub fn decode(&self) -> Packed512Params {
+        // hi_primary 디코딩
+        let basis_id = ((self.hi_primary >> 120) & 0xFF) as u8;
+        let d_r = ((self.hi_primary >> 112) & 0xFF) as u8;
+        let d_theta = ((self.hi_primary >> 104) & 0xFF) as u8;
+        let activation_id = ((self.hi_primary >> 96) & 0xFF) as u8;
+        let log2_c = ((self.hi_primary >> 88) & 0xFF) as u8 as i8;
+        let secondary_basis = ((self.hi_primary >> 80) & 0xFF) as u8;
+        let blend_mode = ((self.hi_primary >> 72) & 0xFF) as u8;
+        let stability_flags = ((self.hi_primary >> 64) & 0xFF) as u8;
+        
+        // hi_extended 디코딩
+        let cross_diff_r_theta = ((self.hi_extended >> 120) & 0xFF) as u8;
+        let harmonic_order = ((self.hi_extended >> 112) & 0xFF) as u8;
+        let frequency_band = ((self.hi_extended >> 104) & 0xFF) as u8;
+        let phase_quantization = ((self.hi_extended >> 96) & 0xFF) as u8;
+        let amplitude_scale = ((self.hi_extended >> 88) & 0xFF) as u8;
+        let convergence_hint = ((self.hi_extended >> 80) & 0xFF) as u8;
+        let precision_level = ((self.hi_extended >> 72) & 0xFF) as u8;
+        let optimization_flags = ((self.hi_extended >> 64) & 0xFF) as u8;
+        
+        // lo_primary 디코딩 (32비트 고정소수점)
+        let r = Self::decode_q16_16(((self.lo_primary >> 96) & 0xFFFFFFFF) as u32);
+        let theta = Self::decode_q16_16(((self.lo_primary >> 64) & 0xFFFFFFFF) as u32);
+        let param1 = Self::decode_q16_16(((self.lo_primary >> 32) & 0xFFFFFFFF) as u32);
+        let param2 = Self::decode_q16_16((self.lo_primary & 0xFFFFFFFF) as u32);
+        
+        // lo_extended 디코딩
+        let secondary_r = Self::decode_q16_16(((self.lo_extended >> 96) & 0xFFFFFFFF) as u32);
+        let secondary_theta = Self::decode_q16_16(((self.lo_extended >> 64) & 0xFFFFFFFF) as u32);
+        let blend_weight = Self::decode_q16_16(((self.lo_extended >> 32) & 0xFFFFFFFF) as u32);
+        let precision_param = Self::decode_q16_16((self.lo_extended & 0xFFFFFFFF) as u32);
+        
+        Packed512Params {
+            r, theta, param1, param2,
+            secondary_r, secondary_theta, blend_weight, precision_param,
+            basis_id, secondary_basis, blend_mode,
+            d_r, d_theta, cross_diff_r_theta,
+            activation_id, log2_c, harmonic_order, frequency_band,
+            phase_quantization, amplitude_scale, convergence_hint,
+            precision_level, stability_flags, optimization_flags,
+        }
     }
 } 
 
@@ -718,4 +978,26 @@ pub fn generate_comprehensive_report() {
     println!("\n██████████████████████████████████████████████████████████");
     println!("██  리포트 완료                                        ██");
     println!("██████████████████████████████████████████████████████████");
+} 
+
+impl Packed128 {
+    pub fn adam_update(
+        &mut self,
+        m_hat_r: f32,
+        m_hat_theta: f32,
+        v_hat_r: f32,
+        v_hat_theta: f32,
+        learning_rate: f32,
+        epsilon: f32,
+    ) {
+        let mut params = self.decode();
+        
+        // r 업데이트 (안정화된 스텝)
+        params.r_fp32 = (params.r_fp32 - learning_rate * m_hat_r / (v_hat_r.sqrt() + epsilon)).clamp(0.0, 0.9999);
+        
+        // theta 업데이트
+        params.theta_fp32 -= learning_rate * m_hat_theta / (v_hat_theta.sqrt() + epsilon);
+        
+        self.update_from_continuous(&params);
+    }
 } 

@@ -48,7 +48,12 @@ impl WeightCompressor {
                 block_weights.extend_from_slice(&weights[row_start..row_start + block]);
             }
 
-            let seed = self.create_optimal_seed(&block_weights, rows, block);
+            let mut seed = self.create_optimal_seed(&block_weights, rows, block);
+            // 전역 기본값 설정: αg=1.0, δ=0.0, κ=0.0 (문서 규범)
+            seed.set_alpha_g(1.0);
+            seed.set_delta(0.0);
+            seed.set_kappa(0.0);
+            
             let rmse = self.calculate_rmse_fast(&seed, &block_weights, rows, block);
 
             seeds.push(seed);

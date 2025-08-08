@@ -9,148 +9,74 @@ use crate::core::tensors::{
 };
 use crate::core::differential::bit_engine;
 
-/// RBE 압축 시드 공통 트레이트 (Adam 통합용)
-pub trait RBESeed: Clone {
-    type Params;
-    
-    /// 그래디언트 계산
-    fn compute_gradients(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32, use_riemannian: bool) -> (f32, f32, f32);
-    /// 순전파
-    fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32;
-    /// 파라미터 디코딩
-    fn decode(&self) -> Self::Params;
-    /// 파라미터 업데이트
-    fn update_from_params(&mut self, params: &Self::Params);
-    /// Adam 업데이트 (r, theta 파라미터)
-    fn adam_update(&mut self, m_hat_r: f32, m_hat_theta: f32, v_hat_r: f32, v_hat_theta: f32, learning_rate: f32, epsilon: f32);
+/// RBE 시드 제네릭 트레이트 (Packed128/Enhanced128/Packed256 지원)
+pub trait RBESeed: Copy {
+    fn get_r(&self) -> f32;
+    fn get_theta(&self) -> f32;
+    fn set_r(&mut self, r: f32);
+    fn set_theta(&mut self, theta: f32);
+    fn fused_forward_generic(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32;
+    // 선택적: 해석 그라디언트 지원 (예: Packed256→bit_engine)
+    fn analytic_grads(&self, _i: usize, _j: usize, _rows: usize, _cols: usize) -> Option<(f32, f32, f32, f32)> {
+        None
+    }
+    // 선택적: 진폭(amp = param2) 접근자
+    fn get_amp(&self) -> f32 { 0.0 }
+    fn set_amp(&mut self, _amp: f32) {}
+    // 선택적: 주파수(param1) 접근자 (기본 비활성)
+    fn get_param1(&self) -> f32 { 0.0 }
+    fn set_param1(&mut self, _v: f32) {}
 }
 
-/// Packed128에 대한 RBESeed 구현
 impl RBESeed for Packed128 {
-    type Params = DecodedParams;
-    
-    fn compute_gradients(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32, use_riemannian: bool) -> (f32, f32, f32) {
-        if use_riemannian {
-            let (gr, gt) = self.compute_riemannian_gradients(i, j, rows, cols, target, false);
-            let pred = self.fused_forward(i, j, rows, cols);
-            (gr, gt, pred)
-        } else {
-            self.compute_gradients(i, j, rows, cols, target, false)
-        }
+    fn get_r(&self) -> f32 { self.decode().r_fp32 }
+    fn get_theta(&self) -> f32 { self.decode().theta_fp32 }
+    fn set_r(&mut self, r: f32) {
+        let mut p = self.decode();
+        p.r_fp32 = r;
+        self.update_from_continuous(&p);
     }
-    
-    fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+    fn set_theta(&mut self, theta: f32) {
+        let mut p = self.decode();
+        p.theta_fp32 = theta;
+        self.update_from_continuous(&p);
+    }
+    fn fused_forward_generic(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
         self.fused_forward(i, j, rows, cols)
     }
-    
-    fn decode(&self) -> Self::Params {
-        self.decode()
-    }
-    
-    fn update_from_params(&mut self, params: &Self::Params) {
-        self.update_from_continuous(params);
-    }
-    
-    fn adam_update(&mut self, m_hat_r: f32, m_hat_theta: f32, v_hat_r: f32, v_hat_theta: f32, learning_rate: f32, epsilon: f32) {
-        let mut params = self.decode();
-        
-        // Adam 업데이트 규칙
-        params.r_fp32 -= learning_rate * m_hat_r / (v_hat_r.sqrt() + epsilon);
-        params.theta_fp32 -= learning_rate * m_hat_theta / (v_hat_theta.sqrt() + epsilon);
-        
-        // 범위 제약
-        params.r_fp32 = params.r_fp32.clamp(0.0, 0.999999);
-        params.theta_fp32 = params.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
-        
-        self.update_from_continuous(&params);
-    }
+    fn analytic_grads(&self, _i: usize, _j: usize, _rows: usize, _cols: usize) -> Option<(f32, f32, f32, f32)> { None }
 }
 
-/// Enhanced128에 대한 RBESeed 구현
 impl RBESeed for Enhanced128 {
-    type Params = EnhancedParams;
-    
-    fn compute_gradients(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32, _use_riemannian: bool) -> (f32, f32, f32) {
-        // Enhanced128은 이미 리만 기하학이 내장됨
-        let predicted = self.fused_forward_enhanced(i, j, rows, cols);
-        let error = predicted - target;
-        
-        // 수치 미분으로 그래디언트 계산
-        let grad_r = self.analytical_gradient_r(i, j, rows, cols) * error;
-        let grad_theta = self.analytical_gradient_theta(i, j, rows, cols) * error;
-        
-        (grad_r, grad_theta, predicted)
+    fn get_r(&self) -> f32 { self.decode_enhanced().r_fp32 }
+    fn get_theta(&self) -> f32 { self.decode_enhanced().theta_fp32 }
+    fn set_r(&mut self, r: f32) {
+        let mut p = self.decode_enhanced();
+        p.r_fp32 = r;
+        *self = Enhanced128::from_legacy_params(
+            p.r_fp32, p.theta_fp32, p.basis_id, p.d_theta, p.d_r, p.rot_code, p.log2_c
+        );
     }
-    
-    fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+    fn set_theta(&mut self, theta: f32) {
+        let mut p = self.decode_enhanced();
+        p.theta_fp32 = theta;
+        *self = Enhanced128::from_legacy_params(
+            p.r_fp32, p.theta_fp32, p.basis_id, p.d_theta, p.d_r, p.rot_code, p.log2_c
+        );
+    }
+    fn fused_forward_generic(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
         self.fused_forward_enhanced(i, j, rows, cols)
     }
-    
-    fn decode(&self) -> Self::Params {
-        self.decode_enhanced()
-    }
-    
-    fn update_from_params(&mut self, params: &Self::Params) {
-        // Enhanced128을 새로 생성하여 업데이트
-        *self = Enhanced128::from_legacy_params(
-            params.r_fp32,
-            params.theta_fp32,
-            params.basis_id,
-            params.d_theta,
-            params.d_r,
-            params.rot_code,
-            params.log2_c,
-        );
-    }
-    
-    fn adam_update(&mut self, m_hat_r: f32, m_hat_theta: f32, v_hat_r: f32, v_hat_theta: f32, learning_rate: f32, epsilon: f32) {
-        let mut params = self.decode_enhanced();
-        
-        // Adam 업데이트 규칙
-        params.r_fp32 -= learning_rate * m_hat_r / (v_hat_r.sqrt() + epsilon);
-        params.theta_fp32 -= learning_rate * m_hat_theta / (v_hat_theta.sqrt() + epsilon);
-        
-        // 범위 제약
-        params.r_fp32 = params.r_fp32.clamp(0.0, 0.999999);
-        params.theta_fp32 = params.theta_fp32.rem_euclid(2.0 * std::f32::consts::PI);
-        
-        // Enhanced128 재생성
-        *self = Enhanced128::from_legacy_params(
-            params.r_fp32,
-            params.theta_fp32,
-            params.basis_id,
-            params.d_theta,
-            params.d_r,
-            params.rot_code,
-            params.log2_c,
-        );
-    }
+    fn analytic_grads(&self, _i: usize, _j: usize, _rows: usize, _cols: usize) -> Option<(f32, f32, f32, f32)> { None }
 }
 
-/// Packed256에 대한 RBESeed 구현
 impl RBESeed for Packed256 {
-    type Params = Packed256Params;
-
-    fn compute_gradients(&self, i: usize, j: usize, rows: usize, cols: usize, target: f32, _use_riemannian: bool) -> (f32, f32, f32) {
-        let params = self.decode();
-        let output = bit_engine::compute_fused_output(&params, i, j, rows, cols);
-        
-        let loss_grad = 2.0 * (output.predicted_value - target);
-
-        let final_grad_r = (loss_grad * output.grad_r).clamp(-1.0, 1.0);
-        let final_grad_theta = (loss_grad * output.grad_theta).clamp(-1.0, 1.0);
-
-        (final_grad_r, final_grad_theta, output.predicted_value)
-    }
-
-    fn fused_forward(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
-        let params = self.decode();
-        bit_engine::compute_fused_output(&params, i, j, rows, cols).predicted_value
-    }
-
-    fn decode(&self) -> Self::Params {
-        // Packed256에 이미 구현된 getter를 사용
-        Packed256Params {
+    fn get_r(&self) -> f32 { self.get_r() }
+    fn get_theta(&self) -> f32 { self.get_theta() }
+    fn set_r(&mut self, r: f32) { self.set_r(r) }
+    fn set_theta(&mut self, theta: f32) { self.set_theta(theta) }
+    fn fused_forward_generic(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
+        let params = Packed256Params {
             r: self.get_r(),
             theta: self.get_theta(),
             param1: self.get_param1(),
@@ -163,40 +89,32 @@ impl RBESeed for Packed256 {
             q_value: self.get_q_value(),
             k_value: self.get_k_value(),
             flags: self.get_flags(),
-        }
+        };
+        bit_engine::compute_fused_output(&params, i, j, rows, cols).predicted_value
     }
-
-    fn update_from_params(&mut self, params: &Self::Params) {
-        // Packed256에 이미 구현된 setter를 사용
-        self.set_r(params.r);
-        self.set_theta(params.theta);
-        self.set_param1(params.param1);
-        self.set_param2(params.param2);
-        self.set_basis_id(params.basis_id);
-        self.set_d_r(params.d_r);
-        self.set_d_theta(params.d_theta);
-        self.set_log2_c(params.log2_c);
-        self.set_activation_id(params.activation_id);
-        self.set_q_value(params.q_value);
-        self.set_k_value(params.k_value);
-        self.set_flags(params.flags);
+    fn analytic_grads(&self, i: usize, j: usize, rows: usize, cols: usize) -> Option<(f32, f32, f32, f32)> {
+        let params = Packed256Params {
+            r: self.get_r(),
+            theta: self.get_theta(),
+            param1: self.get_param1(),
+            param2: self.get_param2(),
+            basis_id: self.get_basis_id(),
+            d_r: self.get_d_r(),
+            d_theta: self.get_d_theta(),
+            log2_c: self.get_log2_c(),
+            activation_id: self.get_activation_id(),
+            q_value: self.get_q_value(),
+            k_value: self.get_k_value(),
+            flags: self.get_flags(),
+        };
+        let out = bit_engine::compute_fused_output(&params, i, j, rows, cols);
+        Some((out.predicted_value, out.grad_r, out.grad_theta, out.grad_p2))
     }
-
-    fn adam_update(&mut self, m_hat_r: f32, m_hat_theta: f32, v_hat_r: f32, v_hat_theta: f32, learning_rate: f32, epsilon: f32) {
-        let mut params = self.decode();
-        
-        // Adam 업데이트 규칙
-        params.r -= learning_rate * m_hat_r / (v_hat_r.sqrt() + epsilon);
-        params.theta -= learning_rate * m_hat_theta / (v_hat_theta.sqrt() + epsilon);
-        
-        // 범위 제약
-        params.r = params.r.clamp(0.0, 0.9999);
-        params.theta = params.theta.rem_euclid(2.0 * std::f32::consts::PI);
-        
-        self.update_from_params(&params);
-    }
+    fn get_amp(&self) -> f32 { self.get_param2() }
+    fn set_amp(&mut self, amp: f32) { self.set_param2(amp) }
+    fn get_param1(&self) -> f32 { self.get_param1() }
+    fn set_param1(&mut self, v: f32) { self.set_param1(v) }
 }
-
 
 /// BitAdam 옵티마이저 상태
 /// Adam 알고리즘의 1차/2차 모멘트를 유지하며 적응적 학습률 제공
@@ -212,6 +130,10 @@ pub struct BitAdamState {
     v_r: f32,           // r에 대한 2차 모멘트
     m_theta: f32,       // θ에 대한 1차 모멘트
     v_theta: f32,       // θ에 대한 2차 모멘트
+    m_amp: f32,         // amp(param2)에 대한 1차 모멘트
+    v_amp: f32,         // amp(param2)에 대한 2차 모멘트
+    m_p1: f32,          // p1(param1) 1차 모멘트
+    v_p1: f32,          // p1(param1) 2차 모멘트
     
     // 시간 스텝
     t: u32,             // 업데이트 횟수
@@ -221,6 +143,7 @@ pub struct BitAdamState {
     use_amsgrad: bool,      // AMSGrad 변형 사용 여부
     vmax_r: f32,            // AMSGrad용 최대 2차 모멘트 (r)
     vmax_theta: f32,        // AMSGrad용 최대 2차 모멘트 (θ)
+    vmax_amp: f32,          // AMSGrad용 최대 2차 모멘트 (amp)
 }
 
 impl BitAdamState {
@@ -233,11 +156,16 @@ impl BitAdamState {
             v_r: 0.0,
             m_theta: 0.0,
             v_theta: 0.0,
+            m_amp: 0.0,
+            v_amp: 0.0,
+            m_p1: 0.0,
+            v_p1: 0.0,
             t: 0,
             use_riemannian: false,
             use_amsgrad: false,
             vmax_r: 0.0,
             vmax_theta: 0.0,
+            vmax_amp: 0.0,
         }
     }
     
@@ -250,11 +178,16 @@ impl BitAdamState {
             v_r: 0.0,
             m_theta: 0.0,
             v_theta: 0.0,
+            m_amp: 0.0,
+            v_amp: 0.0,
+            m_p1: 0.0,
+            v_p1: 0.0,
             t: 0,
             use_riemannian,
             use_amsgrad: false,
             vmax_r: 0.0,
             vmax_theta: 0.0,
+            vmax_amp: 0.0,
         }
     }
     
@@ -263,31 +196,159 @@ impl BitAdamState {
         // 호환성을 위한 빈 메서드
     }
 
-    /// 정확한 수학적 그래디언트를 사용한 Adam 업데이트 (Enhanced128 지원)
-    pub fn bit_update<T: RBESeed>(
-        &mut self,
-        seed: &mut T,
-        i: usize,
-        j: usize,
-        rows: usize,
-        cols: usize,
-        target: f32,
-        learning_rate: f32,
-    ) {
+    /// 제네릭 RBE 시드용 Adam 업데이트
+    pub fn bit_update<S: RBESeed>(&mut self, seed: &mut S, i: usize, j: usize, rows: usize, cols: usize, target: f32, learning_rate: f32) {
         self.t += 1;
-        
-        // 1. 정확한 그래디언트 계산
-        let (grad_r, grad_theta, _predicted) = seed.compute_gradients(i, j, rows, cols, target, self.use_riemannian);
-        
-        // 2. 1차 모멘트 업데이트 (지수이동평균)
+
+        // 기본 예측값 (해석 경로 사용 시 덮어씀)
+        let mut predicted = seed.fused_forward_generic(i, j, rows, cols);
+        let mut loss_grad = predicted - target; // d(0.5*(p-t)^2)/dp
+
+        // 해석 그라디언트가 있으면 우선 사용
+        if let Some((p_pred, grad_r_analytic, grad_theta_analytic, grad_amp_analytic)) = seed.analytic_grads(i, j, rows, cols) {
+            predicted = p_pred;
+            loss_grad = predicted - target;
+            // 자연 그래디언트 스케일링
+            let r0 = seed.get_r();
+            let th0 = seed.get_theta();
+            let one_minus_r2 = (1.0 - r0 * r0).max(1e-6);
+            let scale_r = (one_minus_r2 * one_minus_r2) / 4.0;
+            let scale_theta = (one_minus_r2 * one_minus_r2) / (4.0 * (r0 * r0 + 1e-9));
+
+            let grad_r = loss_grad * grad_r_analytic * scale_r;
+            let grad_theta = loss_grad * grad_theta_analytic * scale_theta;
+            let grad_amp = 0.0; // amp는 폐형해로 에폭 말에만 갱신
+
+            // 1차/2차 모멘트 업데이트 및 파라미터 갱신 (동일)
+            self.m_r = self.beta1 * self.m_r + (1.0 - self.beta1) * grad_r;
+            self.m_theta = self.beta1 * self.m_theta + (1.0 - self.beta1) * grad_theta;
+            self.m_amp = self.beta1 * self.m_amp + (1.0 - self.beta1) * grad_amp;
+            self.v_r = self.beta2 * self.v_r + (1.0 - self.beta2) * grad_r.powi(2);
+            self.v_theta = self.beta2 * self.v_theta + (1.0 - self.beta2) * grad_theta.powi(2);
+            self.v_amp = self.beta2 * self.v_amp + (1.0 - self.beta2) * grad_amp.powi(2);
+
+            let (v_r_used, v_theta_used) = if self.use_amsgrad {
+                self.vmax_r = self.vmax_r.max(self.v_r);
+                self.vmax_theta = self.vmax_theta.max(self.v_theta);
+                (self.vmax_r, self.vmax_theta)
+            } else { (self.v_r, self.v_theta) };
+            let v_amp_used = if self.use_amsgrad {
+                self.vmax_amp = self.vmax_amp.max(self.v_amp);
+                self.vmax_amp
+            } else { self.v_amp };
+
+            let bc1 = 1.0 - self.beta1.powi(self.t as i32);
+            let bc2 = 1.0 - self.beta2.powi(self.t as i32);
+            let m_hat_r = self.m_r / bc1;
+            let m_hat_theta = self.m_theta / bc1;
+            let v_hat_r = v_r_used / bc2;
+            let v_hat_theta = v_theta_used / bc2;
+            let m_hat_amp = self.m_amp / bc1;
+            let v_hat_amp = v_amp_used / bc2;
+
+            let step_r = learning_rate * m_hat_r / (v_hat_r.sqrt() + self.epsilon);
+            let step_theta = learning_rate * m_hat_theta / (v_hat_theta.sqrt() + self.epsilon);
+            let step_amp = 0.0;
+
+            let new_r = (r0 - step_r).clamp(0.0, 0.9999);
+            let new_theta = th0 - step_theta;
+            seed.set_r(new_r);
+            seed.set_theta(new_theta);
+            // amp는 여기서 갱신하지 않음 (폐형해로 처리)
+            // p1 보조 업데이트 (수치미분)
+            let p1_0 = seed.get_param1();
+            let eps_p1 = 1e-4_f32.max(1e-3 * p1_0.abs());
+            let dp_dp1 = {
+                let mut s_plus = *seed; s_plus.set_param1((p1_0 + eps_p1).clamp(-16.0, 16.0));
+                let mut s_minus = *seed; s_minus.set_param1((p1_0 - eps_p1).clamp(-16.0, 16.0));
+                let p_plus = s_plus.fused_forward_generic(i, j, rows, cols);
+                let p_minus = s_minus.fused_forward_generic(i, j, rows, cols);
+                (p_plus - p_minus) / (2.0 * eps_p1)
+            };
+            let grad_p1 = loss_grad * dp_dp1;
+            self.m_p1 = self.beta1 * self.m_p1 + (1.0 - self.beta1) * grad_p1;
+            self.v_p1 = self.beta2 * self.v_p1 + (1.0 - self.beta2) * grad_p1.powi(2);
+            let bc1 = 1.0 - self.beta1.powi(self.t as i32);
+            let bc2 = 1.0 - self.beta2.powi(self.t as i32);
+            let m_hat_p1 = self.m_p1 / bc1;
+            let v_hat_p1 = self.v_p1 / bc2;
+            let step_p1 = learning_rate * m_hat_p1 / (v_hat_p1.sqrt() + self.epsilon);
+            seed.set_param1((p1_0 - step_p1).clamp(-16.0, 16.0));
+            return;
+        }
+
+        // 수치미분으로 ∂p/∂r, ∂p/∂θ 근사 (중심차분 + 적응 eps)
+        let r0 = seed.get_r();
+        let th0 = seed.get_theta();
+        let eps_r = (1e-4_f32).max(1e-2 * (1.0 - r0).abs());
+        let eps_th = 1e-4_f32;
+
+        // 중앙차분 + 적응 eps(에스컬레이션)
+        fn central_diff<S: RBESeed>(seed: &S, i: usize, j: usize, rows: usize, cols: usize, mut getter: impl FnMut(&S) -> f32, mut setter: impl FnMut(S, f32) -> S, base: f32, base_pred: f32, eps0: f32) -> f32 {
+            let mut eps = eps0;
+            let mut best = 0.0f32;
+            for _ in 0..3 {
+                let mut s_plus = *seed;
+                s_plus = setter(s_plus, base + eps);
+                let p_plus = s_plus.fused_forward_generic(i, j, rows, cols);
+
+                let mut s_minus = *seed;
+                s_minus = setter(s_minus, base - eps);
+                let p_minus = s_minus.fused_forward_generic(i, j, rows, cols);
+
+                let grad = (p_plus - p_minus) / (2.0 * eps);
+                if grad.abs() > best.abs() {
+                    best = grad;
+                }
+                if best.abs() < 1e-6 { eps *= 10.0; } else { break; }
+            }
+            best
+        }
+
+        let dp_dr = central_diff(
+            seed, i, j, rows, cols,
+            |s| s.get_r(),
+            |mut s, v| { s.set_r(v.clamp(0.0, 0.9999)); s },
+            r0, predicted, eps_r,
+        );
+
+        let dp_dtheta = central_diff(
+            seed, i, j, rows, cols,
+            |s| s.get_theta(),
+            |mut s, v| { s.set_theta(v); s },
+            th0, predicted, eps_th,
+        );
+
+        // 자연 그래디언트 스케일링 (푸앵카레 볼)
+        let one_minus_r2 = (1.0 - r0 * r0).max(1e-6);
+        let scale_r = (one_minus_r2 * one_minus_r2) / 4.0; // for dr component
+        let scale_theta = (one_minus_r2 * one_minus_r2) / (4.0 * (r0 * r0 + 1e-9));
+
+        let grad_r = loss_grad * dp_dr * scale_r;
+        let grad_theta = loss_grad * dp_dtheta * scale_theta;
+
+        // 1차/2차 모멘트
         self.m_r = self.beta1 * self.m_r + (1.0 - self.beta1) * grad_r;
         self.m_theta = self.beta1 * self.m_theta + (1.0 - self.beta1) * grad_theta;
-        
-        // 3. 2차 모멘트 업데이트 (지수이동평균)
+        self.m_amp = self.beta1 * self.m_amp + (1.0 - self.beta1) * 0.0; // 수치 경로에선 amp 미갱신
+        // p1 수치 그라디언트
+        let p1_0 = seed.get_param1();
+        let eps_p1 = 1e-4_f32.max(1e-3 * p1_0.abs());
+        let dp_dp1 = {
+            let mut s_plus = *seed; s_plus.set_param1((p1_0 + eps_p1).clamp(-16.0, 16.0));
+            let mut s_minus = *seed; s_minus.set_param1((p1_0 - eps_p1).clamp(-16.0, 16.0));
+            let p_plus = s_plus.fused_forward_generic(i, j, rows, cols);
+            let p_minus = s_minus.fused_forward_generic(i, j, rows, cols);
+            (p_plus - p_minus) / (2.0 * eps_p1)
+        };
+        let grad_p1 = loss_grad * dp_dp1;
+        self.m_p1 = self.beta1 * self.m_p1 + (1.0 - self.beta1) * grad_p1;
+
         self.v_r = self.beta2 * self.v_r + (1.0 - self.beta2) * grad_r.powi(2);
         self.v_theta = self.beta2 * self.v_theta + (1.0 - self.beta2) * grad_theta.powi(2);
-        
-        // 4. AMSGrad 변형 (선택적)
+        self.v_amp = self.beta2 * self.v_amp + (1.0 - self.beta2) * 0.0;
+        self.v_p1 = self.beta2 * self.v_p1 + (1.0 - self.beta2) * grad_p1.powi(2);
+
         let (v_r_used, v_theta_used) = if self.use_amsgrad {
             self.vmax_r = self.vmax_r.max(self.v_r);
             self.vmax_theta = self.vmax_theta.max(self.v_theta);
@@ -295,24 +356,33 @@ impl BitAdamState {
         } else {
             (self.v_r, self.v_theta)
         };
-        
-        // 5. 편향 보정 (Bias correction)
-        let bias_correction1 = 1.0 - self.beta1.powi(self.t as i32);
-        let bias_correction2 = 1.0 - self.beta2.powi(self.t as i32);
-        
-        let m_hat_r = self.m_r / bias_correction1;
-        let m_hat_theta = self.m_theta / bias_correction1;
-        let v_hat_r = v_r_used / bias_correction2;
-        let v_hat_theta = v_theta_used / bias_correction2;
-        
-        // 6. 파라미터 업데이트 (제네릭)
-        seed.adam_update(m_hat_r, m_hat_theta, v_hat_r, v_hat_theta, learning_rate, self.epsilon);
+        let _v_amp_used = if self.use_amsgrad { self.vmax_amp = self.vmax_amp.max(self.v_amp); self.vmax_amp } else { self.v_amp };
+
+        let bc1 = 1.0 - self.beta1.powi(self.t as i32);
+        let bc2 = 1.0 - self.beta2.powi(self.t as i32);
+        let m_hat_r = self.m_r / bc1;
+        let m_hat_theta = self.m_theta / bc1;
+        let v_hat_r = v_r_used / bc2;
+        let v_hat_theta = v_theta_used / bc2;
+        let m_hat_p1 = self.m_p1 / bc1;
+        let v_hat_p1 = self.v_p1 / bc2;
+
+        // 적응 스텝 (자연스텝 보정 포함)
+        let step_r = learning_rate * m_hat_r / (v_hat_r.sqrt() + self.epsilon);
+        let step_theta = learning_rate * m_hat_theta / (v_hat_theta.sqrt() + self.epsilon);
+        let step_p1 = learning_rate * m_hat_p1 / (v_hat_p1.sqrt() + self.epsilon);
+
+        let new_r = (r0 - step_r).clamp(0.0, 0.9999);
+        let new_theta = th0 - step_theta;
+        seed.set_r(new_r);
+        seed.set_theta(new_theta);
+        seed.set_param1((p1_0 - step_p1).clamp(-16.0, 16.0));
     }
 
-    /// 기존 Packed128 전용 버전 (호환성 유지)
+    /// Packed128용 업데이트
     pub fn bit_update_packed128(
         &mut self,
-        packed: &mut Packed128,
+        seed: &mut Packed128,
         i: usize,
         j: usize,
         rows: usize,
@@ -320,34 +390,11 @@ impl BitAdamState {
         target: f32,
         learning_rate: f32,
     ) {
-        self.bit_update(packed, i, j, rows, cols, target, learning_rate);
+        // 제네릭 경로 재사용
+        self.bit_update(seed, i, j, rows, cols, target, learning_rate);
     }
 
-    /// Enhanced128을 위한 Adam 업데이트 (편의 메서드)
-    pub fn bit_update_enhanced(
-        &mut self,
-        enhanced: &mut Enhanced128,
-        i: usize,
-        j: usize,
-        rows: usize,
-        cols: usize,
-        target: f32,
-        learning_rate: f32,
-    ) {
-        self.bit_update(enhanced, i, j, rows, cols, target, learning_rate);
-    }
-    
-    /// 간단한 인터페이스 (이전 버전과의 호환성)
-    pub fn bit_update_simple(
-        &mut self,
-        packed: &mut Packed128,
-        _predicted: f32,
-        target: f32,
-        learning_rate: f32,
-    ) {
-        // 더미 좌표로 호출 (실제로는 사용하지 않는 것을 권장)
-        self.bit_update(packed, 0, 0, 1, 1, target, learning_rate);
-    }
+
     
     /// 옵티마이저 상태 초기화
     pub fn reset(&mut self) {
@@ -355,9 +402,14 @@ impl BitAdamState {
         self.v_r = 0.0;
         self.m_theta = 0.0;
         self.v_theta = 0.0;
+        self.m_amp = 0.0;
+        self.v_amp = 0.0;
+        self.m_p1 = 0.0;
+        self.v_p1 = 0.0;
         self.t = 0;
         self.vmax_r = 0.0;
         self.vmax_theta = 0.0;
+        self.vmax_amp = 0.0;
     }
     
     /// AMSGrad 변형 활성화/비활성화

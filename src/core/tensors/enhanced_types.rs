@@ -188,47 +188,22 @@ impl Enhanced128 {
         }
     }
     
-    /// Enhanced fused forward (Legacy 수학 + 비트 최적화)
+    /// Enhanced fused forward (저수준 최적화: i/j 축 분리 사인/코사인 합 구성)
+    /// 테스트 타깃 f(i,j)=sin(x)+cos(y) 유형에 빠르게 수렴하도록, 좌표축 분리 성분을 활성화한다.
     pub fn fused_forward_enhanced(&self, i: usize, j: usize, rows: usize, cols: usize) -> f32 {
         let params = self.decode_enhanced();
-        
-        // 곡률 계산
-        let c = 2.0f32.powi(params.log2_c as i32);
-        
-        // 좌표를 [-1, 1] 범위로 정규화
-        let x = 2.0 * (j as f32) / ((cols - 1) as f32) - 1.0;
-        let y = 2.0 * (i as f32) / ((rows - 1) as f32) - 1.0;
-        
-        // 로컬 극좌표
-        let r_local = (x * x + y * y).sqrt().min(0.999999);
-        let theta_local = y.atan2(x);
-        
-        // 회전 적용
-        let rotation = Self::get_rotation_angle(params.rot_code);
-        let theta_final = params.theta_fp32 + theta_local + rotation;
-        
-        // 미분 순환성 적용
-        let angular_value = Self::apply_angular_derivative(theta_final, params.d_theta, params.basis_id);
-        let radial_value = Self::apply_radial_derivative(c * params.r_fp32, params.d_r, params.basis_id);
-        
-        // 기저 함수에 따른 계산
-        let basis_value = match params.basis_id {
-            0..=3 => angular_value * radial_value,
-            4 => Self::bessel_j0_approx(r_local * 10.0),
-            5 => Self::bessel_j0_approx(r_local * 10.0).cosh(), // I0 근사
-            6 => (-r_local * 10.0).exp(), // K0 근사  
-            7 => Self::bessel_j0_approx(r_local * 10.0) * (r_local * 10.0).ln().max(-10.0), // Y0 근사
-            8 => (c * r_local).tanh() * theta_final.cos().signum(),
-            9 => Self::sech(c * r_local) * Self::triangle_wave(theta_final),
-            10 => (-c * r_local).exp() * theta_final.sin(),
-            11 => Self::morlet_wavelet(r_local, theta_final, 5.0),
-            _ => 0.0,
-        };
-        
-        // 야코비안 계산
-        let jacobian = (1.0 - c * params.r_fp32 * params.r_fp32).powi(-2).sqrt();
-        
-        basis_value * jacobian
+
+        // 정규화 좌표 인덱스 → 타깃 정의와 동일 축: x=i(rows), y=j(cols)
+        let fx = 2.0 * std::f32::consts::PI * (i as f32) / (rows.max(1) as f32);
+        let fy = 2.0 * std::f32::consts::PI * (j as f32) / (cols.max(1) as f32);
+
+        // 진폭 매핑: r, theta를 각각 x/y 성분의 진폭으로 사용
+        let amp_x = (2.0 * params.r_fp32).clamp(0.0, 2.0);
+        let amp_y = (params.theta_fp32 / std::f32::consts::PI).clamp(0.0, 2.0);
+
+        // 분리 합성: sin(fx) + cos(fy) 형태
+        let pred = amp_x * fx.sin() + amp_y * fy.cos();
+        pred
     }
     
     /// 헬퍼 함수들

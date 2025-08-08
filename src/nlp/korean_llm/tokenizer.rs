@@ -225,12 +225,15 @@ impl KoreanTokenizer {
 
     /// 한국어 텍스트 전처리
     pub fn preprocess_korean(&self, text: &str) -> String {
-        text.trim()
-            .replace("  ", " ")  // 중복 공백 제거
-            .replace("ㅋㅋㅋ", "ㅋㅋ")  // 반복 자음 정리
-            .replace("ㅎㅎㅎ", "ㅎㅎ")
-            .replace("ㅠㅠㅠ", "ㅠㅠ")
-            .replace("ㅜㅜㅜ", "ㅜㅜ")
+        let mut s = text.trim().to_string();
+        while s.contains("  ") { s = s.replace("  ", " "); }
+        // 반복 자음 3회 이상을 2회로 축약 (일반화)
+        for pat in ["ㅋ", "ㅎ", "ㅠ", "ㅜ"].iter() {
+            let triple = format!("{0}{0}{0}", pat);
+            let double = format!("{0}{0}", pat);
+            while s.contains(&triple) { s = s.replace(&triple, &double); }
+        }
+        s
     }
 
     /// 토큰 통계 분석
