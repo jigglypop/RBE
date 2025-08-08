@@ -273,9 +273,11 @@ impl Packed128 {
         // 2. 2차 보정항 (r^2 · x · y)
         let params = self.decode();
 
-        // 정규화된 좌표 (-0.5 ~ 0.5)
-        let x = i as f32 / (rows.max(1) - 1) as f32 - 0.5;
-        let y = j as f32 / (cols.max(1) - 1) as f32 - 0.5;
+        // 정규화된 좌표 (-0.5 ~ 0.5), 분모 0 안전 처리
+        let denom_r = (rows.max(1) - 1) as f32;
+        let denom_c = (cols.max(1) - 1) as f32;
+        let x = if denom_r > 0.0 { (i as f32) / denom_r - 0.5 } else { 0.0 };
+        let y = if denom_c > 0.0 { (j as f32) / denom_c - 0.5 } else { 0.0 };
 
         let quad = 0.5 * params.r_fp32.powi(2) * x * y;
 

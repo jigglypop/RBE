@@ -1,5 +1,8 @@
 use std::time::Instant;
 use std::hint::black_box;
+use clap::Parser;
+use rbe_llm::core::{ModelLoader, WeightCompressor, WeightDecompressor};
+use half::{f16, bf16};
 use rand::{rngs::StdRng, SeedableRng};
 
 use rbe_llm::core::{
@@ -517,7 +520,398 @@ fn measure_inference_time(seed: &Packed256, residual: (f32, f32, f32, f32, f32, 
     (elapsed_ns as f64) / (total_evals as f64)
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about = "RBE benchmark (synthetic and real weights)")]
+struct Args {
+    /// Path to safetensors model file
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Tensor name filter (substring)
+    #[arg(long)]
+    tensor: Option<String>,
+
+    /// Block columns for compression (0=whole matrix)
+    #[arg(long, default_value_t = 0)]
+    block_cols: usize,
+
+    /// Residual DCT modes per axis (0 disables residual)
+    #[arg(long, default_value_t = 4)]
+    residual_modes: usize,
+
+    /// Number of seeds per block (>=1)
+    #[arg(long, default_value_t = 1)]
+    multi_seed: usize,
+
+    /// Tile height for real-weight tiling (0 disables tiling)
+    #[arg(long, default_value_t = 0)]
+    tile_rows: usize,
+
+    /// Tile width for real-weight tiling (0 disables tiling)
+    #[arg(long, default_value_t = 0)]
+    tile_cols: usize,
+}
+
+fn bench_real_weights(model_path: &str, tensor_filter: Option<&str>, block_cols: usize, residual_modes: usize, multi_seed: usize, tile_rows: usize, tile_cols: usize) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Real weights benchmark ===");
+    println!("Model: {}", model_path);
+    let loader = ModelLoader::load_safetensors(model_path)?;
+    let mut selected: Option<(String, Vec<usize>, String, (usize, usize))> = None;
+    for (name, info) in loader.header.tensors.iter() {
+        let total: usize = info.shape.iter().product();
+        let pass_filter = tensor_filter.map(|f| name.contains(f)).unwrap_or(true);
+        let dtype_ok = matches!(info.dtype.as_str(), "F32" | "F16" | "BF16");
+        let shape_ok = info.shape.len() == 2;
+        if pass_filter && dtype_ok && shape_ok && total >= 4096 && total <= 2_500_000 {
+            selected = Some((name.clone(), info.shape.clone(), info.dtype.clone(), info.data_offsets));
+            break;
+        }
+    }
+    if selected.is_none() {
+        // Fallback: pick the first tensor with supported dtype
+        for (name, info) in loader.header.tensors.iter() {
+            if matches!(info.dtype.as_str(), "F32" | "F16" | "BF16") {
+                selected = Some((name.clone(), info.shape.clone(), info.dtype.clone(), info.data_offsets));
+                break;
+            }
+        }
+    }
+    let (tensor_name, shape_sel, dtype_sel, offsets_sel) = selected.ok_or("No suitable tensor found (try --tensor)")?;
+    println!("Tensor: {} shape={:?} dtype={}", tensor_name, shape_sel, dtype_sel);
+    // Extract as f32 regardless of dtype
+    let (start, end) = offsets_sel;
+    let bytes = &loader.data[loader.header.data_offset + start .. loader.header.data_offset + end];
+    let weights: Vec<f32> = match dtype_sel.as_str() {
+        "F32" => {
+            let mut v = Vec::with_capacity(bytes.len()/4);
+            for i in 0..(bytes.len()/4) {
+                let s = &bytes[i*4..i*4+4];
+                v.push(f32::from_le_bytes([s[0],s[1],s[2],s[3]]));
+            }
+            v
+        }
+        "F16" => {
+            let mut v = Vec::with_capacity(bytes.len()/2);
+            for i in 0..(bytes.len()/2) {
+                let s = &bytes[i*2..i*2+2];
+                v.push(f16::from_le_bytes([s[0],s[1]]).to_f32());
+            }
+            v
+        }
+        "BF16" => {
+            let mut v = Vec::with_capacity(bytes.len()/2);
+            for i in 0..(bytes.len()/2) {
+                let s = &bytes[i*2..i*2+2];
+                v.push(bf16::from_le_bytes([s[0],s[1]]).to_f32());
+            }
+            v
+        }
+        other => return Err(format!("Unsupported dtype: {}", other).into()),
+    };
+    let total = weights.len();
+    // Use original 2D shape if available, otherwise nearest factorization
+    let (rows, cols) = if shape_sel.len() == 2 {
+        (shape_sel[0], shape_sel[1])
+    } else {
+        let mut r = (total as f64).sqrt() as usize;
+        while r > 1 && total % r != 0 { r -= 1; }
+        (r, total / r)
+    };
+    println!("2D reshape: {}x{} ({} elements)", rows, cols, total);
+
+    // Packed256 tile-based path for real weights (high accuracy)
+    if tile_rows > 0 && tile_cols > 0 {
+        let tr = tile_rows.min(rows).max(1);
+        let tc = tile_cols.min(cols).max(1);
+        let tiles_r = (rows + tr - 1) / tr;
+        let tiles_c = (cols + tc - 1) / tc;
+        let num_tiles = tiles_r * tiles_c;
+        let start_ts = Instant::now();
+        let mut residual_coeffs_dct: Vec<Vec<f32>> = if residual_modes > 0 { vec![vec![0.0; residual_modes * residual_modes]; num_tiles] } else { Vec::new() };
+
+        // Fit one Packed256 seed per tile using closed-form ax, ay and amp updates
+        let mut seeds256: Vec<Packed256> = Vec::with_capacity(num_tiles);
+        for tr_idx in 0..tiles_r {
+            let r0 = tr_idx * tr; let h = (rows - r0).min(tr);
+            for tc_idx in 0..tiles_c {
+                let c0 = tc_idx * tc; let w = (cols - c0).min(tc);
+                // extract tile weights
+                let mut tile = vec![0.0f32; h * w];
+                for i in 0..h { tile[i*w .. i*w+w].copy_from_slice(&weights[(r0+i)*cols + c0 .. (r0+i)*cols + c0 + w]); }
+                // init seed
+                let mut seed = Packed256::new(&Packed256Params {
+                    r: 1.0,
+                    theta: 0.0,
+                    param1: std::f32::consts::PI * 2.0, // omega_x
+                    param2: 1.0,                        // amp
+                    basis_id: 12,
+                    d_r: 0, d_theta: 0,
+                    log2_c: -20,
+                    activation_id: 128, q_value: 255, k_value: 255,
+                    flags: 0,
+                });
+                // small epochs
+                let epochs = 40usize;
+                for _ in 0..epochs {
+                    // LS for ax, ay at fixed phi_x=0
+                    let mut ss=0.0f32; let mut cc=0.0f32; let mut sc=0.0f32; let mut ys=0.0f32; let mut yc=0.0f32;
+                    let omega_x = seed.get_param1();
+                    let omega_y = (seed.get_q_value() as f32) / 255.0;
+                    for i in 0..h {
+                        let r_coord = if h>1 { i as f32 / (h as f32 - 1.0) } else { 0.0 };
+                        let r_eff = seed.get_r() * r_coord;
+                        for j in 0..w {
+                            let theta_eff = 2.0 * std::f32::consts::PI * (j as f32) / (w as f32);
+                            let sin_x = (omega_x * r_eff).sin();
+                            let cos_y = (omega_y * theta_eff).cos();
+                            ss += sin_x * sin_x; cc += cos_y * cos_y; sc += sin_x * cos_y;
+                            let y = tile[i*w + j];
+                            ys += y * sin_x; yc += y * cos_y;
+                        }
+                    }
+                    let det = ss*cc - sc*sc;
+                    if det.abs() > 1e-8 { let inv=1.0/det; let ax=(cc*ys - sc*yc)*inv; let ay=(ss*yc - sc*ys)*inv; seed.set_k_value((ax.clamp(0.0,1.0)*255.0).round() as u8); seed.set_activation_id((ay.clamp(0.0,1.0)*255.0).round() as u8); }
+                    // amp closed-form
+                    let mut num=0.0f32; let mut den=0.0f32;
+                    for i in 0..h { for j in 0..w {
+                        let params = Packed256Params { param2: 1.0, ..Packed256Params { r: seed.get_r(), theta: seed.get_theta(), param1: seed.get_param1(), param2: seed.get_param2(), basis_id: seed.get_basis_id(), d_r: 0, d_theta: 0, log2_c: seed.get_log2_c(), activation_id: seed.get_activation_id(), q_value: seed.get_q_value(), k_value: seed.get_k_value(), flags: seed.get_flags() } };
+                        let out = bit_engine::compute_fused_output(&params, i, j, h, w);
+                        let f_base = out.predicted_value; let y = tile[i*w + j]; num += f_base*y; den += f_base*f_base;
+                    }}
+                    if den > 1e-12 { seed.set_param2((num/den).clamp(0.0,4.0)); }
+                }
+                // optional DCT residual per tile
+                if residual_modes > 0 {
+                    let m = residual_modes * residual_modes;
+                    let mut xtx = vec![vec![0.0f64; m]; m];
+                    let mut xty = vec![0.0f64; m];
+                    for i in 0..h {
+                        let u = if h > 1 { i as f32 / (h as f32 - 1.0) } else { 0.0 };
+                        for j in 0..w {
+                            let v = if w > 1 { j as f32 / (w as f32 - 1.0) } else { 0.0 };
+                            let params = Packed256Params {
+                                r: seed.get_r(), theta: seed.get_theta(), param1: seed.get_param1(), param2: seed.get_param2(),
+                                basis_id: seed.get_basis_id(), d_r: 0, d_theta: 0, log2_c: seed.get_log2_c(),
+                                activation_id: seed.get_activation_id(), q_value: seed.get_q_value(), k_value: seed.get_k_value(), flags: seed.get_flags()
+                            };
+                            let base = bit_engine::compute_fused_output(&params, i, j, h, w).predicted_value;
+                            let y_res = (tile[i * w + j] - base) as f64;
+                            // build feature vector
+                            let mut feat = vec![0.0f64; m];
+                            let mut idx = 0;
+                            for p in 0..residual_modes {
+                                let cu = (std::f32::consts::PI * p as f32 * u).cos() as f64;
+                                for q in 0..residual_modes {
+                                    let cv = (std::f32::consts::PI * q as f32 * v).cos() as f64;
+                                    feat[idx] = cu * cv;
+                                    idx += 1;
+                                }
+                            }
+                            for p in 0..m {
+                                xty[p] += feat[p] * y_res;
+                                for q in 0..m { xtx[p][q] += feat[p] * feat[q]; }
+                            }
+                        }
+                    }
+                    // ridge regularization and solve
+                    let lambda = 1e-6f64;
+                    for d in 0..m { xtx[d][d] += lambda; }
+                    let mut a = vec![vec![0.0f64; m + 1]; m];
+                    for p in 0..m { for q in 0..m { a[p][q] = xtx[p][q]; } a[p][m] = xty[p]; }
+                    for p in 0..m {
+                        // pivot
+                        let mut max_r = p; let mut max_v = a[p][p].abs();
+                        for r in (p+1)..m { let v = a[r][p].abs(); if v > max_v { max_v = v; max_r = r; } }
+                        if max_v < 1e-12 { break; }
+                        if max_r != p { a.swap(p, max_r); }
+                        let div = a[p][p];
+                        for c in p..(m+1) { a[p][c] /= div; }
+                        for r in 0..m { if r == p { continue; } let f = a[r][p]; for c in p..(m+1) { a[r][c] -= f * a[p][c]; } }
+                    }
+                    let tile_idx = tr_idx * tiles_c + tc_idx;
+                    let mut coeff = vec![0.0f32; m];
+                    for p in 0..m { coeff[p] = a[p][m] as f32; }
+                    residual_coeffs_dct[tile_idx] = coeff;
+                }
+                // push tile seed
+                seeds256.push(seed);
+            }
+        }
+        // Reconstruct and RMSE
+        let mut restored = vec![0.0f32; rows*cols];
+        for tr_idx in 0..tiles_r { let r0=tr_idx*tr; let h=(rows-r0).min(tr); for tc_idx in 0..tiles_c { let c0=tc_idx*tc; let w=(cols-c0).min(tc); let tile_idx=tr_idx*tiles_c+tc_idx; for i in 0..h { let u=if h>1 { i as f32/(h as f32-1.0) } else { 0.0 }; for j in 0..w { let v=if w>1 { j as f32/(w as f32-1.0) } else { 0.0 }; let seed=&seeds256[tile_idx]; let params = Packed256Params { r: seed.get_r(), theta: seed.get_theta(), param1: seed.get_param1(), param2: seed.get_param2(), basis_id: seed.get_basis_id(), d_r: 0, d_theta: 0, log2_c: seed.get_log2_c(), activation_id: seed.get_activation_id(), q_value: seed.get_q_value(), k_value: seed.get_k_value(), flags: seed.get_flags() }; let base = bit_engine::compute_fused_output(&params, i, j, h, w).predicted_value; let mut res=0.0f32; if residual_modes>0 { let coeff=&residual_coeffs_dct[tile_idx]; let mut idx=0; for p in 0..residual_modes { let cu=(std::f32::consts::PI*p as f32*u).cos(); for q in 0..residual_modes { let cv=(std::f32::consts::PI*q as f32*v).cos(); res += coeff[idx]*(cu*cv); idx+=1; } } } restored[(r0+i)*cols + (c0+j)] = base + res; } } } }
+        let mse: f64 = weights.iter().zip(restored.iter()).map(|(a,b)| { let d=*a as f64 - *b as f64; d*d }).sum::<f64>() / (rows*cols) as f64; let rmse = mse.sqrt();
+        println!("Tile Compression: {}x{} tiles, residual_modes={} → Final RMSE: {:.6}", tiles_r, tiles_c, residual_modes, rmse);
+        // Inference speed (ns/weight)
+        let repeats = 1000usize.max(10_000_000 / (rows*cols).max(1));
+        let start_inf = Instant::now(); let mut acc=0.0f32;
+        for _ in 0..repeats { for tr_idx in 0..tiles_r { let r0=tr_idx*tr; let h=(rows-r0).min(tr); for tc_idx in 0..tiles_c { let c0=tc_idx*tc; let w=(cols-c0).min(tc); let tile_idx=tr_idx*tiles_c+tc_idx; let seed=&seeds256[tile_idx]; for i in 0..h { for j in 0..w { let params = Packed256Params { r: seed.get_r(), theta: seed.get_theta(), param1: seed.get_param1(), param2: seed.get_param2(), basis_id: seed.get_basis_id(), d_r: 0, d_theta: 0, log2_c: seed.get_log2_c(), activation_id: seed.get_activation_id(), q_value: seed.get_q_value(), k_value: seed.get_k_value(), flags: seed.get_flags() }; let out = bit_engine::compute_fused_output(&params, i, j, h, w).predicted_value; acc = black_box(acc + out); } } } } }
+        black_box(acc); let elapsed = start_inf.elapsed().as_nanos() as f64; let ns_per_weight = elapsed / (repeats as f64 * (rows*cols) as f64);
+        println!("Inference: {:.3} ns/weight", ns_per_weight);
+        println!("Targets: RMSE<=0.001 (hard), inference ns/weight minimal");
+        return Ok(());
+    }
+
+    let compressor = WeightCompressor::new(rows, cols)
+        .with_block_cols(block_cols)
+        .with_refine_iters(8)
+        .with_seeds_per_block(multi_seed);
+    let (seeds, stats) = if block_cols == 0 {
+        let (s, st) = compressor.compress_weights(&weights)?;
+        (vec![s], st)
+    } else {
+        compressor.compress_weights_blocks(&weights)?
+    };
+    let blocks_logical = if block_cols == 0 { 1 } else { cols / block_cols.max(1) };
+    let k = if blocks_logical > 0 { (seeds.len() / blocks_logical).max(1) } else { 1 };
+    println!(
+        "Compression: blocks={} (x{} seeds), ratio={:.2}x, rmse={:.6}, time={:.1}ms",
+        blocks_logical, k, stats.compression_ratio, stats.rmse, stats.transform_ms
+    );
+
+    // Restore and RMSE
+    // 선택적: 블록 잔차 보정 계수 계산 (선형 최소제곱, 7개 특성)
+    // Residual correction using low-order 2D DCT basis per block
+    let mut residual_coeffs_dct: Vec<Vec<f32>> = Vec::new();
+    if seeds.len() > 1 && residual_modes > 0 {
+        let block = block_cols.max(1);
+        let m = residual_modes * residual_modes; // DCT modes per block (p,q)
+        residual_coeffs_dct.resize(seeds.len(), vec![0.0f32; m]);
+        for (b, seed) in seeds.iter().enumerate() {
+            let offset = b * block;
+            // X^T X (m×m) and X^T r (m)
+            let mut xtx = vec![vec![0.0f64; m]; m];
+            let mut xty = vec![0.0f64; m];
+            for i in 0..rows {
+                let u = if rows > 1 { i as f32 / (rows as f32 - 1.0) } else { 0.0 };
+                for c in 0..block {
+                    let j = offset + c;
+                    if j >= cols { break; }
+                    let v = if block > 1 { c as f32 / (block as f32 - 1.0) } else { 0.0 };
+                    let f_seed = seed.fused_forward(i, c, rows, block);
+                    let y = weights[i * cols + j] - f_seed;
+                    // build DCT feature vector
+                    let mut feat = vec![0.0f32; m];
+                    let mut idx = 0;
+                    for p in 0..residual_modes {
+                        let cu = (std::f32::consts::PI * p as f32 * u).cos();
+                        for q in 0..residual_modes {
+                            let cv = (std::f32::consts::PI * q as f32 * v).cos();
+                            feat[idx] = cu * cv;
+                            idx += 1;
+                        }
+                    }
+                    for p in 0..m {
+                        xty[p] += feat[p] as f64 * y as f64;
+                        for q in 0..m { xtx[p][q] += feat[p] as f64 * feat[q] as f64; }
+                    }
+                }
+            }
+            // Ridge regularization
+            let lambda = 1e-6f64;
+            for d in 0..m { xtx[d][d] += lambda; }
+            // solve m×m by Gauss elimination
+            let mut a = vec![vec![0.0f64; m + 1]; m];
+            for p in 0..m { for q in 0..m { a[p][q] = xtx[p][q]; } a[p][m] = xty[p]; }
+            for p in 0..m {
+                // pivot
+                let mut max_r = p; let mut max_v = a[p][p].abs();
+                for r in (p+1)..m { let v = a[r][p].abs(); if v > max_v { max_v = v; max_r = r; } }
+                if max_v < 1e-12 { break; }
+                if max_r != p { a.swap(p, max_r); }
+                let div = a[p][p];
+                for c in p..(m+1) { a[p][c] /= div; }
+                for r in 0..m { if r==p {continue;} let f = a[r][p]; for c in p..(m+1) { a[r][c] -= f * a[p][c]; } }
+            }
+            let mut coeff = vec![0.0f32; m];
+            for p in 0..m { coeff[p] = a[p][m] as f32; }
+            residual_coeffs_dct[b] = coeff;
+        }
+    }
+
+    let restored: Vec<f32> = if seeds.len() == 1 {
+        let (res, _) = WeightDecompressor::restore_weights(&seeds[0], rows, cols);
+        res
+    } else {
+        // 블록 단위 복원(다중 시드 합성) + DCT 잔차 보정 적용 (k==1에서만 사용)
+        let mut out = vec![0.0f32; rows * cols];
+        let block = block_cols.max(1);
+        for b in 0..blocks_logical {
+            let offset = b * block;
+            for i in 0..rows {
+                let u = if rows > 1 { i as f32 / (rows as f32 - 1.0) } else { 0.0 };
+                for c in 0..block {
+                    let j = offset + c;
+                    if j >= cols { break; }
+                    let v = if block > 1 { c as f32 / (block as f32 - 1.0) } else { 0.0 };
+                    // sum of k seeds for this logical block
+                    let mut base_sum = 0.0f32;
+                    for s in 0..k { base_sum += seeds[b * k + s].fused_forward(i, c, rows, block); }
+                    // optional DCT residual only valid when k==1
+                    let mut res = 0.0f32;
+                    if k == 1 && residual_modes > 0 {
+                        let coeff = &residual_coeffs_dct[b];
+                        let mut idx = 0;
+                        for p in 0..residual_modes { let cu = (std::f32::consts::PI * p as f32 * u).cos();
+                            for q in 0..residual_modes { let cv = (std::f32::consts::PI * q as f32 * v).cos();
+                                res += coeff[idx] * (cu * cv); idx += 1; }
+                        }
+                    }
+                    out[i * cols + j] = base_sum + res;
+                }
+            }
+        }
+        out
+    };
+    let mse: f64 = weights.iter().zip(restored.iter()).map(|(a,b)| {
+        let d = *a as f64 - *b as f64; d*d
+    }).sum::<f64>() / total as f64;
+    let rmse = mse.sqrt();
+    println!("Final RMSE: {:.6}", rmse);
+
+    // Inference speed (ns/weight)
+    let repeats = 1000usize.max(10_000_000 / total.max(1));
+    let start = Instant::now();
+    let mut acc = 0.0f32;
+    for _ in 0..repeats {
+        if seeds.len() == 1 {
+            let seed = &seeds[0];
+            for i in 0..rows { for j in 0..cols {
+                acc = black_box(acc + seed.fused_forward(i, j, rows, cols));
+            }}
+        } else {
+            let block = block_cols.max(1);
+            for b in 0..blocks_logical {
+                let offset = b * block;
+                for i in 0..rows { for c in 0..block {
+                    let j = offset + c;
+                    if j >= cols { break; }
+                    // sum of k seeds
+                    let mut base_sum = 0.0f32;
+                    for s in 0..k { base_sum += seeds[b * k + s].fused_forward(i, c, rows, block); }
+                    acc = black_box(acc + base_sum);
+                }}
+            }
+        }
+    }
+    black_box(acc);
+    let elapsed = start.elapsed().as_nanos() as f64;
+    let ns_per_weight = elapsed / (repeats as f64 * total as f64);
+    println!("Inference: {:.3} ns/weight", ns_per_weight);
+
+    // Sanity: target thresholds (informational)
+    println!("Targets: RMSE<=0.001 (hard), inference ns/weight minimal");
+    Ok(())
+}
+
 fn main() {
+    let args = Args::parse();
+    if let Some(path) = args.model.as_deref() {
+        if let Err(e) = bench_real_weights(path, args.tensor.as_deref(), args.block_cols, args.residual_modes, args.multi_seed, args.tile_rows, args.tile_cols) {
+            eprintln!("[real] error: {}", e);
+        }
+        return;
+    }
     let block = (64usize, 64usize);
     let epochs = 400usize; // 정확도 우선으로 에폭 확장
     let samples = 10usize;
