@@ -18,6 +18,10 @@ pub struct EngineOutput {
     pub predicted_value: f32,
     pub grad_r: f32,
     pub grad_theta: f32,
+    /// θ 스케일 성분(θ_eff에 대한 체인 경로)만의 기여
+    pub grad_theta_scale: f32,
+    /// 위상(phi) 경로의 기여
+    pub grad_phi: f32,
     pub grad_p2: f32, // amplitude(param2) gradient
     pub grad_p1: f32, // frequency(param1) gradient
 }
@@ -68,7 +72,8 @@ pub fn compute_fused_output_fast(
     theta_coord: f32,
 ) -> EngineOutput {
     let r_scale = params.r.clamp(0.0, 4.0);
-    let theta_scale = if params.basis_id == 12 { 1.0 } else { params.theta.clamp(0.0, 8.0) };
+    // basis 12, 13, 14 use `theta` as phase (phi_x); theta_scale path disabled
+    let theta_scale = if params.basis_id == 12 || params.basis_id == 13 || params.basis_id == 14 { 1.0 } else { params.theta.clamp(0.0, 8.0) };
     let r_eff = r_scale * r_coord;
     let th_eff = theta_scale * theta_coord;
 
@@ -167,7 +172,7 @@ pub fn compute_fused_output_fast(
     } else {
         let jacobian_denom = 1.0 - c * r_eff * r_eff;
         if jacobian_denom <= 1e-8 {
-            return EngineOutput { predicted_value: 0.0, grad_r: 0.0, grad_theta: 0.0, grad_p2: 0.0, grad_p1: 0.0 };
+            return EngineOutput { predicted_value: 0.0, grad_r: 0.0, grad_theta: 0.0, grad_theta_scale: 0.0, grad_phi: 0.0, grad_p2: 0.0, grad_p1: 0.0 };
         }
     let metric = 1.0 / jacobian_denom;
         let d_metric_dr_eff = (2.0 * c * r_eff) / (jacobian_denom * jacobian_denom);
@@ -175,7 +180,7 @@ pub fn compute_fused_output_fast(
     };
 
     // 7) 진폭(amp) 적용: param2를 진폭으로 사용
-    let amp = params.param2.clamp(0.0, 4.0);
+    let amp = params.param2.clamp(-4.0, 4.0);
     let predicted_value = amp * func_val * metric;
 
     // 8) 효과 좌표에 대한 그래디언트
@@ -188,9 +193,276 @@ pub fn compute_fused_output_fast(
     // r_scale(theta로 저장)와 theta_scale(theta 파라미터)를 각각 r, theta에 매핑
     // grad_r -> ∂/∂r_scale, grad_theta -> ∂/∂theta_scale 로 반환
     let grad_r = grad_r_eff * r_coord;           // ∂/∂r_scale = ∂/∂r_eff * ∂r_eff/∂r_scale = ... * r_coord
-    let grad_theta = grad_th_eff * theta_coord + d_func_dphi;  // theta 파라미터는 위상(phi)에도 영향
+    let (grad_theta_scale, grad_phi, grad_theta) = if params.basis_id == 12 {
+        // basis 12: theta parameter acts as phase φx only; no theta_scale learning path
+        let gphi = d_func_dphi;
+        (0.0, gphi, gphi)
+    } else {
+        let gts = grad_th_eff * theta_coord; // theta_scale → θ_eff 경로
+        let gphi = d_func_dphi;              // 위상 경로
+        (gts, gphi, gts + gphi)
+    };
 
-    EngineOutput { predicted_value, grad_r, grad_theta, grad_p2: grad_amp, grad_p1 }
+    EngineOutput { predicted_value, grad_r, grad_theta, grad_theta_scale, grad_phi, grad_p2: grad_amp, grad_p1 }
+}
+
+/// Specialized path: basis 12 with continuous overrides for (omega_y, phi_y)
+/// Returns (EngineOutput, grad_omega_y, grad_phi_y)
+/// Notes:
+/// - Uses same metric/amplitude chain as compute_fused_output_fast
+/// - grad_omega_y/grad_phi_y are for the pre-metric base; full grads include amp*metric
+#[inline(always)]
+pub fn compute_b12_with_y_overrides(
+    params: &Packed256Params,
+    r_coord: f32,
+    theta_coord: f32,
+    omega_y_override: f32,
+    phi_y_override: f32,
+) -> (EngineOutput, f32, f32) {
+    // Early map of effective coordinates (theta_scale=1 for basis 12)
+    let r_scale = params.r.clamp(0.0, 4.0);
+    let r_eff = r_scale * r_coord;
+    let theta_eff = theta_coord;
+
+    // Base function components for basis 12
+    let omega_x = params.param1;
+    let a_x = (params.k_value as f32) / 255.0;
+    let a_y = (params.activation_id as f32) / 255.0;
+    let phi_x = params.theta;
+    let omega_y = omega_y_override;
+    let phi_y = phi_y_override;
+
+    let inner_x = omega_x * r_eff + phi_x;
+    let inner_y = omega_y * theta_eff + phi_y;
+    let sin_x = inner_x.sin();
+    let cos_x = inner_x.cos();
+    let cos_y = inner_y.cos();
+    let sin_y = inner_y.sin();
+
+    let base_val = a_x * sin_x + a_y * cos_y;
+    let d_base_dr_eff = a_x * omega_x * cos_x;           // ∂/∂r_eff
+    let d_base_dth_eff = -a_y * omega_y * sin_y;          // ∂/∂theta_eff
+    let d_base_dphi_x = a_x * cos_x;                      // ∂/∂phi_x
+    let d_base_dp1 = a_x * r_eff * cos_x;                 // ∂/∂omega_x (stored in grad_p1)
+    let d_base_domega_y = -a_y * theta_eff * sin_y;       // extra
+    let d_base_dphi_y = -a_y * sin_y;                     // extra
+
+    // Apply bit differentiation legacy switch (assume standard case)
+    let (func_val, d_func_dr_eff, d_func_dth_eff, d_func_dphi_x, d_func_dp1) =
+        apply_bit_derivatives_ext(params, base_val, d_base_dr_eff, d_base_dth_eff, d_base_dphi_x, d_base_dp1);
+
+    // Metric chain
+    let c = 2.0_f32.powi(params.log2_c as i32);
+    let use_neutral_metric = c.abs() < 1.0e-6;
+    let (metric, d_metric_dr_eff) = if use_neutral_metric {
+        (1.0, 0.0)
+    } else {
+        let jacobian_denom = 1.0 - c * r_eff * r_eff;
+        if jacobian_denom <= 1e-8 {
+            return (
+                EngineOutput { predicted_value: 0.0, grad_r: 0.0, grad_theta: 0.0, grad_theta_scale: 0.0, grad_phi: 0.0, grad_p2: 0.0, grad_p1: 0.0 },
+                0.0,
+                0.0,
+            );
+        }
+        let metric = 1.0 / jacobian_denom;
+        let d_metric_dr_eff = (2.0 * c * r_eff) / (jacobian_denom * jacobian_denom);
+        (metric, d_metric_dr_eff)
+    };
+
+    // Amplitude
+    let amp = params.param2.clamp(-4.0, 4.0);
+    let predicted_value = amp * func_val * metric;
+
+    // Grads to effective coords and parameters
+    let grad_r_eff = amp * (d_func_dr_eff * metric + func_val * d_metric_dr_eff);
+    let _grad_th_eff = amp * (d_func_dth_eff * metric);
+    let grad_amp = func_val * metric;
+    let grad_p1 = amp * (d_func_dp1 * metric);
+
+    // Chain to seed parameters (basis 12: theta_scale path disabled)
+    let grad_r = grad_r_eff * r_coord;
+    let grad_theta_scale = 0.0;
+    let grad_phi = d_func_dphi_x * amp * metric; // ∂/∂phi_x
+
+    // Extra y-axis grads (continuous overrides)
+    let grad_omega_y = amp * (d_base_domega_y * metric);
+    let grad_phi_y = amp * (d_base_dphi_y * metric);
+
+    (
+        EngineOutput { predicted_value, grad_r, grad_theta: grad_phi, grad_theta_scale, grad_phi, grad_p2: grad_amp, grad_p1 },
+        grad_omega_y,
+        grad_phi_y,
+    )
+}
+
+/// Specialized path: basis 13 (rank-1 product) with continuous overrides for (omega_y, phi_y)
+/// f = sin(omega_x * r_eff + phi_x) * cos(omega_y * theta_eff + phi_y)
+/// Returns (EngineOutput, grad_omega_y, grad_phi_y)
+#[inline(always)]
+pub fn compute_b13_rank1_with_y_overrides(
+    params: &Packed256Params,
+    r_coord: f32,
+    theta_coord: f32,
+    omega_y_override: f32,
+    phi_y_override: f32,
+) -> (EngineOutput, f32, f32) {
+    // No theta_scale path for basis 13; treat theta_eff = theta_coord
+    let r_scale = params.r.clamp(0.0, 4.0);
+    let r_eff = r_scale * r_coord;
+    let theta_eff = theta_coord;
+
+    let omega_x = params.param1;
+    let phi_x = params.theta;
+    let omega_y = omega_y_override;
+    let phi_y = phi_y_override;
+
+    let inner_x = omega_x * r_eff + phi_x;
+    let inner_y = omega_y * theta_eff + phi_y;
+    let sin_x = inner_x.sin();
+    let cos_x = inner_x.cos();
+    let cos_y = inner_y.cos();
+    let sin_y = inner_y.sin();
+
+    // Base and derivatives (pre-metric, pre-amp)
+    let base_val = sin_x * cos_y;
+    let d_base_dr_eff = omega_x * cos_x * cos_y;          // ∂/∂r_eff
+    let d_base_dth_eff = -omega_y * sin_x * sin_y;         // ∂/∂theta_eff
+    let d_base_dphi_x = cos_x * cos_y;                     // ∂/∂phi_x
+    let d_base_dp1 = r_eff * cos_x * cos_y;                // ∂/∂omega_x
+    let d_base_domega_y = -theta_eff * sin_x * sin_y;      // extra
+    let d_base_dphi_y = -sin_x * sin_y;                    // extra
+
+    let (func_val, d_func_dr_eff, d_func_dth_eff, d_func_dphi_x, d_func_dp1) =
+        apply_bit_derivatives_ext(params, base_val, d_base_dr_eff, d_base_dth_eff, d_base_dphi_x, d_base_dp1);
+
+    // Metric chain
+    let c = 2.0_f32.powi(params.log2_c as i32);
+    let use_neutral_metric = c.abs() < 1.0e-6;
+    let (metric, d_metric_dr_eff) = if use_neutral_metric {
+        (1.0, 0.0)
+    } else {
+        let jacobian_denom = 1.0 - c * r_eff * r_eff;
+        if jacobian_denom <= 1e-8 {
+            return (
+                EngineOutput { predicted_value: 0.0, grad_r: 0.0, grad_theta: 0.0, grad_theta_scale: 0.0, grad_phi: 0.0, grad_p2: 0.0, grad_p1: 0.0 },
+                0.0,
+                0.0,
+            );
+        }
+        let metric = 1.0 / jacobian_denom;
+        let d_metric_dr_eff = (2.0 * c * r_eff) / (jacobian_denom * jacobian_denom);
+        (metric, d_metric_dr_eff)
+    };
+
+    // Amplitude
+    let amp = params.param2.clamp(-4.0, 4.0);
+    let predicted_value = amp * func_val * metric;
+
+    // Gradients
+    let grad_r_eff = amp * (d_func_dr_eff * metric + func_val * d_metric_dr_eff);
+    let _grad_th_eff = amp * (d_func_dth_eff * metric);
+    let grad_amp = func_val * metric;
+    let grad_p1 = amp * (d_func_dp1 * metric);
+
+    // Chain to seed parameters (no theta_scale path; theta acts as phi_x)
+    let grad_r = grad_r_eff * r_coord;
+    let grad_theta_scale = 0.0;
+    let grad_phi = d_func_dphi_x * amp * metric; // ∂/∂phi_x
+
+    let grad_omega_y = amp * (d_base_domega_y * metric);
+    let grad_phi_y = amp * (d_base_dphi_y * metric);
+
+    (
+        EngineOutput { predicted_value, grad_r, grad_theta: grad_phi, grad_theta_scale, grad_phi, grad_p2: grad_amp, grad_p1 },
+        grad_omega_y,
+        grad_phi_y,
+    )
+}
+
+/// Specialized path: basis 14 (Cartesian rank-1) with continuous overrides for (omega_y, phi_y)
+/// Coordinates: x = r_coord in [0,1], y = theta_coord/(2π) in [0,1]
+/// f(x,y) = sin(omega_x * x + phi_x) * cos(omega_y * y + phi_y)
+#[inline(always)]
+pub fn compute_b14_cartesian_with_y_overrides(
+    params: &Packed256Params,
+    r_coord: f32,
+    theta_coord: f32,
+    omega_y_override: f32,
+    phi_y_override: f32,
+) -> (EngineOutput, f32, f32) {
+    let x = r_coord;                     // Cartesian x
+    let y = theta_coord / (2.0 * PI);    // Cartesian y
+
+    let omega_x = params.param1;         // in radians per unit x
+    let phi_x = params.theta;            // phase along x
+    let omega_y = omega_y_override;      // in radians per unit y
+    let phi_y = phi_y_override;          // phase along y
+
+    // Base values and partials (pre-metric, pre-amp)
+    let inner_x = omega_x * x + phi_x;
+    let inner_y = omega_y * y + phi_y;
+    let sin_x = inner_x.sin();
+    let cos_x = inner_x.cos();
+    let cos_y = inner_y.cos();
+    let sin_y = inner_y.sin();
+
+    let base_val = sin_x * cos_y;
+    let d_base_dx = omega_x * cos_x * cos_y;      // ∂/∂x
+    let d_base_dy = -omega_y * sin_x * sin_y;     // ∂/∂y
+    let d_base_dphi_x = cos_x * cos_y;            // ∂/∂phi_x
+    let d_base_dp1 = x * cos_x * cos_y;           // ∂/∂omega_x
+    let d_base_domega_y = -y * sin_x * sin_y;     // ∂/∂omega_y
+    let d_base_dphi_y = -sin_x * sin_y;           // ∂/∂phi_y
+
+    // Apply legacy bit differentiation to (x,y) derivatives by mapping to (r_eff, theta_eff)
+    // We feed dx as dr_eff and dy as dth_eff so downstream chain uses the same pattern
+    let (func_val, d_func_dr_eff, d_func_dth_eff, d_func_dphi_x, d_func_dp1) =
+        apply_bit_derivatives_ext(params, base_val, d_base_dx, d_base_dy, d_base_dphi_x, d_base_dp1);
+
+    // Neutral/near-neutral metric (keep compatibility with pipeline)
+    let c = 2.0_f32.powi(params.log2_c as i32);
+    let use_neutral_metric = c.abs() < 1.0e-6;
+    // For Cartesian, use r_eff := x for metric guarding (mild effect if c≈0)
+    let r_eff_for_metric = x;
+    let (metric, d_metric_dr_eff) = if use_neutral_metric {
+        (1.0, 0.0)
+    } else {
+        let jacobian_denom = 1.0 - c * r_eff_for_metric * r_eff_for_metric;
+        if jacobian_denom <= 1e-8 {
+            return (
+                EngineOutput { predicted_value: 0.0, grad_r: 0.0, grad_theta: 0.0, grad_theta_scale: 0.0, grad_phi: 0.0, grad_p2: 0.0, grad_p1: 0.0 },
+                0.0,
+                0.0,
+            );
+        }
+        let metric = 1.0 / jacobian_denom;
+        let d_metric_dr_eff = (2.0 * c * r_eff_for_metric) / (jacobian_denom * jacobian_denom);
+        (metric, d_metric_dr_eff)
+    };
+
+    // Amplitude chain
+    let amp = params.param2.clamp(-4.0, 4.0);
+    let predicted_value = amp * func_val * metric;
+    let grad_r_eff = amp * (d_func_dr_eff * metric + func_val * d_metric_dr_eff);
+    let grad_th_eff = amp * (d_func_dth_eff * metric);
+    let grad_amp = func_val * metric;
+    let grad_p1 = amp * (d_func_dp1 * metric);
+
+    // Seed parameter grads mapping (r parameter acts as x-scale; set ∂/∂r_scale via ∂/∂x * ∂x/∂r_scale = ... ≈ x)
+    let grad_r = grad_r_eff * x; // consistent with compute_b12 path style
+    let grad_theta_scale = 0.0;   // theta acts as phi_x; no theta_scale path
+    let grad_phi = d_func_dphi_x * amp * metric;
+
+    // Extra y-axis grads
+    let grad_omega_y = amp * (d_base_domega_y * metric);
+    let grad_phi_y = amp * (d_base_dphi_y * metric);
+
+    (
+        EngineOutput { predicted_value, grad_r, grad_theta: grad_phi, grad_theta_scale, grad_phi, grad_p2: grad_amp, grad_p1 },
+        grad_omega_y,
+        grad_phi_y,
+    )
 }
 
 /// basis_id에 따라 기저 함수와 그 해석적 도함수를 계산
@@ -361,6 +633,30 @@ fn compute_base_function(params: &Packed256Params, r_eff: f32, theta_eff: f32) -
             let d_dp1 = a_x * r_eff * cos_x; // ∂/∂ωx
             (val, d_dr, d_dtheta, d_dphi, d_dp1)
         }
+        13 => { // Rank-1 product: sin(ωx r + φx) * cos(ωy θ + φy)
+            let omega_x = p1;
+            // Decode ωy from q_value in [0,1] → scale to [0,8]
+            let omega_y = ((params.q_value as f32) / 255.0) * 8.0;
+            let phi_x = params.theta;
+            // Decode φy from flags[5:4] ∈ {0, π/2, π, 3π/2}
+            let phi_bits = (params.flags >> 4) & 0b11;
+            let phi_y = match phi_bits { 0 => 0.0, 1 => 0.5 * PI, 2 => PI, _ => 1.5 * PI };
+
+            let inner_x = omega_x * r_eff + phi_x;
+            let inner_y = omega_y * theta_eff + phi_y;
+
+            let sin_x = inner_x.sin();
+            let cos_x = inner_x.cos();
+            let cos_y = inner_y.cos();
+            let sin_y = inner_y.sin();
+
+            let val = sin_x * cos_y;
+            let d_dr = omega_x * cos_x * cos_y;          // ∂/∂r_eff
+            let d_dtheta = -omega_y * sin_x * sin_y;      // ∂/∂θ_eff
+            let d_dphi = cos_x * cos_y;                   // ∂/∂φx
+            let d_dp1 = r_eff * cos_x * cos_y;            // ∂/∂ωx
+            (val, d_dr, d_dtheta, d_dphi, d_dp1)
+        }
         _ => (0.0, 0.0, 0.0, 0.0, 0.0), // 기본값
     }
 }
@@ -368,7 +664,7 @@ fn compute_base_function(params: &Packed256Params, r_eff: f32, theta_eff: f32) -
 /// p1, phi를 오버라이드하여 동일한 기저를 평가
 fn compute_base_function_overrides(params: &Packed256Params, r_eff: f32, theta_eff: f32, p1_override: f32, phi_override: f32) -> (f32, f32, f32, f32, f32) {
     // 임시 복사본으로 basis와 기타 파라미터는 유지하되 p1, theta(=phi)를 덮어써 평가
-    let mut shadow = *params;
+    let shadow = *params;
     // Packed256Params는 Copy 파생이 없어 직접 필드로 재구성
     let shadow_params = Packed256Params {
         r: params.r,

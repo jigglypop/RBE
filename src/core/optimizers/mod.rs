@@ -3,6 +3,7 @@ pub mod config;
 pub mod riemannian_adam;
 pub mod gradient_descent;
 pub mod momentum;
+pub mod hybrid_ng;
 
 pub use adam::BitAdamState;
 pub use adam::RBESeed;
@@ -10,6 +11,7 @@ pub use config::OptimizerConfig;
 pub use riemannian_adam::BitRiemannianAdamState;
 pub use gradient_descent::GradientDescent;
 pub use momentum::MomentumOptimizer;
+pub use hybrid_ng::{HybridNaturalOptimizer, HybridNGConfig};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OptimizerType {
