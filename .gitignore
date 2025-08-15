@@ -4,3 +4,9 @@ compressed_models
 models
 models/
 models/*
+# Ignore build and local targets
+/target
+/target_*
+*.exe
+*.pdb
+
