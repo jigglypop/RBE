@@ -168,3 +168,144 @@ fn 분산축소_손익분기_이론식일치() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// L4 종단 (하네스 6절, CP-8 본체): skt-kogpt2 실가중치.
+// 모델 파일이 있어야 하므로 #[ignore] + 명시 실행 (하네스 8절 규약):
+//   cargo test --release --lib -- --ignored 실층
+// ---------------------------------------------------------------------------
+
+/// kogpt2 층0 FFN c_fc 가중치 로드 (768 x 3072, f32). 실가중치만 허용 (nlp-verify).
+fn kogpt2_ffn_weight() -> (Vec<f64>, Vec<f32>, usize, usize) {
+    let path = std::path::Path::new("models/skt-kogpt2-base-v2/model.safetensors");
+    assert!(
+        path.exists(),
+        "L4 는 실가중치 필수: {} 가 없다 (다운로드 후 재실행)",
+        path.display()
+    );
+    let data = std::fs::read(path).expect("safetensors 읽기 실패");
+    let st = safetensors::SafeTensors::deserialize(&data).expect("safetensors 파싱 실패");
+    let t = st
+        .tensor("transformer.h.0.mlp.c_fc.weight")
+        .expect("c_fc 텐서 없음");
+    assert_eq!(t.dtype(), safetensors::Dtype::F32);
+    let shape = t.shape().to_vec();
+    assert_eq!(shape, vec![768, 3072]);
+    let w32: Vec<f32> = t
+        .data()
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    let w64 = w32.iter().map(|&x| x as f64).collect();
+    (w64, w32, shape[0], shape[1])
+}
+
+#[test]
+#[ignore = "모델 파일 필요 (하네스 8절 L4: 명시 실행)"] // lint-allow: L4 는 모델 존재 시 명시 실행이 규약
+fn 실층_c측정_하이브리드예측_candle_순전파_대조() {
+    use crate::core::math::verification::{bounds, check};
+    use crate::core::matrix::layer_codec::{fit_matching_pursuit, LayerCodec, PursuitConfig};
+    use candle_core::{Device, Tensor};
+
+    let (w, w32, m, n) = kogpt2_ffn_weight();
+    let mn = m * n;
+    let sigma = (w.iter().map(|x| x * x).sum::<f64>() / mn as f64).sqrt();
+
+    // (1) 원자 적합과 c 실측 (L4-3: 측정이 목적, 게이트 없음)
+    let cfg = PursuitConfig {
+        n_theta: 64,
+        n_lambda: 128,
+        n_atoms: 512,
+    };
+    let fit = fit_matching_pursuit(&w, m, n, &cfg);
+    let j = fit.codec.atoms.len();
+    let c = fit.c_curve.last().copied().unwrap_or(0.0);
+    for &jj in &[64usize, 128, 256] {
+        if jj <= j {
+            println!("[보고] c(J={}) = {:.6}", jj, fit.c_curve[jj - 1]);
+        }
+    }
+    println!(
+        "[보고] 실층 c 실측: J={}, c = {:.6}, 원자부 압축률 = {:.1}:1, sigma = {:.5e}",
+        j,
+        c,
+        LayerCodec::compression_ratio_vs_f32(m, n, j),
+        sigma
+    );
+
+    // (2) 하이브리드 R2a (원자 + 잔차 2비트): 17.3절 예측식과 양측 대조 (L4-4)
+    let k: Vec<f64> = w.iter().zip(&fit.residual).map(|(a, r)| a - r).collect();
+    let q = LloydMaxQuantizer::new_gaussian(2);
+    let (recon, rmse) = hybrid_roundtrip(&w, &k, &q);
+    let predicted = q.distortion_rel.sqrt() * sigma * (1.0 - c).sqrt();
+    let band = bounds::rmse_ci_rel(mn);
+    let bpw = (LayerCodec::code_bits_formula(m, n, j) as f64 + 2.0 * mn as f64 + 64.0) / mn as f64;
+    println!(
+        "[보고] 하이브리드 2bpw: 실측 RMSE = {:.6e}, 예측(17.3절) = {:.6e}, 비 = {:.4}, 밴드 = {:.4}, bpw = {:.3}",
+        rmse,
+        predicted,
+        rmse / predicted,
+        band,
+        bpw
+    );
+    check("하이브리드 실측 <= 예측 상단", rmse, predicted * (1.0 + band));
+    check("하이브리드 실측 >= 예측 하단", predicted * (1.0 - band), rmse);
+
+    // (3) candle 순전파 대조 (L4-5): 상계는 |dy| <= |dW|_F |x| 전파식에서 유도
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    let mut rng = StdRng::seed_from_u64(0x5242_4585);
+    let x: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0f64)).collect();
+    let x32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+
+    let y_ref: Vec<f64> = (0..m)
+        .map(|i| (0..n).map(|jj| w[i * n + jj] * x[jj]).sum())
+        .collect();
+
+    let dev = Device::Cpu;
+    let wt = Tensor::from_slice(&w32, (m, n), &dev).unwrap();
+    let xt = Tensor::from_slice(&x32, (n, 1), &dev).unwrap();
+    let y_candle: Vec<f32> = wt
+        .matmul(&xt)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+    for i in 0..m {
+        let sum_abs: f64 = (0..n).map(|jj| (w[i * n + jj] * x[jj]).abs()).sum();
+        check(
+            "candle f32 순전파 == f64 기준 (Higham)",
+            (y_candle[i] as f64 - y_ref[i]).abs(),
+            bounds::dot_product(n) * sum_abs + bounds::U32 * y_ref[i].abs(),
+        );
+    }
+
+    let y_rbe: Vec<f64> = (0..m)
+        .map(|i| (0..n).map(|jj| recon[i * n + jj] * x[jj]).sum())
+        .collect();
+    let dw_frob = (w
+        .iter()
+        .zip(&recon)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f64>())
+    .sqrt();
+    let x_norm = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let dy_norm = y_ref
+        .iter()
+        .zip(&y_rbe)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f64>()
+        .sqrt();
+    println!(
+        "[보고] 압축 순전파: ||dy|| = {:.5e}, 상계 ||dW||_F ||x|| = {:.5e}, 상대 출력 오차 = {:.4}",
+        dy_norm,
+        dw_frob * x_norm,
+        dy_norm / y_ref.iter().map(|v| v * v).sum::<f64>().sqrt()
+    );
+    check(
+        "압축 순전파 오차 전파 상계",
+        dy_norm,
+        dw_frob * x_norm * (1.0 + bounds::f64_chain(n as u32)),
+    );
+}

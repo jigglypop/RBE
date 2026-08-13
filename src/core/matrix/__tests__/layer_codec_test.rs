@@ -3,7 +3,9 @@
 //! L0: FLOP/바이트 카운터의 닫힌형 공식 일치 (정수 assert_eq)
 
 use crate::core::math::busemann::{busemann_polar, Mobius};
-use crate::core::math::verification::bounds;
+use crate::core::math::phase_state::PhaseState;
+use crate::core::math::verification::{bounds, check};
+use crate::core::matrix::layer_codec::{fit_matching_pursuit, spiral_coords, PursuitConfig};
 use crate::core::matrix::layer_codec::{pack_atom, unpack_atom};
 use crate::core::matrix::layer_codec::{KernelAtom, LatentCoord, LayerCodec, OpCounter};
 use rand::rngs::StdRng;
@@ -212,6 +214,144 @@ fn 원자_격자값_왕복_정확성() {
         assert_eq!(grid_atom.phi_q, unpacked.phi_q);
         assert_eq!(grid_atom.log2_amp.to_bits(), unpacked.log2_amp.to_bits());
     }
+}
+
+#[test]
+fn 적합기_다양체위_왕복_양자화바닥일치() {
+    // 하네스 6절 L4-1 (합성 게이트): 격자 위 (theta_b, lambda) + 격자 밖 (phi, A) 의
+    // 진짜 파라미터로 합성한 장을, 같은 파라미터의 양자화(위상 20b + 로그진폭 16b)로
+    // 부호화해 디코딩하면 오차는 7.3절 양자화 바닥 이내여야 한다.
+    // 인코더 탐색의 전역성 문제와 분리된, 코덱 자체의 정합성 게이트다.
+    let mut rng = StdRng::seed_from_u64(0x5242_4583);
+    let (m, n, j) = (48, 32, 12);
+    let rows = spiral_coords(m);
+    let cols = spiral_coords(n);
+
+    let params: Vec<(f64, f64, f64, f64)> = (0..j)
+        .map(|_| {
+            (
+                2.0 * PI * rng.gen_range(0u64..4096) as f64 / 4096.0,
+                rng.gen_range(1u64..=128) as f64 / 16.0,
+                rng.gen_range(0.0..2.0 * PI),      // phi: 격자 밖
+                rng.gen_range(-2.0..1.0f64).exp2(), // A: 격자 밖
+            )
+        })
+        .collect();
+
+    let atoms: Vec<KernelAtom> = params
+        .iter()
+        .map(|&(tb, lm, phi, amp)| {
+            let a = KernelAtom {
+                theta_b: tb,
+                lambda: lm,
+                phi_q: PhaseState::quantize_phase(phi),
+                log2_amp: amp.log2(),
+            };
+            unpack_atom(pack_atom(&a))
+        })
+        .collect();
+    let codec = LayerCodec {
+        rows: rows.clone(),
+        cols: cols.clone(),
+        atoms,
+    };
+
+    // 바닥 상계 (7.3절 합성): 원자별 A * [진폭 상대 반스텝 e^amp_quant - 1 + 위상 반스텝]
+    let floor: f64 = params
+        .iter()
+        .map(|&(_, _, _, amp)| {
+            amp * (bounds::amp_quant(11).exp_m1() + bounds::phase_quant(20) + bounds::f64_chain(8))
+        })
+        .sum();
+
+    for (i, &z) in rows.iter().enumerate() {
+        for (jj, &w) in cols.iter().enumerate() {
+            let truth: f64 = params
+                .iter()
+                .map(|&(tb, lm, phi, amp)| {
+                    let d = busemann_polar(z.r, z.theta, tb) - busemann_polar(w.r, w.theta, tb);
+                    amp * (lm * d + phi).cos()
+                })
+                .sum();
+            let decoded = codec.eval_direct(z, w);
+            check(
+                &format!("다양체 왕복 바닥 ({},{})", i, jj),
+                (decoded - truth).abs(),
+                floor,
+            );
+        }
+    }
+}
+
+#[test]
+fn 적합기_수렴_잔차부기_정합성() {
+    // 매칭 퍼슈트 불변식 검증 (L4-2 의 수렴 RMSE 는 비게이트 — 보고만):
+    // (1) c 곡선 단조 비감소 (에너지 증가 원자는 되돌리는 구현 규약)
+    // (2) 적합된 원자는 전부 직렬화 격자 위 (pack -> unpack -> pack 비트 동일)
+    // (3) 잔차 부기 정합: W - K(직접 평가) == 유지된 잔차 (f64 전파 상계 이내)
+    let mut rng = StdRng::seed_from_u64(0x5242_4584);
+    let (m, n, true_j) = (48, 32, 6);
+    let rows = spiral_coords(m);
+    let cols = spiral_coords(n);
+    let cfg = PursuitConfig {
+        n_theta: 32,
+        n_lambda: 64,
+        n_atoms: 16,
+    };
+
+    // 참 장: 탐색 격자 부분집합 위의 원자들 (적합 가능성 보장)
+    let true_atoms: Vec<KernelAtom> = (0..true_j)
+        .map(|_| {
+            let a = KernelAtom {
+                theta_b: 2.0 * PI * ((rng.gen_range(0usize..cfg.n_theta) * 4096 / cfg.n_theta) as f64)
+                    / 4096.0,
+                lambda: rng.gen_range(1u64..=cfg.n_lambda as u64) as f64 / 16.0,
+                phi_q: rng.r#gen::<u32>() & ((1 << 20) - 1),
+                log2_amp: rng.gen_range(-1.0..0.5f64),
+            };
+            unpack_atom(pack_atom(&a))
+        })
+        .collect();
+    let truth = LayerCodec {
+        rows: rows.clone(),
+        cols: cols.clone(),
+        atoms: true_atoms,
+    };
+    let w = truth.materialize_flat();
+
+    let fit = fit_matching_pursuit(&w, m, n, &cfg);
+
+    for pair in fit.c_curve.windows(2) {
+        assert!(pair[1] >= pair[0], "c 곡선 단조성 위반: {:?}", pair);
+    }
+    for a in &fit.codec.atoms {
+        let bits = pack_atom(a);
+        assert_eq!(bits, pack_atom(&unpack_atom(bits)), "격자 이탈 원자");
+    }
+
+    let k = fit.codec.materialize_flat();
+    for i in 0..m {
+        for jj in 0..n {
+            let idx = i * n + jj;
+            let bound = entry_bound(&fit.codec, rows[i], cols[jj])
+                + entry_bound(&truth, rows[i], cols[jj]);
+            check(
+                "잔차 부기 정합",
+                (w[idx] - k[idx] - fit.residual[idx]).abs(),
+                bound.max(bounds::U64 * fit.codec.atoms.len() as f64),
+            );
+        }
+    }
+
+    let e0: f64 = w.iter().map(|x| x * x).sum();
+    let ef: f64 = fit.residual.iter().map(|x| x * x).sum();
+    println!(
+        "[보고] 적합 수렴 (비게이트): 원자 {}개, c = {:.4}, 잔차/전체 에너지 = {:.3e}/{:.3e}",
+        fit.codec.atoms.len(),
+        1.0 - ef / e0,
+        ef,
+        e0
+    );
 }
 
 #[test]

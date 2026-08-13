@@ -14,6 +14,7 @@
 
 use crate::core::math::busemann::{busemann_polar, Mobius};
 use crate::core::math::phase_state::{PhaseState, PHASE_MASK};
+use rayon::prelude::*;
 use std::f64::consts::PI;
 
 #[derive(Clone, Copy, Debug)]
@@ -231,6 +232,17 @@ impl LayerCodec {
         (32 * m * n) as f64 / Self::code_bits_formula(m, n, j) as f64
     }
 
+    /// 매칭 퍼슈트로 적합된 층의 원자 부호가 재현하는 커널 행렬 (행 우선 평탄 벡터)
+    pub fn materialize_flat(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.rows.len() * self.cols.len());
+        for &z in &self.rows {
+            for &w in &self.cols {
+                out.push(self.eval_direct(z, w));
+            }
+        }
+        out
+    }
+
     /// 뫼비우스 게이지 변환: 좌표 z -> g(z), 경계점 b -> g(b).
     /// 부록 C.3 에 의해 상대 Busemann 차가 불변이므로 phi, A 는 무보정 (15.7절).
     pub fn gauge_transform(&self, g: &Mobius) -> LayerCodec {
@@ -254,4 +266,281 @@ impl LayerCodec {
             atoms: self.atoms.iter().map(&map_atom).collect(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 매칭 퍼슈트 원자 적합기 (논문 15.6절 (b) 단계; 하네스 CP-8)
+//
+// 좌표는 고정 결정론 배치(황금각 나선)다 — 좌표 학습(15.6절 (a) 리만 SGD)은
+// 후속 작업이며, 여기서 측정되는 c 는 좌표 학습 이전의 하한이다.
+//
+// 정직성 구조: 탐색 격자는 직렬화 격자(2pi/4096, LAMBDA_STEP)의 부분집합이고,
+// 선택된 원자의 계수 (A, phi) 는 pack/unpack 왕복으로 양자화한 뒤 그 "디코딩된
+// 값"으로 잔차를 갱신한다. 따라서 c = 1 - ||R||^2/||W||^2 는 실제 부호가
+// 재현하는 값 기준의 실측이다 (부호와 무관한 수치로 c 를 부풀릴 수 없다).
+//
+// 후보 선택은 Busemann 차 히스토그램 근사(위상 오차 <= SELECT_PHASE_ERR)로
+// 가속한다. 근사는 탐욕 선택의 순서에만 영향을 주며, 선택 후 투영 계수는
+// 정확한 최소자승으로 다시 풀기 때문에 부호·잔차·c 실측에는 개입하지 않는다.
+// ---------------------------------------------------------------------------
+
+/// 좌표 학습 이전의 초기 반지름 상한. Busemann 값은 |B| <= 2 artanh r 로
+/// 경계에서 발산하므로, 격자 lambda 와의 곱이 과도한 진동을 만들지 않는 수준.
+pub const FIT_COORD_R_MAX: f64 = 0.9;
+
+/// 후보 선택 히스토그램의 위상 허용오차 (rad). 선택 휴리스틱 전용 (위 주석).
+const SELECT_PHASE_ERR: f64 = 0.05;
+
+#[derive(Clone, Copy, Debug)]
+pub struct PursuitConfig {
+    /// theta_b 후보 수 (4096 직렬화 격자의 등간격 부분집합)
+    pub n_theta: usize,
+    /// lambda 후보 수: m * LAMBDA_STEP, m = 1..=n_lambda
+    pub n_lambda: usize,
+    /// 원자 수 J
+    pub n_atoms: usize,
+}
+
+pub struct PursuitResult {
+    pub codec: LayerCodec,
+    /// 원자 k개 시점의 에너지 포획률 c_k = 1 - ||R_k||^2 / ||W||^2
+    pub c_curve: Vec<f64>,
+    /// 최종 잔차 W - K (행 우선)
+    pub residual: Vec<f64>,
+}
+
+/// 황금각 나선 배치 (결정론). 좌표는 직렬화(f32)에 먼저 스냅해
+/// 적합에 쓰인 값과 부호가 재현하는 값이 비트 동일하도록 한다.
+pub fn spiral_coords(count: usize) -> Vec<LatentCoord> {
+    let golden = PI * (3.0 - 5.0f64.sqrt());
+    (0..count)
+        .map(|i| {
+            let r = FIT_COORD_R_MAX * ((i as f64 + 0.5) / count as f64).sqrt();
+            let theta = (golden * i as f64).rem_euclid(2.0 * PI);
+            LatentCoord {
+                r: r as f32 as f64,
+                theta: theta as f32 as f64,
+            }
+        })
+        .collect()
+}
+
+/// Gram 행렬 닫힌형: 원자 기저 c_ij=cos(l*d_ij), s_ij=sin(l*d_ij) (d=bz_i-bw_j) 에서
+/// <c,c>, <c,s>, <s,s> 는 배각 합의 랭크-1 구조로 O(M+N) 에 정확히 계산된다.
+fn gram_closed_form(bz: &[f64], bw: &[f64], lambda: f64) -> (f64, f64, f64) {
+    let sum2 = |v: &[f64]| {
+        v.iter().fold((0.0, 0.0), |(c, s), &b| {
+            let (sn, cs) = (2.0 * lambda * b).sin_cos();
+            (c + cs, s + sn)
+        })
+    };
+    let (cz, sz) = sum2(bz);
+    let (cw, sw) = sum2(bw);
+    let mn = (bz.len() * bw.len()) as f64;
+    let c2 = cz * cw + sz * sw;
+    let s2 = sz * cw - cz * sw;
+    ((mn + c2) / 2.0, s2 / 2.0, (mn - c2) / 2.0)
+}
+
+/// 2x2 정규방정식 풀이. 퇴화(det ~ 0, 예: lambda*d 범위가 극소)면 cos 성분만 쓴다.
+fn solve_normal_2x2(gcc: f64, gcs: f64, gss: f64, pc: f64, ps: f64) -> (f64, f64) {
+    let det = gcc * gss - gcs * gcs;
+    if det <= f64::EPSILON.sqrt() * gcc * gss || !det.is_finite() {
+        return if gcc > 0.0 { (pc / gcc, 0.0) } else { (0.0, 0.0) };
+    }
+    ((gss * pc - gcs * ps) / det, (gcc * ps - gcs * pc) / det)
+}
+
+/// 한 theta_b 에서의 최선 lambda 후보: 잔차 가중 Busemann 차 히스토그램으로
+/// 투영 <R,c>, <R,s> 를 근사하고, Gram(정확)과 함께 에너지 감소량을 점수화한다.
+fn best_lambda_for_theta(
+    res: &[f64],
+    bz: &[f64],
+    bw: &[f64],
+    lambdas: &[f64],
+) -> (f64, usize) {
+    let n = bw.len();
+    let (bz_min, bz_max) = min_max(bz);
+    let (bw_min, bw_max) = min_max(bw);
+    let (d_min, d_max) = (bz_min - bw_max, bz_max - bw_min);
+    let eps = 2.0 * SELECT_PHASE_ERR / lambdas.last().copied().unwrap_or(1.0);
+    let nbins = (((d_max - d_min) / eps).ceil() as usize).max(1) + 1;
+    let inv_eps = (nbins - 1) as f64 / (d_max - d_min).max(f64::MIN_POSITIVE);
+
+    let mut hist = vec![0.0f64; nbins];
+    for (i, &bzi) in bz.iter().enumerate() {
+        let row = &res[i * n..(i + 1) * n];
+        for (j, &bwj) in bw.iter().enumerate() {
+            let idx = ((bzi - bwj - d_min) * inv_eps) as usize;
+            hist[idx.min(nbins - 1)] += row[j];
+        }
+    }
+
+    let mut best = (0.0f64, 0usize);
+    for (li, &lambda) in lambdas.iter().enumerate() {
+        let (mut pc, mut ps) = (0.0, 0.0);
+        for (b, &h) in hist.iter().enumerate() {
+            let d = d_min + b as f64 / inv_eps;
+            let (sn, cs) = (lambda * d).sin_cos();
+            pc += h * cs;
+            ps += h * sn;
+        }
+        let (gcc, gcs, gss) = gram_closed_form(bz, bw, lambda);
+        let (alpha, beta) = solve_normal_2x2(gcc, gcs, gss, pc, ps);
+        let score = alpha * pc + beta * ps;
+        if score > best.0 {
+            best = (score, li);
+        }
+    }
+    best
+}
+
+fn min_max(v: &[f64]) -> (f64, f64) {
+    v.iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &x| {
+            (lo.min(x), hi.max(x))
+        })
+}
+
+/// 선택된 (theta_b, lambda) 의 정확한 투영 <R,c>, <R,s> — O(MN) 직접 계산
+fn exact_projection(res: &[f64], bz: &[f64], bw: &[f64], lambda: f64) -> (f64, f64) {
+    let n = bw.len();
+    let (cw, sw): (Vec<f64>, Vec<f64>) = bw
+        .iter()
+        .map(|&b| {
+            let (s, c) = (lambda * b).sin_cos();
+            (c, s)
+        })
+        .unzip();
+    let (mut pc, mut ps) = (0.0, 0.0);
+    for (i, &bzi) in bz.iter().enumerate() {
+        let row = &res[i * n..(i + 1) * n];
+        let (mut ac, mut asum) = (0.0, 0.0);
+        for j in 0..n {
+            ac += row[j] * cw[j];
+            asum += row[j] * sw[j];
+        }
+        let (szi, czi) = (lambda * bzi).sin_cos();
+        pc += czi * ac + szi * asum;
+        ps += szi * ac - czi * asum;
+    }
+    (pc, ps)
+}
+
+/// 양자화-디코딩된 원자를 잔차에서 빼고 새 에너지 ||R||^2 를 반환.
+/// A cos(l d + phi) = [A cos(l bz + phi)] cos(l bw) + [A sin(l bz + phi)] sin(l bw)
+fn subtract_atom(res: &mut [f64], bz: &[f64], bw: &[f64], atom: &KernelAtom) -> f64 {
+    let n = bw.len();
+    let (amp, phi, lambda) = (atom.amp(), atom.phi(), atom.lambda);
+    let (cw, sw): (Vec<f64>, Vec<f64>) = bw
+        .iter()
+        .map(|&b| {
+            let (s, c) = (lambda * b).sin_cos();
+            (c, s)
+        })
+        .unzip();
+    let mut energy = 0.0;
+    for (i, &bzi) in bz.iter().enumerate() {
+        let (s, c) = (lambda * bzi + phi).sin_cos();
+        let (ac, asn) = (amp * c, amp * s);
+        let row = &mut res[i * n..(i + 1) * n];
+        for j in 0..n {
+            row[j] -= ac * cw[j] + asn * sw[j];
+            energy += row[j] * row[j];
+        }
+    }
+    energy
+}
+
+/// 정확한 최소자승 계수를 원자 파라미터로 변환해 직렬화 격자에 스냅.
+/// alpha c + beta s = A cos(l d + phi), A = hypot, phi = -atan2(beta, alpha)
+fn snapped_atom(theta_b: f64, lambda: f64, alpha: f64, beta: f64) -> Option<KernelAtom> {
+    let amp = alpha.hypot(beta);
+    if !(amp.is_finite() && amp > 0.0) {
+        return None;
+    }
+    let atom = KernelAtom {
+        theta_b,
+        lambda,
+        phi_q: PhaseState::quantize_phase((-beta).atan2(alpha)),
+        log2_amp: amp.log2(),
+    };
+    let snapped = unpack_atom(pack_atom(&atom));
+    (snapped.amp() > 0.0).then_some(snapped)
+}
+
+/// 매칭 퍼슈트 적합 (논문 15.6절 (b)). 잔차 에너지가 감소하는 동안만 원자를
+/// 추가한다 (양자화 후 에너지가 늘면 그 원자를 되돌리고 종료 — c 단조성 보장).
+pub fn fit_matching_pursuit(w: &[f64], m: usize, n: usize, cfg: &PursuitConfig) -> PursuitResult {
+    assert_eq!(w.len(), m * n, "행렬 크기 불일치");
+    let rows = spiral_coords(m);
+    let cols = spiral_coords(n);
+    let thetas: Vec<f64> = (0..cfg.n_theta)
+        .map(|k| 2.0 * PI * (k * 4096 / cfg.n_theta) as f64 / 4096.0)
+        .collect();
+    let lambdas: Vec<f64> = (1..=cfg.n_lambda).map(|k| k as f64 * LAMBDA_STEP).collect();
+    let bz: Vec<Vec<f64>> = thetas
+        .iter()
+        .map(|&t| rows.iter().map(|c| busemann_polar(c.r, c.theta, t)).collect())
+        .collect();
+    let bw: Vec<Vec<f64>> = thetas
+        .iter()
+        .map(|&t| cols.iter().map(|c| busemann_polar(c.r, c.theta, t)).collect())
+        .collect();
+
+    let e0: f64 = w.iter().map(|x| x * x).sum();
+    let mut res = w.to_vec();
+    let mut energy = e0;
+    let mut atoms = Vec::new();
+    let mut c_curve = Vec::new();
+
+    while atoms.len() < cfg.n_atoms {
+        let (ti, li) = match select_candidate(&res, &bz, &bw, &lambdas) {
+            Some(best) => best,
+            None => break,
+        };
+        let (pc, ps) = exact_projection(&res, &bz[ti], &bw[ti], lambdas[li]);
+        let (gcc, gcs, gss) = gram_closed_form(&bz[ti], &bw[ti], lambdas[li]);
+        let (alpha, beta) = solve_normal_2x2(gcc, gcs, gss, pc, ps);
+        let atom = match snapped_atom(thetas[ti], lambdas[li], alpha, beta) {
+            Some(a) => a,
+            None => break,
+        };
+        let new_energy = subtract_atom(&mut res, &bz[ti], &bw[ti], &atom);
+        if new_energy >= energy {
+            let inverse = KernelAtom {
+                log2_amp: atom.log2_amp,
+                phi_q: PhaseState::quantize_phase(atom.phi() + PI),
+                ..atom
+            };
+            subtract_atom(&mut res, &bz[ti], &bw[ti], &inverse);
+            break;
+        }
+        energy = new_energy;
+        atoms.push(atom);
+        c_curve.push(1.0 - energy / e0);
+    }
+
+    PursuitResult {
+        codec: LayerCodec { rows, cols, atoms },
+        c_curve,
+        residual: res,
+    }
+}
+
+/// 전 theta_b 병렬 스캔으로 전역 최선 후보 선택 (점수 0 이하면 None)
+fn select_candidate(
+    res: &[f64],
+    bz: &[Vec<f64>],
+    bw: &[Vec<f64>],
+    lambdas: &[f64],
+) -> Option<(usize, usize)> {
+    let best = (0..bz.len())
+        .into_par_iter()
+        .map(|ti| {
+            let (score, li) = best_lambda_for_theta(res, &bz[ti], &bw[ti], lambdas);
+            (score, ti, li)
+        })
+        .reduce(|| (0.0, usize::MAX, 0), |a, b| if b.0 > a.0 { b } else { a });
+    (best.1 != usize::MAX && best.0 > 0.0).then_some((best.1, best.2))
 }

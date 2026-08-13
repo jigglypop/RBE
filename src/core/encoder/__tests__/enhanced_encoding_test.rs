@@ -173,6 +173,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
     fn test_simd_enhanced_decoding() {
         println!("\n=== SIMD 향상된 디코딩 성능 테스트 ===");
