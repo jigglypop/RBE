@@ -233,7 +233,7 @@ fn 실층_c측정_하이브리드예측_candle_순전파_대조() {
         sigma
     );
 
-    // (2) 하이브리드 R2a (원자 + 잔차 2비트): 17.3절 예측식과 양측 대조 (L4-4)
+    // (2) 하이브리드 R2a 왕복 (원자 + 잔차 2비트)
     let k: Vec<f64> = w.iter().zip(&fit.residual).map(|(a, r)| a - r).collect();
     let q = LloydMaxQuantizer::new_gaussian(2);
     let (recon, rmse) = hybrid_roundtrip(&w, &k, &q);
@@ -248,10 +248,9 @@ fn 실층_c측정_하이브리드예측_candle_순전파_대조() {
         band,
         bpw
     );
-    check("하이브리드 실측 <= 예측 상단", rmse, predicted * (1.0 + band));
-    check("하이브리드 실측 >= 예측 하단", predicted * (1.0 - band), rmse);
 
-    // (3) candle 순전파 대조 (L4-5): 상계는 |dy| <= |dW|_F |x| 전파식에서 유도
+    // (3) candle 순전파 대조 (L4-5): 상계는 |dy| <= |dW|_F |x| 전파식에서 유도.
+    // 밴드 게이트 (4) 보다 먼저 실행해 독립 검증 실측을 항상 확보한다.
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     let mut rng = StdRng::seed_from_u64(0x5242_4585);
@@ -308,4 +307,11 @@ fn 실층_c측정_하이브리드예측_candle_순전파_대조() {
         dy_norm,
         dw_frob * x_norm * (1.0 + bounds::f64_chain(n as u32)),
     );
+
+    // (4) 17.3절 예측식 양측 대조 (L4-4). 주의: 예측식은 잔차가 가우시안이라는
+    // 가정 위에 있다. c ~= 0 인 실층에서 잔차 == W 자체이고 W 의 초과첨도가
+    // 양수이면 실측이 예측을 넘는다 — 이는 구현 버그가 아니라 가정 위반이며,
+    // 하네스 12절에 따라 밴드를 완화하지 않고 실패로 보고한다.
+    check("하이브리드 실측 <= 예측 상단", rmse, predicted * (1.0 + band));
+    check("하이브리드 실측 >= 예측 하단", predicted * (1.0 - band), rmse);
 }
