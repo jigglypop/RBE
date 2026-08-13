@@ -68,6 +68,7 @@ fn 샤논가드_성질() {
     let n = 4096;
     let f1 = bounds::shannon_floor(1.0, 1.0, n);
     let f2 = bounds::shannon_floor(1.0, 2.0, n);
+    // lint-allow: 1.0 은 허용오차가 아니라 성질 비교의 상수 (floor < sigma = 1.0)
     assert!(f1 > 0.0 && f1 < 1.0);
     assert!(f2 < f1);
 }
