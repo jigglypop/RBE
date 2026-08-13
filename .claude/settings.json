@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo run --example:*)",
+      "Bash(rustfmt:*)",
+      "Bash(rustc --version)",
+      "Bash(cargo --version)"
+    ],
+    "ask": [
+      "Edit(./Cargo.toml)",
+      "Write(./Cargo.toml)",
+      "Bash(cargo add:*)",
+      "Bash(cargo remove:*)",
+      "Bash(cargo update:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/post_edit_rs.py"
+          }
+        ]
+      }
+    ]
+  }
+}
