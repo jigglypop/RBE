@@ -169,6 +169,44 @@ fn 분산축소_손익분기_이론식일치() {
     }
 }
 
+#[test]
+fn 양자화기_첨도보정_이론일치_양측() {
+    // 부록 D.3: 가우시안 설계 Lloyd-Max 를 초과첨도 kappa 소스에 적용한 왜곡의
+    // 1차 보정 D(kappa) = D_phi + kappa D'. 검증 소스는 분산 혼합
+    // sigma_S^2 in {1+delta, 1-delta} 등확률 — kappa = 3 delta^2 이고 6차 큐뮬런트가
+    // 정확히 0 이라 1차 보정이 정밀해야 하는 소스다. 양측 판정 (좋아도 실패).
+    let mut rng = StdRng::seed_from_u64(0x5242_4591);
+    let n = 4_000_000;
+    let q = LloydMaxQuantizer::new_gaussian(2);
+    for delta in [0.15f64, 0.25] {
+        let kappa = 3.0 * delta * delta;
+        let sample = gaussian_sample(&mut rng, n);
+        let mse: f64 = sample
+            .iter()
+            .enumerate()
+            .map(|(i, &z)| {
+                let s = if i % 2 == 0 { 1.0 + delta } else { 1.0 - delta };
+                let x = s.sqrt() * z;
+                let e = x - q.index_to_value(q.quantize(x));
+                e * e
+            })
+            .sum::<f64>()
+            / n as f64;
+        let predicted = q.distortion_rel_kurtosis(kappa);
+        let rel = (mse - predicted).abs() / predicted;
+        let band = distortion_ci_rel(n);
+        assert!(
+            rel <= band,
+            "첨도 보정식 불일치(양측): kappa={:.4} mse={:.6} 예측={:.6} rel={:.4} band={:.4}",
+            kappa,
+            mse,
+            predicted,
+            rel,
+            band
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // L4 종단 (하네스 6절, CP-8 본체): skt-kogpt2 실가중치.
 // 모델 파일이 있어야 하므로 #[ignore] + 명시 실행 (하네스 8절 규약):
@@ -233,16 +271,29 @@ fn 실층_c측정_하이브리드예측_candle_순전파_대조() {
         sigma
     );
 
-    // (2) 하이브리드 R2a 왕복 (원자 + 잔차 2비트)
+    // (2) 하이브리드 R2a 왕복 (원자 + 잔차 2비트). 예측은 부록 D.3 첨도 보정식:
+    // 잔차의 실측 초과첨도 kappa 를 D(kappa) = D_phi + kappa D' 에 대입한다.
     let k: Vec<f64> = w.iter().zip(&fit.residual).map(|(a, r)| a - r).collect();
     let q = LloydMaxQuantizer::new_gaussian(2);
     let (recon, rmse) = hybrid_roundtrip(&w, &k, &q);
-    let predicted = q.distortion_rel.sqrt() * sigma * (1.0 - c).sqrt();
+    let sigma_r = (fit.residual.iter().map(|e| e * e).sum::<f64>() / mn as f64).sqrt();
+    let kappa = fit
+        .residual
+        .iter()
+        .map(|e| {
+            let t = e / sigma_r;
+            t * t * t * t
+        })
+        .sum::<f64>()
+        / mn as f64
+        - 3.0;
+    let predicted = q.distortion_rel_kurtosis(kappa).sqrt() * sigma * (1.0 - c).sqrt();
     let band = bounds::rmse_ci_rel(mn);
     let bpw = (LayerCodec::code_bits_formula(m, n, j) as f64 + 2.0 * mn as f64 + 64.0) / mn as f64;
     println!(
-        "[보고] 하이브리드 2bpw: 실측 RMSE = {:.6e}, 예측(17.3절) = {:.6e}, 비 = {:.4}, 밴드 = {:.4}, bpw = {:.3}",
+        "[보고] 하이브리드 2bpw: 실측 RMSE = {:.6e}, 예측(D.3 보정, kappa={:.4}) = {:.6e}, 비 = {:.4}, 밴드 = {:.4}, bpw = {:.3}",
         rmse,
+        kappa,
         predicted,
         rmse / predicted,
         band,

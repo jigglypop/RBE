@@ -676,6 +676,8 @@ $$\tfrac12\log_2\tfrac{1}{1-c} = 0.080 \;\Longleftrightarrow\; c = 1 - 2^{-0.16}
 읽는 법: **INT4 동급 정확도($\approx 0.10\,\sigma$)를 달성하는 압축률**이 $c$ 의 함수다 —
 $$c = 0 \Rightarrow 7.8{:}1 \quad|\quad c = 0.5 \Rightarrow {\sim}10{:}1 \quad|\quad c = 0.75 \Rightarrow {\sim}12{:}1 \quad|\quad c = 0.9 \Rightarrow {\sim}15{:}1$$
 
+표의 상대 RMSE 는 잔차 가우시안 가정 하의 값이다. 실측 잔차의 초과첨도 $\kappa \ne 0$ 이면 부록 D.3 의 1차 보정 $D(\kappa) = D_\varphi + \kappa D'$ 를 적용한다 (실층 검증에서 이 보정이 요구됨 — D.3 실증 참조).
+
 정확도-속도-압축을 동시에 요구하는 목표의 이론 최적점은 **R2 하이브리드**(원자가 구조를 제거하고, 백색화된 잔차를 저비트 양자화)다. 구조적(스펙트럼 절단) 오차는 방향을 제거해 하류 품질에 해롭고 백색 오차는 관대하게 흡수된다는 것이 양자화 문헌의 일관된 관찰이므로, 원자로 구조를 빼고 잔차를 백색으로 만드는 순서가 정확도 보존에 유리하다.
 
 ### 17.4 속도의 정확한 식과 수치
@@ -832,6 +834,32 @@ $B = 64$, 128비트: $R = 2^{-5}$ bpw → $D \ge \sigma^2 2^{-1/16} = 0.958\sigm
 $f$ 가 $s$-Hölder ($|f(x)-f(y)| \le L\|x-y\|^s$, $0 < s \le 1$)이면 셀 $Q_{ij}$ (지름 $\sqrt 2/B$) 중점 규칙에서
 $$\Big|\int_{Q_{ij}} f - \frac{f(x_{ij})}{B^2}\Big| \le \frac{1}{B^2}\sup_{x \in Q_{ij}}|f(x) - f(x_{ij})| \le \frac{L}{B^2}\Big(\frac{\sqrt 2}{B}\Big)^{s}$$
 셀 $B^2$ 개를 합하면 총 오차 $\le L(\sqrt2/B)^s = O(B^{-s})$. 고계 매끄러움($s > 1$)은 표준 복합 구적 이론으로 동일 형태. $\square$
+
+### D.3 비가우시안 소스의 Lloyd-Max 왜곡: 첨도 1차 보정
+
+17.3절의 운용점 예측은 잔차가 가우시안이라는 가정 위에 있다. 실측 층에서 잔차(또는 $c \approx 0$ 이면 가중치 자체)의 꼬리가 가우시안보다 두꺼우면 가우시안 설계 양자화기의 실제 왜곡은 이론값을 넘는다. 본 절은 그 초과분을 측정 가능한 모멘트(초과첨도)로 닫힌형 보정한다.
+
+**설정.** 평균 0, 분산 1 인 소스 밀도 $p$, 가우시안 최적 Lloyd-Max 양자화기(레벨 $l_i$, 셀 $C_i = [t_{i-1}, t_i)$)는 고정한다. 왜곡은
+$$D[p] = \sum_i \int_{C_i} (x - l_i)^2\, p(x)\, dx$$
+로 $p$ 에 **선형**이다.
+
+**전개.** 왜도 $\gamma$(3차 큐뮬런트), 초과첨도 $\kappa$(4차 큐뮬런트)인 표준화 밀도의 Gram-Charlier A-급수는
+$$p(x) = \varphi(x)\Big[1 + \frac{\gamma}{6}\mathrm{He}_3(x) + \frac{\kappa}{24}\mathrm{He}_4(x) + \cdots\Big],\qquad \mathrm{He}_3 = x^3 - 3x,\ \ \mathrm{He}_4 = x^4 - 6x^2 + 3.$$
+$D$ 의 선형성으로
+$$D[p] = D_\varphi + \frac{\gamma}{6}\Delta_3 + \frac{\kappa}{24}\Delta_4 + \cdots,\qquad \Delta_m = \sum_i \int_{C_i} (x-l_i)^2\,\mathrm{He}_m(x)\,\varphi(x)\,dx.$$
+
+**왜도 항의 소거.** Lloyd-Max 양자화기는 원점 대칭($l_{-i} = -l_i$, $t_{-i} = -t_i$)이다. 셀 $C_i$ 와 그 거울 셀의 기여를 짝지어 $x \to -x$ 치환하면 $(x - l_i)^2 \to (x - l_i)^2$, $\mathrm{He}_3(-x) = -\mathrm{He}_3(x)$, $\varphi$ 는 우함수이므로 두 기여가 정확히 상쇄된다: $\Delta_3 = 0$. 따라서 최초 보정은 4차 항이다:
+$$\boxed{\,D(\kappa) = D_\varphi + \kappa\, D',\qquad D' = \frac{\Delta_4}{24}\,}$$
+
+**닫힌형 평가.** $(x - l)^2 \mathrm{He}_4(x) = x^6 - 2l x^5 + (l^2 - 6)x^4 + 12l x^3 + (3 - 6l^2)x^2 - 6l x + 3l^2$ 이고, 절단 모멘트 $I_m(a,b) = \int_a^b x^m \varphi(x)\,dx$ 는 부분적분 점화식
+$$I_0 = \Phi(b) - \Phi(a),\quad I_1 = \varphi(a) - \varphi(b),\quad I_m = (m-1)\,I_{m-2} + a^{m-1}\varphi(a) - b^{m-1}\varphi(b)$$
+로 셀별 닫힌형이다 (무한 경계에서는 $a^{m-1}\varphi(a) \to 0$). 2비트 가우시안 Lloyd-Max 에서 수치 평가하면 $D_\varphi = 0.117482$, $D' = 0.031689$.
+
+**유효 범위.** 1차 절단이므로 상위 항을 무시한다: 적용 조건은 $|\kappa| \ll 1$ 이며, 절단 오차는 $\mathrm{He}_6$ 항 (계수 $(\kappa_6 + 10\kappa_3^2)/720$) 과 $\mathrm{He}_8$ 항 (계수 $(\kappa_8 + 35\kappa_4^2)/8!$) 에서 나오므로 $O(\kappa_6) + O(\kappa^2)$ 이다. 검증용 합성 소스로는 분산 혼합 $X = \sigma_S Z$, $\sigma_S^2 \in \{1+\delta, 1-\delta\}$ 등확률을 쓴다 — 이 소스는 $\kappa = 3\delta^2$ 이고 6차 큐뮬런트가 정확히 0 이라($m_6 = 15(1+3\delta^2)$, $\kappa_6 = m_6 - 15 m_4 + 30 = 0$) $\mathrm{He}_6$ 항이 소거되고, 잔여 오차는 $\mathbb{E}[\mathrm{He}_8] = 105\delta^4$ 의 $O(\kappa^2)$ 항뿐이라 1차 보정의 정밀 검증에 적합하다.
+
+**17.3절 예측식의 보정.** 잔차 백색화 후 상대 RMSE 예측은
+$$\text{RMSE}_{rel} = \sqrt{D(\kappa)\,(1 - c)},\qquad \kappa = \text{잔차의 실측 초과첨도}$$
+이며 $\kappa = 0$ 에서 기존 식으로 환원된다. 실증 (kogpt2 층0 c_fc, $\kappa = 0.0838$): 예측 왜곡비 $D(\kappa)/D_\varphi = 1.0226$ vs 실측 1.0214, RMSE 비 1.0112 vs 실측 1.0107 — 잔차 0.05%는 $n = 2.36{\times}10^6$ 의 신뢰 밴드 내다.
 
 ## 부록 E. 수치 해석 (6장, 7장)
 

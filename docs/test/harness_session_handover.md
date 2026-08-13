@@ -95,16 +95,20 @@
 
 ## 7. 다음 작업 (우선순위 순)
 
-1. **CP-8 본체 (블로킹: 모델 파일)**: `models/kogpt2/` 에 skt/kogpt2-base-v2 가중치가 나타나면:
-   a. safetensors 로드 → FFN 층 1개 (768→3072) 추출.
-   b. 원자 적합기 구현 (매칭 퍼슈트: b, λ 격자 탐색 + A, φ 최소자승; 논문 15.6절) — 아직 미구현.
-   c. c 실측 → 17.3절 이론 예측 RMSE 와 실측 비교 (rmse_ci_rel 밴드, L4 게이트 4번).
-   d. candle 대조 (nlp-verify 스킬 규칙: 실가중치만).
-   e. docs/test 에 c 측정 보고서 작성 (perf-reporter 에이전트 사용 가능).
-2. **좌표 학습 (리만 SGD)**: 논문 15.6절 — 아직 미구현. ∂K/∂z 는 정리 13.2 위상 이동으로 (atom::differentiated 재사용). 기존 riemannian_adam.rs 는 결함 다수(fast_sqrt, static mut) — 수리 필요, 사용자 확인 후.
-3. **레거시 리터럴 145건 목록화 → 사용자 승인 요청** (bounds 유도로 교체 제안).
-4. **f32 프로덕션 경로**: 현재 코어는 f64. f32 강하 시 7.3절 합성 상계로 L1 재검증 필요.
-5. 논문 01~04, 12장 등 구판 문서들을 재유도판 체계로 정리 (선택, 사용자 지시 대기).
+(2026-08-13 갱신: CP-8 본체 완료 — macOS 세션에서 모델 확보·적합기 구현·c 실측·candle 대조 완료.
+결과: docs/test/cp8_kogpt2_c_report.md. 층0 c_fc 의 c(J=512) = 0.001103 (고정 나선 좌표 하한).
+L4-4 는 가우시안 가정 위반(초과첨도 +0.084)으로 실패 보고 — 밴드 무완화, 사용자 결정 대기.)
+
+(2차 갱신: 1·2·3 완료 — L4-4 는 논문 부록 D.3 첨도 보정 유도 신설로 통과(사용자 지시 "업그레이드해서 통과"). 좌표 학습(15.6절 (a))은 riemannian_adam.rs 를 쓰지 않는 직접 구현으로 완료: SVD 멱반복 초기화 + 리만 SGD + 교대 keep-best. 실측 wpe c 0.012→0.435, c_fc 0.0011→0.045 (동일비트 저랭크 상한의 약 48%). 전모델 테스트(candle, 한국어 실토큰) 추가 — 전 층 c 스캔 겸함. 결과·다음 단계: docs/test/cp8_kogpt2_c_report.md 4.5절·5절.)
+
+1. **좌표 학습 스케일업** 및 **c 사다리(17.2절) 적응 배분**으로 전모델 재실행 — top-1 일치율 회복 목표.
+2. **레거시 리터럴 145건**: docs/test/legacy_literal_inventory.md 분류별 승인 대기.
+5. **f32 프로덕션 경로**: 현재 코어는 f64. f32 강하 시 7.3절 합성 상계로 L1 재검증 필요.
+6. 논문 01~04, 12장 등 구판 문서들을 재유도판 체계로 정리 (선택, 사용자 지시 대기).
+
+환경 주의 (macOS 세션): Homebrew rustc 1.84 가 PATH 앞에 있어
+`export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"` 선행 필수.
+L4 실행: `cargo test --release --lib -- --ignored 실층 --nocapture`. 네트워크는 이 맥에서 정상 (모델 확보 완료).
 
 ## 8. 루프 운영 상태
 

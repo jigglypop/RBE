@@ -105,6 +105,7 @@ pub const FLOPS_FEAT_OUT: u64 = FLOPS_BUSEMANN + 6;
 /// 입력 특징: busemann(10) + 인자(2) + sin/cos(2)
 pub const FLOPS_FEAT_IN: u64 = FLOPS_BUSEMANN + 4;
 
+#[derive(Clone)]
 pub struct LayerCodec {
     pub rows: Vec<LatentCoord>,
     pub cols: Vec<LatentCoord>,
@@ -472,9 +473,19 @@ fn snapped_atom(theta_b: f64, lambda: f64, alpha: f64, beta: f64) -> Option<Kern
 /// 매칭 퍼슈트 적합 (논문 15.6절 (b)). 잔차 에너지가 감소하는 동안만 원자를
 /// 추가한다 (양자화 후 에너지가 늘면 그 원자를 되돌리고 종료 — c 단조성 보장).
 pub fn fit_matching_pursuit(w: &[f64], m: usize, n: usize, cfg: &PursuitConfig) -> PursuitResult {
+    fit_matching_pursuit_with_coords(w, m, n, cfg, spiral_coords(m), spiral_coords(n))
+}
+
+/// 좌표를 외부에서 주입하는 매칭 퍼슈트 (좌표 학습 루프가 사용)
+pub fn fit_matching_pursuit_with_coords(
+    w: &[f64],
+    m: usize,
+    n: usize,
+    cfg: &PursuitConfig,
+    rows: Vec<LatentCoord>,
+    cols: Vec<LatentCoord>,
+) -> PursuitResult {
     assert_eq!(w.len(), m * n, "행렬 크기 불일치");
-    let rows = spiral_coords(m);
-    let cols = spiral_coords(n);
     let thetas: Vec<f64> = (0..cfg.n_theta)
         .map(|k| 2.0 * PI * (k * 4096 / cfg.n_theta) as f64 / 4096.0)
         .collect();
@@ -526,6 +537,322 @@ pub fn fit_matching_pursuit(w: &[f64], m: usize, n: usize, cfg: &PursuitConfig) 
         c_curve,
         residual: res,
     }
+}
+
+// ---------------------------------------------------------------------------
+// 좌표 학습 (논문 15.6절 (a); 하네스 CP-8 돌파구)
+//
+// 인코딩은 교대 최적화다: (라운드) 원자 매칭 퍼슈트 -> 좌표 리만 SGD -> 재적합.
+// - 좌표 초기화: 상위 2 특이벡터(멱반복, 결정론적 초기 벡터)를 원판에 사상 —
+//   지배 구조가 Busemann 특징에 노출되도록 하는 데이터 기반 초기 배치.
+// - 좌표 그래디언트: dK/dB 는 정리 13.2 의 위상 이동(cos -> sin)이고,
+//   dB/dz 는 부록 B.2 닫힌형. 리만 갱신은 계량 역행렬 (1-|z|^2)^2/4 배 (5.4절)
+//   — 경계 감쇠가 좌표를 원판 내부에 유지하며, 안전을 위해 r <= FIT_COORD_R_MAX
+//   재투영을 추가한다.
+// - 정직성: 학습은 인코딩 시점 1회다 (규칙: 인코딩은 최초 압축 1회만).
+//   c 는 항상 "재적합 후 양자화된 부호" 기준으로 측정하며, keep-best 라서
+//   라운드 0(학습 없음)보다 나빠질 수 없다.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct LearnConfig {
+    pub pursuit: PursuitConfig,
+    /// 교대 라운드 수 (0 이면 초기 좌표의 퍼슈트만 — 기준선)
+    pub rounds: usize,
+    /// 라운드당 좌표 SGD 스텝 (행/열 교대)
+    pub sgd_steps: usize,
+    /// 반대편 차원 미니배치 크기
+    pub batch: usize,
+    /// 리만 SGD 학습률
+    pub lr: f64,
+    pub seed: u64,
+}
+
+/// 멱반복으로 상위 2 특이쌍을 구해 좌표로 사상 (결정론: 고정 초기 벡터)
+pub fn svd_init_coords(w: &[f64], m: usize, n: usize) -> (Vec<LatentCoord>, Vec<LatentCoord>) {
+    let (u1, v1, s1) = top_singular_pair(w, m, n, &[]);
+    let d1 = [(u1.clone(), v1.clone(), s1)];
+    let (u2, v2, _) = top_singular_pair(w, m, n, &d1);
+    (project_to_disk(&u1, &u2), project_to_disk(&v1, &v2))
+}
+
+/// 상위 r 특이값 에너지 비율 (멱반복 + 순차 수축, 결정론) — 프로토콜 7 저랭크 대결의
+/// "동일 비트 자유 저랭크 상한 c" 추정기. c 사다리(17.2절) 배분 판단에 사용.
+pub fn svd_energy_ceiling(w: &[f64], m: usize, n: usize, r: usize) -> f64 {
+    let total: f64 = w.iter().map(|x| x * x).sum();
+    if total == 0.0 {
+        return 0.0;
+    }
+    let mut deflated: Vec<(Vec<f64>, Vec<f64>, f64)> = Vec::new();
+    let mut captured = 0.0;
+    for _ in 0..r {
+        let (u, v, s) = top_singular_pair(w, m, n, &deflated);
+        captured += s * s;
+        deflated.push((u, v, s));
+    }
+    (captured / total).min(1.0)
+}
+
+/// 멱반복 (W^T W 30회). deflate 의 각 (u, v, sigma) 를 암시적으로 차감.
+fn top_singular_pair(
+    w: &[f64],
+    m: usize,
+    n: usize,
+    deflate: &[(Vec<f64>, Vec<f64>, f64)],
+) -> (Vec<f64>, Vec<f64>, f64) {
+    let mut v: Vec<f64> = (0..n).map(|j| (j as f64 * 0.7391 + 0.31).sin()).collect();
+    let mut u = vec![0.0; m];
+    for _ in 0..30 {
+        matvec(w, m, n, &v, &mut u, deflate, false);
+        normalize(&mut u);
+        matvec(w, m, n, &u, &mut v, deflate, true);
+        normalize(&mut v);
+    }
+    matvec(w, m, n, &v, &mut u, deflate, false);
+    let sigma = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+    normalize(&mut u);
+    (u, v, sigma)
+}
+
+fn matvec(
+    w: &[f64],
+    m: usize,
+    n: usize,
+    x: &[f64],
+    out: &mut [f64],
+    deflate: &[(Vec<f64>, Vec<f64>, f64)],
+    transpose: bool,
+) {
+    if transpose {
+        out.iter_mut().for_each(|o| *o = 0.0);
+        for i in 0..m {
+            let xi = x[i];
+            let row = &w[i * n..(i + 1) * n];
+            for j in 0..n {
+                out[j] += row[j] * xi;
+            }
+        }
+    } else {
+        for i in 0..m {
+            out[i] = w[i * n..(i + 1) * n].iter().zip(x).map(|(a, b)| a * b).sum();
+        }
+    }
+    for (u1, v1, s1) in deflate {
+        if transpose {
+            let d: f64 = u1.iter().zip(x).map(|(a, b)| a * b).sum();
+            out.iter_mut().zip(v1).for_each(|(o, &v)| *o -= s1 * d * v);
+        } else {
+            let d: f64 = v1.iter().zip(x).map(|(a, b)| a * b).sum();
+            out.iter_mut().zip(u1).for_each(|(o, &u)| *o -= s1 * d * u);
+        }
+    }
+}
+
+fn normalize(v: &mut [f64]) {
+    let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm > 0.0 {
+        v.iter_mut().for_each(|x| *x /= norm);
+    }
+}
+
+/// 특이벡터 쌍 (u1_i, u2_i) 을 원판 좌표로: 성분별 최대절대값 정규화 후
+/// 반지름 FIT_COORD_R_MAX 내 정사각형에 배치. f32 스냅 (직렬화 일치).
+fn project_to_disk(a: &[f64], b: &[f64]) -> Vec<LatentCoord> {
+    let scale = |v: &[f64]| {
+        let mx = v.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
+        if mx > 0.0 {
+            FIT_COORD_R_MAX / (mx * 2.0f64.sqrt())
+        } else {
+            0.0
+        }
+    };
+    let (sa, sb) = (scale(a), scale(b));
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| {
+            let (px, py) = (x * sa, y * sb);
+            LatentCoord {
+                r: (px * px + py * py).sqrt() as f32 as f64,
+                theta: py.atan2(px) as f32 as f64,
+            }
+        })
+        .collect()
+}
+
+/// dB/dz 닫힌형 (부록 B.2): grad B = -2z/(1-|z|^2) - 2(z-b)/|z-b|^2 (유클리드)
+fn busemann_grad_xy(x: f64, y: f64, theta_b: f64) -> (f64, f64) {
+    let r = (x * x + y * y).sqrt();
+    let omr2 = (1.0 - r) * (1.0 + r);
+    let (bx, by) = (theta_b.cos(), theta_b.sin());
+    let (dx, dy) = (x - bx, y - by);
+    let d2 = dx * dx + dy * dy;
+    (-2.0 * x / omr2 - 2.0 * dx / d2, -2.0 * y / omr2 - 2.0 * dy / d2)
+}
+
+/// 리만 갱신: z <- z - lr * ((1-|z|^2)^2/4) * egrad, 이후 r <= FIT_COORD_R_MAX 재투영
+fn riemannian_step(c: LatentCoord, gx: f64, gy: f64, lr: f64) -> LatentCoord {
+    let (x, y) = (c.r * c.theta.cos(), c.r * c.theta.sin());
+    let omr2 = (1.0 - c.r) * (1.0 + c.r);
+    let scale = lr * omr2 * omr2 / 4.0;
+    let (nx, ny) = (x - scale * gx, y - scale * gy);
+    let mut r = (nx * nx + ny * ny).sqrt();
+    let theta = ny.atan2(nx);
+    if r > FIT_COORD_R_MAX {
+        r = FIT_COORD_R_MAX;
+    }
+    LatentCoord {
+        r: r as f32 as f64,
+        theta: theta as f32 as f64,
+    }
+}
+
+/// 활성 좌표(갱신 대상) 한쪽의 SGD 1스텝. `rows_active` 가 참이면 행 좌표를
+/// 갱신하고 열에서 미니배치를 뽑는다 (거짓이면 대칭).
+/// 반환: 갱신된 활성 좌표. 원자·반대편 좌표는 불변.
+fn coord_sgd_step(
+    w: &[f64],
+    m: usize,
+    n: usize,
+    codec: &LayerCodec,
+    rows_active: bool,
+    batch_idx: &[usize],
+    lr: f64,
+) -> Vec<LatentCoord> {
+    let atoms = &codec.atoms;
+    let jn = atoms.len();
+    let (active, fixed): (&[LatentCoord], &[LatentCoord]) = if rows_active {
+        (&codec.rows, &codec.cols)
+    } else {
+        (&codec.cols, &codec.rows)
+    };
+
+    // 고정측 배치의 원자별 각도 성분 (행 활성: b = lambda*B(w); 열 활성: a = lambda*B(z)+phi)
+    let fixed_trig: Vec<Vec<(f64, f64)>> = batch_idx
+        .iter()
+        .map(|&j| {
+            atoms
+                .iter()
+                .map(|at| {
+                    let b = busemann_polar(fixed[j].r, fixed[j].theta, at.theta_b);
+                    let arg = if rows_active {
+                        at.lambda * b
+                    } else {
+                        at.lambda * b + at.phi()
+                    };
+                    let (s, c) = arg.sin_cos();
+                    (c, s)
+                })
+                .collect()
+        })
+        .collect();
+
+    active
+        .par_iter()
+        .enumerate()
+        .map(|(i, &zi)| {
+            // 활성측 원자별 각도 성분
+            let self_trig: Vec<(f64, f64)> = atoms
+                .iter()
+                .map(|at| {
+                    let b = busemann_polar(zi.r, zi.theta, at.theta_b);
+                    let arg = if rows_active {
+                        at.lambda * b + at.phi()
+                    } else {
+                        at.lambda * b
+                    };
+                    let (s, c) = arg.sin_cos();
+                    (c, s)
+                })
+                .collect();
+
+            // 배치 잔차와 원자별 잔차 가중 삼각합 C_k, S_k
+            let mut cs = vec![(0.0f64, 0.0f64); jn];
+            for (bi, &j) in batch_idx.iter().enumerate() {
+                let wij = if rows_active {
+                    w[i * n + j]
+                } else {
+                    w[j * n + i]
+                };
+                let ft = &fixed_trig[bi];
+                // K_ij = sum_k A [cos(a)cos(b) + sin(a)sin(b)]  (a: phi 포함 측)
+                let mut kij = 0.0;
+                for k in 0..jn {
+                    let (ca, sa) = self_trig[k];
+                    let (cb, sb) = ft[k];
+                    kij += atoms[k].amp() * (ca * cb + sa * sb);
+                }
+                let r_ij = wij - kij;
+                for k in 0..jn {
+                    let (cb, sb) = ft[k];
+                    cs[k].0 += r_ij * cb;
+                    cs[k].1 += r_ij * sb;
+                }
+            }
+
+            // dL/dB(활성)_k 를 모아 dB/dz 로 사상.
+            // 행 활성: dL/dBz_k = 2 A lam [sin(a) C_k - cos(a) S_k]
+            // 열 활성: dL/dBw_k = -2 A lam [cos(b) S'_k - sin(b) C'_k]  (부호 반대)
+            let (x, y) = (zi.r * zi.theta.cos(), zi.r * zi.theta.sin());
+            let (mut gx, mut gy) = (0.0, 0.0);
+            let inv_b = 1.0 / batch_idx.len() as f64;
+            for k in 0..jn {
+                let (ca, sa) = self_trig[k];
+                let (ck, sk) = cs[k];
+                let coef = 2.0 * atoms[k].amp() * atoms[k].lambda * inv_b;
+                let d = if rows_active {
+                    coef * (sa * ck - ca * sk)
+                } else {
+                    -coef * (ca * sk - sa * ck)
+                };
+                let (bx, by) = busemann_grad_xy(x, y, atoms[k].theta_b);
+                gx += d * bx;
+                gy += d * by;
+            }
+            riemannian_step(zi, gx, gy, lr)
+        })
+        .collect()
+}
+
+/// 교대 최적화 (15.6절): 퍼슈트 -> 좌표 SGD -> 재적합, keep-best.
+/// 라운드 0 은 SVD 초기 좌표의 퍼슈트 (학습 없음 기준선보다 항상 같거나 좋음).
+pub fn fit_alternating(w: &[f64], m: usize, n: usize, cfg: &LearnConfig) -> PursuitResult {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
+
+    let (rows0, cols0) = svd_init_coords(w, m, n);
+    let mut best = fit_matching_pursuit_with_coords(w, m, n, &cfg.pursuit, rows0, cols0);
+    let mut codec = best.codec.clone();
+
+    for _ in 0..cfg.rounds {
+        for step in 0..cfg.sgd_steps {
+            let rows_active = step % 2 == 0;
+            let pool = if rows_active { n } else { m };
+            let bsz = cfg.batch.min(pool);
+            let batch: Vec<usize> = (0..bsz).map(|_| rng.gen_range(0..pool)).collect();
+            let updated = coord_sgd_step(w, m, n, &codec, rows_active, &batch, cfg.lr);
+            if rows_active {
+                codec.rows = updated;
+            } else {
+                codec.cols = updated;
+            }
+        }
+        let refit = fit_matching_pursuit_with_coords(
+            w,
+            m,
+            n,
+            &cfg.pursuit,
+            codec.rows.clone(),
+            codec.cols.clone(),
+        );
+        let c_new = refit.c_curve.last().copied().unwrap_or(0.0);
+        let c_best = best.c_curve.last().copied().unwrap_or(0.0);
+        codec = refit.codec.clone();
+        if c_new > c_best {
+            best = refit;
+        }
+    }
+    best
 }
 
 /// 전 theta_b 병렬 스캔으로 전역 최선 후보 선택 (점수 0 이하면 None)

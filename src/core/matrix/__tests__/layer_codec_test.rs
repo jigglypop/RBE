@@ -5,7 +5,10 @@
 use crate::core::math::busemann::{busemann_polar, Mobius};
 use crate::core::math::phase_state::PhaseState;
 use crate::core::math::verification::{bounds, check};
-use crate::core::matrix::layer_codec::{fit_matching_pursuit, spiral_coords, PursuitConfig};
+use crate::core::matrix::layer_codec::{
+    fit_alternating, fit_matching_pursuit, fit_matching_pursuit_with_coords, spiral_coords,
+    svd_init_coords, LearnConfig, PursuitConfig,
+};
 use crate::core::matrix::layer_codec::{pack_atom, unpack_atom};
 use crate::core::matrix::layer_codec::{KernelAtom, LatentCoord, LayerCodec, OpCounter};
 use rand::rngs::StdRng;
@@ -352,6 +355,125 @@ fn 적합기_수렴_잔차부기_정합성() {
         ef,
         e0
     );
+}
+
+#[test]
+fn 좌표학습_기준선보존_개선_보고() {
+    // 15.6절 (a) 교대 최적화의 불변식 검증:
+    // (1) keep-best: fit_alternating 의 c 는 라운드 0 (SVD 초기 좌표 퍼슈트) 의 c 보다
+    //     항상 크거나 같다 (결정론이므로 정확 비교 가능)
+    // (2) 개선 실측 보고 (비게이트): 고정 나선 기준선 대비 c 상승 폭
+    // 참 장은 임의 좌표(나선 아님)의 격자 원자 합성 — 좌표 학습이 필요한 상황을 만든다.
+    let mut rng = StdRng::seed_from_u64(0x5242_4585);
+    let (m, n, true_j) = (48, 32, 6);
+    let coord = |rng: &mut StdRng| LatentCoord {
+        r: (rng.gen_range(0.0..0.85f64) as f32) as f64,
+        theta: (rng.gen_range(0.0..2.0 * PI) as f32) as f64,
+    };
+    let truth = LayerCodec {
+        rows: (0..m).map(|_| coord(&mut rng)).collect(),
+        cols: (0..n).map(|_| coord(&mut rng)).collect(),
+        atoms: (0..true_j)
+            .map(|_| {
+                let a = KernelAtom {
+                    theta_b: 2.0 * PI * ((rng.gen_range(0usize..32) * 4096 / 32) as f64) / 4096.0,
+                    lambda: rng.gen_range(1u64..=64) as f64 / 16.0,
+                    phi_q: rng.r#gen::<u32>() & ((1 << 20) - 1),
+                    log2_amp: rng.gen_range(-1.0..0.5f64),
+                };
+                unpack_atom(pack_atom(&a))
+            })
+            .collect(),
+    };
+    let w = truth.materialize_flat();
+
+    let pursuit = PursuitConfig {
+        n_theta: 32,
+        n_lambda: 64,
+        n_atoms: 12,
+    };
+    let cfg = LearnConfig {
+        pursuit,
+        rounds: 3,
+        sgd_steps: 60,
+        batch: 16,
+        lr: 0.05,
+        seed: 0x5242_4586,
+    };
+
+    let c_of = |r: &crate::core::matrix::layer_codec::PursuitResult| {
+        r.c_curve.last().copied().unwrap_or(0.0)
+    };
+    let base_spiral = fit_matching_pursuit(&w, m, n, &pursuit);
+    let (r0, c0) = svd_init_coords(&w, m, n);
+    let base_svd = fit_matching_pursuit_with_coords(&w, m, n, &pursuit, r0, c0);
+    let learned = fit_alternating(&w, m, n, &cfg);
+
+    assert!(
+        c_of(&learned) >= c_of(&base_svd),
+        "keep-best 위반: 학습 c {} < 라운드0 c {}",
+        c_of(&learned),
+        c_of(&base_svd)
+    );
+    println!(
+        "[보고] 좌표학습 (비게이트): 나선 c = {:.4}, SVD초기 c = {:.4}, 교대학습 c = {:.4}",
+        c_of(&base_spiral),
+        c_of(&base_svd),
+        c_of(&learned)
+    );
+}
+
+#[test]
+#[ignore = "모델 파일 필요 (하네스 8절 L4: 명시 실행)"] // lint-allow: L4 는 모델 존재 시 명시 실행이 규약
+fn 실층_좌표학습_c실측_wpe_cfc() {
+    // 돌파구 실측 (L4-3, 보고 목적): SVD 진단이 가리킨 두 지점 —
+    // (1) wpe (진짜 장: 동일비트 저랭크 상한 c ~ 0.90) 에서 좌표 학습의 c 도달치
+    // (2) c_fc (상한 c ~ 0.09) 에서 고정 좌표 대비 갭 축소 폭
+    let data = std::fs::read("models/skt-kogpt2-base-v2/model.safetensors").expect("모델 필요");
+    let st = safetensors::SafeTensors::deserialize(&data).expect("파싱 실패");
+    let load = |name: &str| -> (Vec<f64>, usize, usize) {
+        let t = st.tensor(name).expect("텐서 없음");
+        let sh = t.shape().to_vec();
+        let v = t
+            .data()
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64)
+            .collect();
+        (v, sh[0], sh[1])
+    };
+
+    let pursuit = PursuitConfig {
+        n_theta: 64,
+        n_lambda: 128,
+        n_atoms: 512,
+    };
+    let cfg = LearnConfig {
+        pursuit,
+        rounds: 6,
+        sgd_steps: 300,
+        batch: 96,
+        lr: 0.05,
+        seed: 0x5242_4587,
+    };
+
+    for name in ["transformer.wpe.weight", "transformer.h.0.mlp.c_fc.weight"] {
+        let (w, m, n) = load(name);
+        let t0 = std::time::Instant::now();
+        let base = fit_matching_pursuit(&w, m, n, &pursuit);
+        let learned = fit_alternating(&w, m, n, &cfg);
+        let c_b = base.c_curve.last().copied().unwrap_or(0.0);
+        let c_l = learned.c_curve.last().copied().unwrap_or(0.0);
+        println!(
+            "[보고] {} ({}x{}): 나선 c = {:.5} -> 좌표학습 c = {:.5} ({:.1}배, {:.0}s)",
+            name,
+            m,
+            n,
+            c_b,
+            c_l,
+            if c_b > 0.0 { c_l / c_b } else { f64::INFINITY },
+            t0.elapsed().as_secs_f64()
+        );
+    }
 }
 
 #[test]

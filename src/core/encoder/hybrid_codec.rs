@@ -96,6 +96,64 @@ impl LloydMaxQuantizer {
     pub fn index_to_value(&self, idx: usize) -> f64 {
         self.levels[idx]
     }
+
+    /// 첨도 민감도 D' = (1/24) sum_i int_cell (x-l_i)^2 He4(x) phi(x) dx  [부록 D.3]
+    /// 대칭 양자화기에서 왜도 항은 정확히 상쇄되므로 4차 항이 최초 보정이다.
+    pub fn kurtosis_sensitivity(&self) -> f64 {
+        let n = self.levels.len();
+        let mut d4 = 0.0;
+        for i in 0..n {
+            let a = if i == 0 {
+                f64::NEG_INFINITY
+            } else {
+                self.thresholds[i - 1]
+            };
+            let b = if i == n - 1 {
+                f64::INFINITY
+            } else {
+                self.thresholds[i]
+            };
+            let l = self.levels[i];
+            let im = truncated_moments(a, b);
+            // (x-l)^2 He4(x) = x^6 - 2l x^5 + (l^2-6)x^4 + 12l x^3 + (3-6l^2)x^2 - 6l x + 3l^2
+            let co = [
+                3.0 * l * l,
+                -6.0 * l,
+                3.0 - 6.0 * l * l,
+                12.0 * l,
+                l * l - 6.0,
+                -2.0 * l,
+                1.0,
+            ];
+            d4 += co.iter().enumerate().map(|(m, c)| c * im[m]).sum::<f64>();
+        }
+        d4 / 24.0
+    }
+
+    /// 첨도 1차 보정 상대 왜곡 (부록 D.3): D(kappa) = D_phi + kappa * D'.
+    /// kappa = 0 이면 가우시안 해석값으로 환원. 유효 범위 |kappa| << 1.
+    pub fn distortion_rel_kurtosis(&self, kappa: f64) -> f64 {
+        self.distortion_rel + kappa * self.kurtosis_sensitivity()
+    }
+}
+
+/// 표준정규 절단 모멘트 I_m = int_a^b x^m phi dx, m = 0..=6 의 부분적분 점화식 [부록 D.3]
+/// I_0 = Phi(b)-Phi(a), I_1 = phi(a)-phi(b), I_m = (m-1) I_{m-2} + a^{m-1}phi(a) - b^{m-1}phi(b)
+fn truncated_moments(a: f64, b: f64) -> [f64; 7] {
+    let tail = |x: f64, m: u32| {
+        if x.is_finite() {
+            x.powi(m as i32) * norm_pdf(x)
+        } else {
+            0.0
+        }
+    };
+    let mut im = [0.0; 7];
+    im[0] = norm_cdf(b) - norm_cdf(a);
+    im[1] = tail(a, 0) - tail(b, 0);
+    for m in 2..7 {
+        im[m] = (m - 1) as f64 * im[m - 2] + tail(a, m as u32 - 1) - tail(b, m as u32 - 1);
+    }
+    im
 }
 
 /// 잔차 부호화: 표본 표준편차로 정규화 후 Lloyd-Max 인덱스
