@@ -1,3 +1,4 @@
+pub mod atom;
 pub mod basic_math;
 pub mod basis_functions;
 pub mod bessel;

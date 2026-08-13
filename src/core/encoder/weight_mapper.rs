@@ -1,11 +1,11 @@
 //! 가중치 레이아웃 매핑 시스템
-//! 
+//!
 //! 압축 시 동적으로 가중치 이름과 블록 위치를 매핑하고
 //! 로딩 시 메타데이터를 기반으로 정확한 가중치 복원을 담당
 
 use crate::core::encoder::RBEEncoder;
-use crate::packed_params::{TransformType, HybridEncodedBlock};
-use serde::{Serialize, Deserialize};
+use crate::packed_params::{HybridEncodedBlock, TransformType};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 /// 개별 가중치 정보
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,7 +67,7 @@ impl WeightMapper {
         transform_type: TransformType,
     ) -> Self {
         let encoder = RBEEncoder::new(coefficients, transform_type);
-        
+
         let layout = ModelLayout {
             model_type: model_type.to_string(),
             total_params: 0,
@@ -81,14 +81,14 @@ impl WeightMapper {
                 quality_grade: "B".to_string(), // 기본값
             },
         };
-        
+
         Self {
             encoder,
             layout,
             current_offset: 0,
         }
     }
-    
+
     /// 단일 가중치 압축 및 메타데이터 생성
     pub fn compress_weight(
         &mut self,
@@ -97,7 +97,7 @@ impl WeightMapper {
         shape: &[usize],
     ) -> Result<Vec<HybridEncodedBlock>, String> {
         let original_size = data.len() * std::mem::size_of::<f32>();
-        
+
         // 행렬로 변환 (flatten된 경우 처리)
         let (rows, cols) = match shape.len() {
             1 => (shape[0], 1),
@@ -109,7 +109,7 @@ impl WeightMapper {
                 (rows, cols)
             }
         };
-        
+
         // RBE 압축 수행
         let (blocks, _, compression_ratio, rmse) = RBEEncoder::compress_with_profile(
             data,
@@ -119,10 +119,10 @@ impl WeightMapper {
             self.encoder.k_coeffs,
             self.encoder.transform_type,
         )?;
-        
+
         // 압축된 블록의 바이트 크기 계산
         let compressed_size = blocks.len() * std::mem::size_of::<HybridEncodedBlock>();
-        
+
         // 메타데이터 생성
         let weight_info = WeightInfo {
             name: name.to_string(),
@@ -133,16 +133,16 @@ impl WeightMapper {
             compression_ratio,
             rmse: Some(rmse),
         };
-        
+
         // 레이아웃 업데이트
         self.layout.weights.push(weight_info);
         self.layout.total_params += data.len();
         self.layout.total_blocks += blocks.len();
         self.current_offset += compressed_size as u64;
-        
+
         Ok(blocks)
     }
-    
+
     /// 압축 통계 출력
     pub fn print_compression_stats(&self) {
         println!("\n📊 압축 통계:");
@@ -150,39 +150,47 @@ impl WeightMapper {
         println!("  총 파라미터: {}", self.layout.total_params);
         println!("  총 압축 블록: {}", self.layout.total_blocks);
         println!("  가중치 개수: {}", self.layout.weights.len());
-        
-        let avg_ratio = self.layout.weights.iter()
+
+        let avg_ratio = self
+            .layout
+            .weights
+            .iter()
             .filter_map(|w| Some(w.compression_ratio))
-            .sum::<f32>() / self.layout.weights.len() as f32;
-        
-        let avg_rmse = self.layout.weights.iter()
+            .sum::<f32>()
+            / self.layout.weights.len() as f32;
+
+        let avg_rmse = self
+            .layout
+            .weights
+            .iter()
             .filter_map(|w| w.rmse)
-            .sum::<f32>() / self.layout.weights.len() as f32;
-        
+            .sum::<f32>()
+            / self.layout.weights.len() as f32;
+
         println!("  평균 압축률: {:.1}x", avg_ratio);
         println!("  평균 RMSE: {:.6}", avg_rmse);
     }
-    
+
     /// 레이아웃을 JSON으로 직렬화
     pub fn serialize_layout(&self) -> Result<String, String> {
         serde_json::to_string_pretty(&self.layout)
             .map_err(|e| format!("레이아웃 직렬화 실패: {}", e))
     }
-    
+
     /// 모든 압축된 블록을 바이너리로 직렬화
     pub fn serialize_all_blocks(
         &self,
         all_blocks: &[Vec<HybridEncodedBlock>],
     ) -> Result<Vec<u8>, String> {
         let mut buffer = Vec::new();
-        
+
         for blocks in all_blocks {
             // 각 가중치의 블록들을 직렬화
-            let serialized = bincode::serialize(blocks)
-                .map_err(|e| format!("블록 직렬화 실패: {}", e))?;
+            let serialized =
+                bincode::serialize(blocks).map_err(|e| format!("블록 직렬화 실패: {}", e))?;
             buffer.extend_from_slice(&serialized);
         }
-        
+
         Ok(buffer)
     }
-} 
+}

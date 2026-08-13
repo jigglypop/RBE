@@ -6,4 +6,4 @@ impl AnalysisResults {
     pub fn new() -> Self {
         Self
     }
-} 
+}

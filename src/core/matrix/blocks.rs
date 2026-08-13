@@ -44,4 +44,4 @@ pub struct L4Block {
     pub rows: usize,
     pub cols: usize,
     pub detail_params: Packed128,
-} 
+}

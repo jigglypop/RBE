@@ -6,4 +6,4 @@ impl GridCompressor {
     pub fn new() -> Self {
         Self
     }
-} 
+}
