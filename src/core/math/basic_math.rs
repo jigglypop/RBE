@@ -1,4 +1,4 @@
-use crate::packed_params::{Packed64, Packed128, DecodedParams};
+use crate::packed_params::{DecodedParams, Packed128, Packed64};
 
 /// RMSE (Root Mean Square Error)를 계산합니다. (이름 변경)
 pub fn compute_full_rmse(matrix: &[f32], seed: &Packed64, rows: usize, cols: usize) -> f32 {
@@ -15,19 +15,31 @@ pub fn compute_full_rmse(matrix: &[f32], seed: &Packed64, rows: usize, cols: usi
 
 /// 해석적 그래디언트 계산 (r, theta) -> 수치적 미분으로 변경
 /// `p` 파라미터의 r, theta 값 주변에서 f(x) = compute_weight의 변화율을 계산합니다.
-pub fn analytic_grad(p: &DecodedParams, i: usize, j: usize, rows: usize, cols: usize) -> (f32, f32) {
+pub fn analytic_grad(
+    p: &DecodedParams,
+    i: usize,
+    j: usize,
+    rows: usize,
+    cols: usize,
+) -> (f32, f32) {
     let eps = 1e-4;
 
     // r에 대한 그래디언트 계산
     let mut p_r_plus = p.clone();
     p_r_plus.r_fp32 += eps;
     let seed_r_plus = Packed128::from_continuous(&p_r_plus);
-    let weight_r_plus = Packed64 { rotations: seed_r_plus.hi }.compute_weight(i, j, rows, cols);
+    let weight_r_plus = Packed64 {
+        rotations: seed_r_plus.hi,
+    }
+    .compute_weight(i, j, rows, cols);
 
     let mut p_r_minus = p.clone();
     p_r_minus.r_fp32 -= eps;
     let seed_r_minus = Packed128::from_continuous(&p_r_minus);
-    let weight_r_minus = Packed64 { rotations: seed_r_minus.hi }.compute_weight(i, j, rows, cols);
+    let weight_r_minus = Packed64 {
+        rotations: seed_r_minus.hi,
+    }
+    .compute_weight(i, j, rows, cols);
 
     let dr = (weight_r_plus - weight_r_minus) / (2.0 * eps);
 
@@ -35,12 +47,18 @@ pub fn analytic_grad(p: &DecodedParams, i: usize, j: usize, rows: usize, cols: u
     let mut p_th_plus = p.clone();
     p_th_plus.theta_fp32 += eps;
     let seed_th_plus = Packed128::from_continuous(&p_th_plus);
-    let weight_th_plus = Packed64 { rotations: seed_th_plus.hi }.compute_weight(i, j, rows, cols);
+    let weight_th_plus = Packed64 {
+        rotations: seed_th_plus.hi,
+    }
+    .compute_weight(i, j, rows, cols);
 
     let mut p_th_minus = p.clone();
     p_th_minus.theta_fp32 -= eps;
     let seed_th_minus = Packed128::from_continuous(&p_th_minus);
-    let weight_th_minus = Packed64 { rotations: seed_th_minus.hi }.compute_weight(i, j, rows, cols);
+    let weight_th_minus = Packed64 {
+        rotations: seed_th_minus.hi,
+    }
+    .compute_weight(i, j, rows, cols);
 
     let dth = (weight_th_plus - weight_th_minus) / (2.0 * eps);
 
@@ -49,13 +67,15 @@ pub fn analytic_grad(p: &DecodedParams, i: usize, j: usize, rows: usize, cols: u
 
 /// Adam 옵티마이저 업데이트
 #[inline]
-pub fn adam_update(p:&mut f32, m:&mut f32, v:&mut f32, g:f32, lr:f32, t:i32){
-    const B1:f32=0.9; const B2:f32=0.999; const EPS:f32=1e-8;
-    *m = B1*(*m)+(1.0-B1)*g;
-    *v = B2*(*v)+(1.0-B2)*g*g;
-    let m_hat=*m/(1.0-B1.powi(t));
-    let v_hat=*v/(1.0-B2.powi(t));
-    *p -= lr*m_hat/(v_hat.sqrt()+EPS);
+pub fn adam_update(p: &mut f32, m: &mut f32, v: &mut f32, g: f32, lr: f32, t: i32) {
+    const B1: f32 = 0.9;
+    const B2: f32 = 0.999;
+    const EPS: f32 = 1e-8;
+    *m = B1 * (*m) + (1.0 - B1) * g;
+    *v = B2 * (*v) + (1.0 - B2) * g * g;
+    let m_hat = *m / (1.0 - B1.powi(t));
+    let v_hat = *v / (1.0 - B2.powi(t));
+    *p -= lr * m_hat / (v_hat.sqrt() + EPS);
 }
 
 /// Float to Q-format (STE placeholder)
@@ -65,7 +85,8 @@ pub fn ste_quant_q0x(val: f32, bits: u8) -> u64 {
 
 /// Float to Phase (STE placeholder)
 pub fn ste_quant_phase(val: f32, bits: u8) -> u64 {
-    (val.rem_euclid(2.0 * std::f32::consts::PI) / (2.0 * std::f32::consts::PI) * ((1u64 << bits) - 1) as f32) as u64
+    (val.rem_euclid(2.0 * std::f32::consts::PI) / (2.0 * std::f32::consts::PI)
+        * ((1u64 << bits) - 1) as f32) as u64
 }
 
 /// 유전 알고리즘의 변이(mutation) 연산을 수행합니다.
@@ -81,7 +102,7 @@ pub fn ste_quant_phase(val: f32, bits: u8) -> u64 {
 pub fn mutate_seed(seed: Packed64, mutation_rate: f32) -> Packed64 {
     use crate::packed_params::Packed64;
     use rand::Rng;
-    
+
     let mut rng = rand::thread_rng();
     let mut new_rotations = seed.rotations;
     for i in 0..64 {
@@ -90,4 +111,4 @@ pub fn mutate_seed(seed: Packed64, mutation_rate: f32) -> Packed64 {
         }
     }
     Packed64::new(new_rotations)
-} 
+}
