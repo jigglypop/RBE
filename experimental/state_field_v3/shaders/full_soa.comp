@@ -1,0 +1,29 @@
+#version 310 es
+precision highp int;
+precision highp float;
+layout(local_size_x=64) in;
+layout(std430,binding=0) readonly buffer X {float x[];};
+layout(std430,binding=1) readonly buffer W {float w[];};
+layout(std430,binding=2) readonly buffer G {float g[];};
+layout(std430,binding=3) writeonly buffer Y {float y[];};
+uniform uvec4 p;
+float signed_val(float z,uint a,uint b) {
+    uint q=a>>1u;q^=q>>1u;q^=q>>2u;
+    uint mask=q^(a&4u);
+    uint flip=(uint(bitCount(mask&b))&1u)<<31u;
+    return uintBitsToFloat(floatBitsToUint(z)^flip);
+}
+void main() {
+    uint id=gl_GlobalInvocationID.x;if(id>=8u*p.x) return;
+    uint r=id/p.x,sidx=id%p.x;float v=0.0;
+    for(uint a=0u;a<8u;++a) {
+#if MODE == 0
+        uint b=r^a;v+=signed_val(x[a*p.x+sidx]*w[b*p.x+sidx],a,b);
+#elif MODE == 1
+        v+=signed_val(g[(r^a)*p.x+sidx]*w[a*p.x+sidx],r,a);
+#else
+        v+=signed_val(x[a*p.x+sidx]*g[(r^a)*p.x+sidx],a,r);
+#endif
+    }
+    y[id]=v;
+}

@@ -1,0 +1,112 @@
+{
+  "date": "2026-09-09",
+  "passed": true,
+  "linear_map_dimensions": {
+    "left_only": 8,
+    "left_and_right_span": 32,
+    "cross_sector_coupled_span": 64,
+    "complete_signed_xor_basis": 64,
+    "activation_width": 8
+  },
+  "integer_reconstruction_entries": 2560,
+  "complete_teacher_max_error": 4.440892098500626e-16,
+  "left_only_teacher_relative_error": 0.9645551750862003,
+  "complete_vjp_max_error": 3.135447457225382e-10,
+  "lossless_cpu_words": 348544,
+  "shader_decoded_words": 17728,
+  "same_order_strict_output_words": 4928,
+  "native_shader_max_error": 9.933737366019102e-08,
+  "compressed_matrix_examples": [
+    {
+      "n": 64,
+      "source": "clifford_exact",
+      "mode": 2,
+      "raw_bytes": 16384,
+      "stored_bytes": 280,
+      "ratio": 58.51428571428571
+    },
+    {
+      "n": 64,
+      "source": "general_frame_exact",
+      "mode": 1,
+      "raw_bytes": 16384,
+      "stored_bytes": 536,
+      "ratio": 30.567164179104477
+    },
+    {
+      "n": 64,
+      "source": "mixed_quarter_raw",
+      "mode": 1,
+      "raw_bytes": 16384,
+      "stored_bytes": 4632,
+      "ratio": 3.53713298791019
+    },
+    {
+      "n": 64,
+      "source": "random_float",
+      "mode": 0,
+      "raw_bytes": 16384,
+      "stored_bytes": 16408,
+      "ratio": 0.9985372988785958
+    }
+  ],
+  "synthetic_checkpoint": {
+    "raw_tensor_bytes": 49920,
+    "stored_file_bytes": 18676,
+    "ratio": 2.6729492396658814,
+    "bitwise_roundtrip": true,
+    "scope": "synthetic six-tensor checkpoint; not pretrained LLM or model accuracy"
+  },
+  "software_benchmark_ms": [
+    {
+      "path": "dense_native",
+      "transpose": false,
+      "median_ms": 4.762729
+    },
+    {
+      "path": "dense_native",
+      "transpose": true,
+      "median_ms": 4.889486
+    },
+    {
+      "path": "packed_native",
+      "transpose": false,
+      "median_ms": 4.479322
+    },
+    {
+      "path": "packed_native",
+      "transpose": true,
+      "median_ms": 4.648041
+    },
+    {
+      "path": "dense_uint",
+      "transpose": false,
+      "median_ms": 23.557421
+    },
+    {
+      "path": "dense_uint",
+      "transpose": true,
+      "median_ms": 23.245721
+    },
+    {
+      "path": "packed_uint",
+      "transpose": false,
+      "median_ms": 25.267297
+    },
+    {
+      "path": "packed_uint",
+      "transpose": true,
+      "median_ms": 23.87614
+    }
+  ],
+  "device": {
+    "vendor": "Google Inc. (Google)",
+    "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver-5.0.0)",
+    "version": "OpenGL ES 3.1 (ANGLE 2.1 git hash: unknown hash)",
+    "glsl": "OpenGL ES GLSL ES 3.10 (ANGLE 2.1 git hash: unknown hash)",
+    "software_renderer": true,
+    "physical_gpu_measured": false
+  },
+  "publication_omission": "EGL/ctypes host adapter is not included; local adapter used for the recorded shader runs.",
+  "no_pretrained_llm_claim": true
+}

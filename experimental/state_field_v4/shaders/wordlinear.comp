@@ -1,0 +1,52 @@
+#version 310 es
+precision highp int;
+#if STRICT_BITS == 0
+precision highp float;
+#define NUM float
+#define ADD(a,b) ((a)+(b))
+#define MUL(a,b) ((a)*(b))
+#define LOAD(u) uintBitsToFloat(u)
+#define ZERO 0.0
+#else
+#define NUM uint
+// INSERT_FP32_BITS
+#define ADD(a,b) add32(a,b)
+#define MUL(a,b) mul32(a,b)
+#define LOAD(u) (u)
+#define ZERO 0u
+#endif
+layout(local_size_x=64) in;
+layout(std430,binding=0) readonly buffer Input {NUM x[];};
+layout(std430,binding=1) readonly buffer Encoded {uint w[];};
+layout(std430,binding=3) writeonly buffer Output {NUM y[];};
+uniform uvec4 p; // n, batch, kind, signature
+uint getword(uint i,uint j) {
+    if(p.z==0u) return w[i*p.x+j];
+    uint a=i^j,mask,v;
+    if(p.z==2u) {
+        uint t=a>>1u;t^=t>>1u;t^=t>>2u;t^=t>>4u;t^=t>>8u;
+        mask=t^(a&p.w);v=w[a];
+    } else {
+        uint tag=w[2u*a];
+        if((tag&0x80000000u)!=0u) return w[(tag&0x7fffffffu)+j];
+        mask=tag;v=w[2u*a+1u];
+    }
+    return v^((uint(bitCount(mask&j))&1u)<<31u);
+}
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    if(id>=p.x*p.y) return;
+    uint i=id/p.y,s=id%p.y;
+    NUM acc=ZERO;
+    // Fixed ascending input-index order: strict path matches the same-order
+    // binary32 scalar reference, NOT arbitrary GEMM/FMA/reassociated graphs.
+    for(uint j=0u;j<p.x;++j) {
+#if TRANSPOSE == 0
+        uint u=getword(i,j);
+#else
+        uint u=getword(j,i);
+#endif
+        acc=ADD(acc,MUL(LOAD(u),x[j*p.y+s]));
+    }
+    y[id]=acc;
+}

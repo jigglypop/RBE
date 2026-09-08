@@ -1,0 +1,35 @@
+#version 310 es
+// Numeric payloads remain uint, including gradient transport. NO float ops.
+precision highp int;
+layout(local_size_x=64) in;
+layout(std430,binding=0) readonly buffer InWords { uint x[]; };
+layout(std430,binding=1) readonly buffer Codes { uint codes[]; };
+layout(std430,binding=3) writeonly buffer OutWords { uint y[]; };
+uniform uvec4 p; // n, batch or chains, width or chain length, packed label
+uint parity(uint v) { return uint(bitCount(v)) & 1u; }
+uint compose(uint u,uint v) {
+    uint a=u&32767u, b=(u>>15u)&32767u;
+    uint c=v&32767u, d=(v>>15u)&32767u;
+    uint s=((u^v)>>30u)^parity(b&c);
+    return (a^c)|((b^d)<<15u)|((s&1u)<<30u);
+}
+uint trans(uint u) {
+    return u ^ (parity((u&32767u)&((u>>15u)&32767u))<<30u);
+}
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+#if MODE == 0
+    if(id>=p.x*p.y*p.z) return;
+    uint lane=id%p.z, slot=(id/p.z)&(p.x-1u);
+    uint base=(id/p.z)-slot, a=p.w&32767u,b=(p.w>>15u)&32767u;
+    uint source=slot^a, value=x[(base+source)*p.z+lane];
+    if(lane==p.z-1u) value ^= (((p.w>>30u)^parity(b&source))&1u)<<31u;
+    y[id]=value;
+#else
+    // Compile a sequence to ONE word and its transpose; no state evaluation.
+    if(id>=p.y) return;
+    uint u=0u;
+    for(uint j=0u;j<p.z;++j) u=compose(codes[id*p.z+j],u);
+    y[2u*id]=u;y[2u*id+1u]=trans(u);
+#endif
+}

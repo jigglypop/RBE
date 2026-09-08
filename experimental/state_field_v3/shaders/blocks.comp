@@ -1,0 +1,41 @@
+#version 310 es
+precision highp int;
+#if STRICT_BITS == 0
+precision highp float;
+#define NUM float
+#define PLUS(a,b) ((a)+(b))
+#define TIMES(a,b) ((a)*(b))
+#else
+#define NUM uint
+// INSERT_FP32_BITS
+#define PLUS(a,b) add32(a,b)
+#define TIMES(a,b) mul32(a,b)
+#endif
+layout(local_size_x=64) in;
+layout(std430,binding=0) readonly buffer Left { NUM a[]; };
+layout(std430,binding=1) readonly buffer Right { NUM b[]; };
+layout(std430,binding=2) readonly buffer Upstream { NUM g[]; };
+layout(std430,binding=3) writeonly buffer Result { NUM y[]; };
+uniform uvec4 p; // batch, reserved, reserved, reserved
+// SoA: [sector][row][col][batch]. Adjacent invocations = adjacent examples.
+// Each invocation computes ONE scalar. Stays in these blocks across layers.
+uint addr(uint block,uint r,uint c,uint sidx) {return (4u*block+2u*r+c)*p.x+sidx;}
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    if(id>=8u*p.x) return;
+    uint sidx=id%p.x,element=id/p.x;
+    uint sector=element>>2u,r=(element>>1u)&1u,c=element&1u;
+#if MODE == 0
+    NUM u=TIMES(a[addr(sector,r,0u,sidx)],b[addr(sector,0u,c,sidx)]);
+    NUM v=TIMES(a[addr(sector,r,1u,sidx)],b[addr(sector,1u,c,sidx)]);
+#elif MODE == 1
+    // dA = G B^T
+    NUM u=TIMES(g[addr(sector,r,0u,sidx)],b[addr(sector,c,0u,sidx)]);
+    NUM v=TIMES(g[addr(sector,r,1u,sidx)],b[addr(sector,c,1u,sidx)]);
+#else
+    // dB = A^T G
+    NUM u=TIMES(a[addr(sector,0u,r,sidx)],g[addr(sector,0u,c,sidx)]);
+    NUM v=TIMES(a[addr(sector,1u,r,sidx)],g[addr(sector,1u,c,sidx)]);
+#endif
+    y[id]=PLUS(u,v);
+}

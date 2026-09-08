@@ -1,0 +1,12 @@
+{
+  "origin": "this-session local run of the supplied v3 archive, before publication",
+  "route_words": 689430,
+  "inverse_route_words": 689430,
+  "strict_rounding_checks": 1190378,
+  "max_abs_gradient_error": 4.7236980493803316e-08,
+  "compiled_programs": 20,
+  "passed": true,
+  "software_renderer": true,
+  "physical_gpu_measured": false,
+  "renderer": "ANGLE / SwiftShader Vulkan"
+}

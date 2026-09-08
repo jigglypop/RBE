@@ -1,0 +1,53 @@
+#version 310 es
+precision highp int;
+#if STRICT_BITS == 0
+precision highp float;
+#define NUM float
+#define PLUS(a,b) ((a)+(b))
+NUM neg(NUM a) {return uintBitsToFloat(floatBitsToUint(a)^0x80000000u);}
+NUM quarter(NUM a) {return a*0.25;}
+#else
+#define NUM uint
+// INSERT_FP32_BITS
+#define PLUS(a,b) add32(a,b)
+NUM neg(NUM a) {return a^0x80000000u;}
+NUM quarter(NUM a) {return mul32(a,0x3e800000u);}
+#endif
+layout(local_size_x=64) in;
+layout(std430,binding=0) readonly buffer X {NUM x[];};
+layout(std430,binding=3) writeonly buffer Y {NUM y[];};
+uniform uvec4 p; // batch
+void main() {
+    uint id=gl_GlobalInvocationID.x;if(id>=8u*p.x) return;
+    uint plane=id/p.x,sidx=id%p.x;
+    uvec4 key;uint signs;
+#if MODE == 0 || MODE == 3
+    // H. A sparse, constant four-addend change of basis, not a function LUT.
+    if(plane==0u) {key=uvec4(0,1,6,7);signs=12u;}
+    else if(plane==1u) {key=uvec4(2,3,4,5);signs=0u;}
+    else if(plane==2u) {key=uvec4(2,3,4,5);signs=6u;}
+    else if(plane==3u) {key=uvec4(0,1,6,7);signs=10u;}
+    else if(plane==4u) {key=uvec4(0,1,6,7);signs=0u;}
+    else if(plane==5u) {key=uvec4(2,3,4,5);signs=12u;}
+    else if(plane==6u) {key=uvec4(2,3,4,5);signs=10u;}
+    else {key=uvec4(0,1,6,7);signs=6u;}
+#else
+    // H^T. H^T H=4I; division by four ONLY for the inverse, not H's adjoint.
+    if(plane==0u) {key=uvec4(0,3,4,7);signs=0u;}
+    else if(plane==1u) {key=uvec4(0,3,4,7);signs=10u;}
+    else if(plane==2u) {key=uvec4(1,2,5,6);signs=0u;}
+    else if(plane==3u) {key=uvec4(1,2,5,6);signs=10u;}
+    else if(plane==4u) {key=uvec4(1,2,5,6);signs=6u;}
+    else if(plane==5u) {key=uvec4(1,2,5,6);signs=12u;}
+    else if(plane==6u) {key=uvec4(0,3,4,7);signs=9u;}
+    else {key=uvec4(0,3,4,7);signs=3u;}
+#endif
+    NUM a=x[key.x*p.x+sidx],b=x[key.y*p.x+sidx],c=x[key.z*p.x+sidx],d=x[key.w*p.x+sidx];
+    if((signs&1u)!=0u) a=neg(a);if((signs&2u)!=0u) b=neg(b);
+    if((signs&4u)!=0u) c=neg(c);if((signs&8u)!=0u) d=neg(d);
+    NUM value=PLUS(PLUS(a,b),PLUS(c,d));
+#if MODE == 1 || MODE == 3
+    value=quarter(value);
+#endif
+    y[id]=value;
+}
