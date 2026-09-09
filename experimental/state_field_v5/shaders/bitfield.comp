@@ -1,0 +1,291 @@
+#version 310 es
+// DENSE_REFERENCE is a same-int64-arithmetic benchmark, not the main path.
+#ifndef DENSE_REFERENCE
+#define DENSE_REFERENCE 0
+#endif
+#ifndef INTEGER_MAC
+#define INTEGER_MAC 0
+#endif
+#ifndef MAX_BITS
+#define MAX_BITS 16
+#endif
+precision highp int;
+layout(local_size_x=64) in;
+layout(std430,binding=0) coherent buffer Bitfield { uint mem[]; };
+uniform uvec4 p; // job descriptor base (words), job count, reserved, reserved
+#if INTEGER_MAC == 0 && DENSE_REFERENCE == 0
+shared uint wr[MAX_BITS*32], wc[MAX_BITS*32];
+shared uint xr[MAX_BITS*32], xc[MAX_BITS*32];
+shared uint gr[MAX_BITS*32], gc[MAX_BITS*32];
+#else
+shared int qw[1024], qx[1024], qgrad[1024];
+#endif
+shared uint errors;
+uint m,n,batch,bw,bx,bg,wo,xo,go,yo,dxo,dwo,to,nwo,mo,so,sw,sx,sg,lr,flags,eo;
+
+uvec2 add64(uvec2 a,uvec2 b) {uint lo=a.x+b.x;return uvec2(lo,a.y+b.y+uint(lo<a.x));}
+uvec2 neg64(uvec2 a) {return add64(~a,uvec2(1u,0u));}
+uvec2 sub64(uvec2 a,uvec2 b) {return add64(a,neg64(b));}
+uvec2 fromInt(int a) {return uvec2(uint(a),a<0?0xffffffffu:0u);}
+uvec2 read64(uint at) {return uvec2(mem[at],mem[at+1u]);}
+void write64(uint at,uvec2 a) {mem[at]=a.x;mem[at+1u]=a.y;}
+uvec2 shiftedCount(int value,uint shift) {
+    uint mag=uint(abs(value));
+    uvec2 r=uvec2(mag<<shift,shift==0u?0u:mag>>(32u-shift));
+    return value<0?neg64(r):r;
+}
+uvec2 shiftLeft64(uvec2 a,uint shift){
+    if(shift==0u)return a;
+    if(shift<32u)return uvec2(a.x<<shift,(a.y<<shift)|(a.x>>(32u-shift)));
+    if(shift<64u)return uvec2(0u,a.x<<(shift-32u));
+    return uvec2(0u);
+}
+uvec2 mul32s(int a,int b) {int hi,lo;imulExtended(a,b,hi,lo);return uvec2(uint(lo),uint(hi));}
+uvec2 mul32u(uint a,uint b) {uint hi,lo;umulExtended(a,b,hi,lo);return uvec2(lo,hi);}
+uvec2 mul64u(uvec2 a,uint b) {
+    uint h,l,h2,l2;umulExtended(a.x,b,h,l);umulExtended(a.y,b,h2,l2);
+    return uvec2(l,h+l2); // caller's explicit magnitude bound rules out overflow
+}
+uvec2 mul64Positive(uvec2 a,uint b) {
+    bool negative=(a.y&0x80000000u)!=0u;
+    uvec2 z=mul64u(negative?neg64(a):a,b);
+    return negative?neg64(z):z;
+}
+uvec2 rneUnsigned(uvec2 a,uint shift) {
+    if(shift==0u)return a;
+    if(shift>=64u)return uvec2(0u); // accepted values have magnitude < 2^63
+    uvec2 q;bool more,tie;
+    if(shift<32u){
+        q=uvec2((a.x>>shift)|(a.y<<(32u-shift)),a.y>>shift);
+        uint rem=a.x&((1u<<shift)-1u),halfway=1u<<(shift-1u);
+        more=rem>halfway;tie=rem==halfway;
+    }else if(shift==32u){
+        q=uvec2(a.y,0u);more=a.x>0x80000000u;tie=a.x==0x80000000u;
+    }else{
+        uint k=shift-32u,rem=a.y&((1u<<k)-1u),halfway=1u<<(k-1u);
+        q=uvec2(a.y>>k,0u);more=rem>halfway||(rem==halfway&&a.x!=0u);tie=rem==halfway&&a.x==0u;
+    }
+    return add64(q,uvec2(uint(more||(tie&&((q.x&1u)!=0u))),0u));
+}
+uvec2 rneSigned(uvec2 a,uint shift) {
+    bool negative=(a.y&0x80000000u)!=0u;
+    uvec2 q=rneUnsigned(negative?neg64(a):a,shift);
+    return negative?neg64(q):q;
+}
+bool fitsInt(uvec2 a) {return a.y==((a.x&0x80000000u)!=0u?0xffffffffu:0u);}
+uint plane(uint kind,uint bit,uint row){
+    #if INTEGER_MAC == 0 && DENSE_REFERENCE == 0
+    uint at=bit*32u+row;
+    if(kind==0u)return wr[at];if(kind==1u)return wc[at];
+    if(kind==2u)return xr[at];if(kind==3u)return xc[at];
+    if(kind==4u)return gr[at];return gc[at];
+#else
+    return 0u;
+#endif
+}
+int coefficient(uint kind,uint row,uint col,uint bits){
+#if DENSE_REFERENCE == 1
+    if(kind==0u)return int(mem[wo+row*n+col]);
+    if(kind==1u)return int(mem[wo+col*n+row]);
+    if(kind==2u)return int(mem[xo+row*n+col]);
+    if(kind==3u)return int(mem[xo+col*n+row]);
+    if(kind==4u)return int(mem[go+row*m+col]);
+    return int(mem[go+col*m+row]);
+#elif INTEGER_MAC == 1
+    if(kind==0u)return qw[row*n+col];
+    if(kind==1u)return qw[col*n+row];
+    if(kind==2u)return qx[row*n+col];
+    if(kind==3u)return qx[col*n+row];
+    if(kind==4u)return qgrad[row*m+col];
+    return qgrad[col*m+row];
+#else
+    uint u=0u;
+    for(uint bit=0u;bit<bits;++bit)u|=((plane(kind,bit,row)>>col)&1u)<<bit;
+    return int(u<<(32u-bits))>>int(32u-bits);
+#endif
+}
+uvec2 dotExact(uint ak,uint ar,uint ab,uint bk,uint br,uint bb,uint length){
+    uvec2 sum=uvec2(0u);
+#if DENSE_REFERENCE == 1 || INTEGER_MAC == 1
+    for(uint j=0u;j<length;++j)sum=add64(sum,mul32s(coefficient(ak,ar,j,ab),coefficient(bk,br,j,bb)));
+#else
+    // Combine equal significance first: at most ab+bb-1 wide additions,
+    // rather than one wide addition per AND/popcount pair.
+    int digits[2*MAX_BITS-1];
+    for(uint k=0u;k<ab+bb-1u;++k)digits[k]=0;
+    for(uint i=0u;i<ab;++i){uint aw=plane(ak,i,ar);
+        for(uint j=0u;j<bb;++j){
+            int count=bitCount(aw&plane(bk,j,br));
+            digits[i+j]+=((i==ab-1u)!=(j==bb-1u))?-count:count;
+        }
+    }
+    for(uint k=0u;k<ab+bb-1u;++k)sum=add64(sum,shiftedCount(digits[k],k));
+#endif
+    return sum;
+}
+void transposeAll(bool includeWX){
+#if DENSE_REFERENCE == 0 && INTEGER_MAC == 0
+    uint lid=gl_LocalInvocationID.x;
+    uint tw[MAX_BITS],tx[MAX_BITS],tg[MAX_BITS];
+    uint mask=0x55555555u;
+    for(uint step=1u;step<=16u;step<<=1u){
+        if(step==2u)mask=0x33333333u;if(step==4u)mask=0x0f0f0f0fu;
+        if(step==8u)mask=0x00ff00ffu;if(step==16u)mask=0x0000ffffu;
+        for(uint i=lid;i<uint(MAX_BITS)*32u;i+=64u){
+            uint idx=i/64u,partner=i^step;
+            bool upper=(i&step)!=0u;
+            if(includeWX){
+                tw[idx]=upper?((wc[i]&~mask)|((wc[partner]>>step)&mask)):((wc[i]&mask)|((wc[partner]&mask)<<step));
+                tx[idx]=upper?((xc[i]&~mask)|((xc[partner]>>step)&mask)):((xc[i]&mask)|((xc[partner]&mask)<<step));
+            }
+            tg[idx]=upper?((gc[i]&~mask)|((gc[partner]>>step)&mask)):((gc[i]&mask)|((gc[partner]&mask)<<step));
+        }
+        memoryBarrierShared();barrier();
+        for(uint i=lid;i<uint(MAX_BITS)*32u;i+=64u){
+            uint idx=i/64u;if(includeWX){wc[i]=tw[idx];xc[i]=tx[idx];}gc[i]=tg[idx];
+        }
+        memoryBarrierShared();barrier();
+    }
+#endif
+}
+void updateRow(uint row,bool upstreamValid){
+    uvec2 norm=uvec2(0u);
+    for(uint j=0u;j<n;++j){int a=coefficient(0u,row,j,bw);norm=add64(norm,mul32s(a,a));}
+    uint unit=1u<<(2u*sw),limit=(unit/100u)*81u+((unit%100u)*81u)/100u;
+    bool valid=norm.y==0u&&norm.x<=limit;
+    if(!valid)atomicOr(errors,2u);
+    uint gamma=0u;
+    if(valid){
+        uint delta=unit-norm.x;uvec2 sq=mul32u(delta,delta);
+        int gs=int(4u*sw)-14;
+        gamma=gs>=0?rneUnsigned(sq,uint(gs)).x:sq.x<<uint(-gs);
+    }
+    int vals[32];uint accepted=16u;
+    for(uint j=0u;j<n;++j)vals[j]=coefficient(0u,row,j,bw);
+    if(valid&&upstreamValid){
+        uint shift=16u+sx+sg+lr-sw;
+        for(uint bt=0u;bt<16u;++bt){
+            uvec2 candidateNorm=uvec2(0u);bool okay=true;
+            for(uint j=0u;j<n;++j){
+                uvec2 grad=read64(dwo+2u*(row*n+j));
+                uvec2 numerator=mul64Positive(grad,gamma);
+                if((flags&8u)!=0u)numerator=add64(numerator,read64(eo+2u*(row*n+j)));
+                uvec2 step=rneSigned(numerator,shift+bt);
+                uvec2 v=sub64(fromInt(coefficient(0u,row,j,bw)),step);
+                int z=int(v.x);vals[j]=z;
+                okay=okay&&fitsInt(v)&&z>=-(1<<int(bw-1u))&&z<(1<<int(bw-1u));
+                // If out of range, avoid summing a large invalid square.
+                if(z>=-(1<<int(bw-1u))&&z<(1<<int(bw-1u)))candidateNorm=add64(candidateNorm,mul32s(z,z));
+            }
+            if(okay&&candidateNorm.y==0u&&candidateNorm.x<=limit){accepted=bt;break;}
+        }
+    }
+    if(accepted==16u)for(uint j=0u;j<n;++j)vals[j]=coefficient(0u,row,j,bw);
+    if((flags&8u)!=0u){
+        for(uint j=0u;j<n;++j){
+            uint at=eo+2u*(row*n+j);uvec2 tail=uvec2(0u);
+            if(accepted==0u){
+                uvec2 numerator=add64(mul64Positive(read64(dwo+2u*(row*n+j)),gamma),read64(at));
+                int step=coefficient(0u,row,j,bw)-vals[j];
+                tail=sub64(numerator,shiftLeft64(fromInt(step),16u+sx+sg+lr-sw));
+            }
+            // A backtracked/rejected step deliberately resets feedback; the
+            // exact cumulative-residual invariant is asserted only for bt=0.
+            write64(at,tail);
+        }
+    }
+#if DENSE_REFERENCE == 1
+    for(uint j=0u;j<n;++j)mem[nwo+row*n+j]=uint(vals[j]);
+#else
+    for(uint bit=0u;bit<bw;++bit){uint word=0u;
+        for(uint j=0u;j<n;++j)word|=((uint(vals[j])>>bit)&1u)<<j;
+        mem[nwo+bit*m+row]=word;
+    }
+#endif
+    mem[mo+row]=gamma;mem[mo+m+row]=accepted;
+}
+int unpackCode(uint off,uint rows,uint row,uint col,uint bits){
+    uint u=0u;
+    for(uint bit=0u;bit<bits;++bit)u|=((mem[off+bit*rows+row]>>col)&1u)<<bit;
+    return int(u<<(32u-bits))>>int(32u-bits);
+}
+void main(){
+    uint job=gl_WorkGroupID.x,lid=gl_LocalInvocationID.x;
+    if(job>=p.y)return;
+    uint base=p.x+16u*job,cmd=mem[base],op=cmd&3u;
+    if(op==2u){
+        uint count=mem[base+1u],parts=mem[base+2u],list=mem[base+3u],outp=mem[base+4u];
+        for(uint i=lid;i<count;i+=64u){uvec2 total=uvec2(0u);
+            for(uint j=0u;j<parts;++j)total=add64(total,read64(mem[list+j]+2u*i));
+            write64(outp+2u*i,total);
+        }return;
+    }
+    bw=((cmd>>2u)&31u)+1u;bx=((cmd>>7u)&31u)+1u;bg=((cmd>>12u)&31u)+1u;
+    m=((cmd>>17u)&31u)+1u;n=((cmd>>22u)&31u)+1u;batch=((cmd>>27u)&31u)+1u;
+    wo=mem[base+1u];xo=mem[base+2u];go=mem[base+3u];yo=mem[base+4u];dxo=mem[base+5u];dwo=mem[base+6u];
+    to=mem[base+7u];nwo=mem[base+8u];mo=mem[base+9u];so=mem[base+10u];
+    uint scales=mem[base+11u];sw=scales&255u;sx=(scales>>8u)&255u;sg=(scales>>16u)&255u;lr=scales>>24u;flags=mem[base+12u];eo=mem[base+13u];
+    if(lid==0u)errors=0u;
+#if INTEGER_MAC == 1 && DENSE_REFERENCE == 0
+    for(uint i=lid;i<m*n;i+=64u)qw[i]=unpackCode(wo,m,i/n,i%n,bw);
+    for(uint i=lid;i<batch*n;i+=64u)qx[i]=unpackCode(xo,batch,i/n,i%n,bx);
+    for(uint i=lid;i<batch*m;i+=64u)qgrad[i]=op==0u?unpackCode(go,batch,i/m,i%m,bg):0;
+#elif DENSE_REFERENCE == 0
+    for(uint i=lid;i<uint(MAX_BITS)*32u;i+=64u){uint bit=i/32u,row=i%32u;
+        wr[i]=(bit<bw&&row<m)?mem[wo+bit*m+row]:0u;wc[i]=wr[i];
+        xr[i]=(bit<bx&&row<batch)?mem[xo+bit*batch+row]:0u;xc[i]=xr[i];
+        gr[i]=(op==0u&&bit<bg&&row<batch)?mem[go+bit*batch+row]:0u;gc[i]=gr[i];
+    }
+#endif
+    memoryBarrierShared();barrier();
+    for(uint i=lid;i<m*batch;i+=64u){
+        uvec2 value=dotExact(0u,i/batch,bw,2u,i%batch,bx,n);
+        if((flags&4u)!=0u&&(value.y&0x80000000u)!=0u)value=uvec2(0u);
+        write64(yo+2u*i,value);
+    }
+    memoryBarrierBuffer();barrier();
+    if(op==1u||(flags&4u)!=0u){
+        // dL/dy for a squared-error test objective, then ONE declared upstream
+        // quantization. No hidden clipping. Failure stops the weight update.
+        if(lid<batch){
+            int qg[32];
+            for(uint i=0u;i<m;++i){
+                uvec2 yvalue=read64(yo+2u*(i*batch+lid));
+                uvec2 pred=rneSigned(yvalue,sw+sx-sg);
+                uvec2 diff=op==1u?sub64(pred,fromInt(int(mem[to+lid*m+i]))):fromInt(coefficient(4u,lid,i,bg));
+                if((flags&4u)!=0u&&yvalue==uvec2(0u))diff=uvec2(0u);
+                int g=int(diff.x);
+                bool okay=fitsInt(diff)&&g>=-(1<<int(bg-1u))&&g<(1<<int(bg-1u));
+                if(!okay)atomicOr(errors,1u);
+                qg[i]=okay?g:0;
+#if DENSE_REFERENCE == 1
+                mem[go+lid*m+i]=uint(qg[i]);
+#elif INTEGER_MAC == 1
+                qgrad[lid*m+i]=qg[i];
+#endif
+            }
+#if DENSE_REFERENCE == 0
+            for(uint bit=0u;bit<uint(MAX_BITS);++bit){uint word=0u;
+                if(bit<bg)for(uint i=0u;i<m;++i)word|=((uint(qg[i])>>bit)&1u)<<i;
+#if INTEGER_MAC == 0
+                gr[bit*32u+lid]=word;gc[bit*32u+lid]=word;
+#endif
+                if(bit<bg)mem[go+bit*batch+lid]=word;
+            }
+#endif
+        }
+    }
+    memoryBarrierBuffer();memoryBarrierShared();barrier();
+    transposeAll(true);
+    for(uint i=lid;i<n*batch;i+=64u)write64(dxo+2u*i,dotExact(1u,i/batch,bw,4u,i%batch,bg,m));
+    for(uint i=lid;i<m*n;i+=64u)write64(dwo+2u*i,dotExact(5u,i/n,bg,3u,i%n,bx,batch));
+    memoryBarrierBuffer();memoryBarrierShared();barrier();
+    bool upstreamValid=errors==0u;
+    barrier();
+    if((flags&1u)!=0u&&lid<m)updateRow(lid,upstreamValid);
+    memoryBarrierBuffer();memoryBarrierShared();barrier();
+    if(lid==0u){
+        mem[so]=errors;
+        if((flags&3u)==3u&&errors==0u){mem[base+1u]=nwo;mem[base+8u]=wo;}
+    }
+}

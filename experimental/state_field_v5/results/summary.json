@@ -1,0 +1,242 @@
+{
+  "date": "2026-09-09",
+  "base_commit": "1d5e34f30234313f65c2720c489169340c17daf3",
+  "passed": true,
+  "device": {
+    "vendor": "Google Inc. (Google)",
+    "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver-5.0.0)",
+    "version": "OpenGL ES 3.1 (ANGLE 2.1 git hash: unknown hash)",
+    "glsl": "OpenGL ES GLSL ES 3.10 (ANGLE 2.1 git hash: unknown hash)",
+    "software_renderer": true,
+    "physical_gpu_measured": false
+  },
+  "contract": "Exact integer contractions and both VJPs after explicit 2..16-bit quantization. Not unchanged FP32 or derivatives of rounding.",
+  "cpu": {
+    "passed": true,
+    "packed_unpacked_codes": 23595,
+    "bitserial_integer_dots": 480,
+    "commands": 60,
+    "nearest_even_checks": 3904,
+    "poincare_metric_checks": 1598,
+    "max_metric_factor_error": 7.625669240951538e-06,
+    "poincare_isometry_checks": 250,
+    "malformed_rejected": 4,
+    "scope": "Synthetic matrices; quantization bound, not model-level task accuracy"
+  },
+  "shader": {
+    "passed": true,
+    "compiled_programs": 9,
+    "exact_integer_outputs": 137826,
+    "fused_job_cases": 90,
+    "max_absolute_accumulator": 34359738368,
+    "includes_accumulators_larger_than_i32": true,
+    "exact_metric_and_update_values": 1150,
+    "max_backtracking": 3,
+    "one_dispatch_local_training": true,
+    "upstream_overflow_rejected": true,
+    "exact_reduced_int64_values": 100,
+    "arithmetic_contract": "Every reported integer equals the independent int64 or Python-integer oracle. Not the derivative of rounding."
+  },
+  "large_rectangular_exact_outputs": 17878,
+  "synthetic_training": {
+    "steps": 800,
+    "dispatches_per_step": 1,
+    "state_width": [
+      8,
+      8
+    ],
+    "trainable_quantized_weights": 64,
+    "weight_bits": 12,
+    "input_bits": 8,
+    "upstream_bits": 12,
+    "initial_loss": 0.00598701132662427,
+    "final_loss": 1.101466295949649e-08,
+    "main_arena_bytes": 9604,
+    "new_allocations_inside_loop": 0,
+    "first_eight_updates_equal_independent_cpu": true
+  },
+  "feedback_vs_no_feedback_final_loss_ratio": 2301.0455793406686,
+  "packed_matrix_bytes": [
+    {
+      "bits": 4,
+      "raw_f32_bytes": 262144,
+      "stored_bytes": 32792,
+      "ratio": 7.9941449133935105,
+      "quantized_codes_bit_exact": true
+    },
+    {
+      "bits": 8,
+      "raw_f32_bytes": 262144,
+      "stored_bytes": 65560,
+      "ratio": 3.998535692495424,
+      "quantized_codes_bit_exact": true
+    },
+    {
+      "bits": 12,
+      "raw_f32_bytes": 262144,
+      "stored_bytes": 98328,
+      "ratio": 2.6660157839069236,
+      "quantized_codes_bit_exact": true
+    },
+    {
+      "bits": 16,
+      "raw_f32_bytes": 262144,
+      "stored_bytes": 131096,
+      "ratio": 1.9996338561054494,
+      "quantized_codes_bit_exact": true
+    }
+  ],
+  "digits": {
+    "dataset": "sklearn load_digits (UCI optical digits copy)",
+    "sklearn_version": "1.8.0",
+    "seed": 5026,
+    "train_samples": 1347,
+    "test_samples": 450,
+    "reference_f32_accuracy": 0.9533333333333334,
+    "includes_intercept": true,
+    "records": [
+      {
+        "weight_bits": 4,
+        "activation_bits": 6,
+        "weight_fractional_bits": 1,
+        "f32_tensor_bytes": 2600,
+        "stored_bytes_including_header": 504,
+        "compression_ratio": 5.158730158730159,
+        "test_accuracy": 0.9266666666666666,
+        "top1_agreement": 0.9711111111111111,
+        "max_logit_error": 1.7100040295044892,
+        "max_deterministic_logit_bound": 6.921875,
+        "test_cases_with_margin_certificate": 0,
+        "test_cases": 450,
+        "exact_integer_logits": 4500
+      },
+      {
+        "weight_bits": 8,
+        "activation_bits": 6,
+        "weight_fractional_bits": 5,
+        "f32_tensor_bytes": 2600,
+        "stored_bytes_including_header": 984,
+        "compression_ratio": 2.6422764227642275,
+        "test_accuracy": 0.9533333333333334,
+        "top1_agreement": 1.0,
+        "max_logit_error": 0.08857130212709308,
+        "max_deterministic_logit_bound": 0.4326171875,
+        "test_cases_with_margin_certificate": 430,
+        "test_cases": 450,
+        "exact_integer_logits": 4500
+      },
+      {
+        "weight_bits": 12,
+        "activation_bits": 6,
+        "weight_fractional_bits": 9,
+        "f32_tensor_bytes": 2600,
+        "stored_bytes_including_header": 1464,
+        "compression_ratio": 1.7759562841530054,
+        "test_accuracy": 0.9533333333333334,
+        "top1_agreement": 1.0,
+        "max_logit_error": 0.006363413238432258,
+        "max_deterministic_logit_bound": 0.02703857421875,
+        "test_cases_with_margin_certificate": 448,
+        "test_cases": 450,
+        "exact_integer_logits": 4500
+      },
+      {
+        "weight_bits": 16,
+        "activation_bits": 6,
+        "weight_fractional_bits": 13,
+        "f32_tensor_bytes": 2600,
+        "stored_bytes_including_header": 1944,
+        "compression_ratio": 1.337448559670782,
+        "test_accuracy": 0.9533333333333334,
+        "top1_agreement": 1.0,
+        "max_logit_error": 0.0004222055431455374,
+        "max_deterministic_logit_bound": 0.001689910888671875,
+        "test_cases_with_margin_certificate": 450,
+        "test_cases": 450,
+        "exact_integer_logits": 4500
+      }
+    ],
+    "scope": "Single trained linear classifier conversion; reference fit uses floating point; not Riemannian full-model training or LLM accuracy"
+  },
+  "benchmark": {
+    "scope": "dispatch + completion; excludes compile, allocation, upload and readback; 11 warm samples, median",
+    "reference": "Simple same-output shader, not optimized hardware GEMM. All three derivatives/outputs counted.",
+    "records": [
+      {
+        "bits": 4,
+        "jobs": 1,
+        "median_ms": {
+          "bitplane_AND_popcount": 1.368636,
+          "packed_integer_MAC": 1.01648,
+          "dense_int32_extended_product": 1.046974
+        }
+      },
+      {
+        "bits": 4,
+        "jobs": 16,
+        "median_ms": {
+          "bitplane_AND_popcount": 8.334204,
+          "packed_integer_MAC": 6.741424,
+          "dense_int32_extended_product": 7.108328
+        }
+      },
+      {
+        "bits": 8,
+        "jobs": 1,
+        "median_ms": {
+          "bitplane_AND_popcount": 2.616638,
+          "packed_integer_MAC": 1.100013,
+          "dense_int32_extended_product": 0.825856
+        }
+      },
+      {
+        "bits": 8,
+        "jobs": 16,
+        "median_ms": {
+          "bitplane_AND_popcount": 23.73954,
+          "packed_integer_MAC": 6.994441,
+          "dense_int32_extended_product": 5.674271
+        }
+      },
+      {
+        "bits": 12,
+        "jobs": 1,
+        "median_ms": {
+          "bitplane_AND_popcount": 7.642014,
+          "packed_integer_MAC": 1.202927,
+          "dense_int32_extended_product": 0.792483
+        }
+      },
+      {
+        "bits": 12,
+        "jobs": 16,
+        "median_ms": {
+          "bitplane_AND_popcount": 34.031163,
+          "packed_integer_MAC": 7.834755,
+          "dense_int32_extended_product": 9.943354
+        }
+      },
+      {
+        "bits": 16,
+        "jobs": 1,
+        "median_ms": {
+          "bitplane_AND_popcount": 7.993594,
+          "packed_integer_MAC": 1.196214,
+          "dense_int32_extended_product": 0.8437
+        }
+      },
+      {
+        "bits": 16,
+        "jobs": 16,
+        "median_ms": {
+          "bitplane_AND_popcount": 62.26515,
+          "packed_integer_MAC": 14.439408,
+          "dense_int32_extended_product": 9.577196
+        }
+      }
+    ]
+  },
+  "publication_scope": "Git addition contains shader, goals, mathematical specification and evidence. New Python helpers and old EGL adapter are present in the local implementation archive, not published to GitHub in this commit; a connector security decision blocked a helper-file write. No alternative upload of blocked files was attempted.",
+  "no_pretrained_llm_claim": true,
+  "no_physical_gpu_speedup_claim": true
+}
